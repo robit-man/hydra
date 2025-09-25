@@ -35,6 +35,7 @@ body {
   background-color: black;
   margin: 0;
   color: var(--text);
+  touch-action: none;
   font: 14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial
 }
 
@@ -45,27 +46,36 @@ body::after {
   z-index: -1;
   background: black;
 }
-main{
+
+main {
   background-color: var(--bg);
 }
+
 .hidden {
   display: none !important;
 }
 
-#nodeMenuList button:hover::after{
-  content:'+';
-  margin-left:auto;
+#nodeMenuList button:hover::after {
+  content: '+';
+  margin-left: auto;
 }
 
-.icon{line-height:1;height:1.5rem;margin:-4px;width:1.5rem;}
-.icon.inverted{
-  filter:invert(1)
+.icon {
+  line-height: 1;
+  height: 1.5rem;
+  margin: -4px;
+  width: 1.5rem;
 }
+
+.icon.inverted {
+  filter: invert(1)
+}
+
 .node-row {
   display: flex;
   flex-flow: row;
   gap: 0.5rem;
-  pointer-events: all!important;
+  pointer-events: all !important;
 }
 
 header {
@@ -79,7 +89,7 @@ header {
   display: flex;
   gap: 12px;
   align-items: center;
-  pointer-events: all!important;
+  pointer-events: all !important;
 }
 
 .menu-row {
@@ -139,7 +149,7 @@ header {
   max-width: calc(100vw - 350px);
   opacity: 0.2;
   width: auto;
-  user-select: none!important;
+  user-select: none !important;
 }
 
 .logdata #wiresBox {
@@ -220,7 +230,10 @@ header {
     display: none;
   }
 
-.router-download{display: none;}
+  .router-download {
+    display: none;
+  }
+
   .logdata {
     position: absolute;
     bottom: 0px;
@@ -370,9 +383,11 @@ h2 {
   width: 100%;
   justify-content: flex-start;
 }
+
 .node-menu-list button:active {
   width: 100%;
-  background:white;color:black;
+  background: white;
+  color: black;
   justify-content: flex-start;
 }
 
@@ -478,18 +493,22 @@ button.danger {
   padding: 10px;
   border-radius: 4px
 }
+
 .bubble[data-state="ready"] {
   border-color: rgba(125, 255, 176, .55);
   box-shadow: inset 0 0 0 1px rgba(125, 255, 176, .18);
 }
+
 .bubble[data-state="error"] {
   border-color: rgba(255, 107, 107, .6);
   box-shadow: inset 0 0 0 1px rgba(255, 107, 107, .16);
 }
+
 .bubble[data-state="loading"] {
   border-color: rgba(249, 200, 70, .55);
   box-shadow: inset 0 0 0 1px rgba(249, 200, 70, .14);
 }
+
 .bubble.busy::after {
   content: '⏳';
   margin-left: 6px;
@@ -499,6 +518,7 @@ button.danger {
 .node[data-busy="busy"] .title {
   color: var(--warn);
 }
+
 .node[data-busy="busy"] {
   box-shadow: inset 0 0 0 1px rgba(249, 200, 70, .15);
 }
