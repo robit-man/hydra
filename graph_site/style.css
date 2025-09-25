@@ -15,7 +15,7 @@
 }
 
 * {
-  box-sizing: border-box
+  box-sizing: border-box;
 }
 
 *::-webkit-scrollbar {
@@ -457,6 +457,10 @@ button {
   cursor: pointer
 }
 
+button:hover {
+  opacity: 0.8;
+}
+
 button.secondary {
   background: white;
   color: #000000
@@ -609,7 +613,7 @@ button.danger {
   position: absolute;
   inset: 0;
   z-index: 2;
-  pointer-events: none
+  pointer-events: none;
 }
 
 /* Node */
@@ -744,6 +748,8 @@ button.danger {
   padding: 8px;
   min-height: 54px;
   white-space: pre-wrap;
+  overflow: auto;
+  line-break: anywhere;
 }
 
 .dm-address-row {
