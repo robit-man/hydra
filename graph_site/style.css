@@ -52,6 +52,15 @@ main{
   display: none !important;
 }
 
+#nodeMenuList button:hover::after{
+  content:'+';
+  margin-left:auto;
+}
+
+.icon{line-height:1;height:1.5rem;margin:-4px;width:1.5rem;}
+.icon.inverted{
+  filter:invert(1)
+}
 .node-row {
   display: flex;
   flex-flow: row;
@@ -211,7 +220,7 @@ header {
     display: none;
   }
 
-
+.router-download{display: none;}
   .logdata {
     position: absolute;
     bottom: 0px;
@@ -351,7 +360,7 @@ h2 {
   min-width: 170px;
   padding: 10px;
   border-radius: 12px;
-  background: black;
+  backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, .12);
   box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
   z-index: 40;
@@ -359,6 +368,11 @@ h2 {
 
 .node-menu-list button {
   width: 100%;
+  justify-content: flex-start;
+}
+.node-menu-list button:active {
+  width: 100%;
+  background:white;color:black;
   justify-content: flex-start;
 }
 
@@ -421,7 +435,9 @@ button {
   color: #000000;
   border: 0;
   border-radius: 8px;
-  padding: 9px 12px;
+  line-height: 1;
+  display: flex;
+  padding: 8px 8px;
   font-weight: 700;
   cursor: pointer
 }
