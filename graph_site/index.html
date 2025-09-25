@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Hydra</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+</head>
+
+<body>
+    <main>
+
+        <!-- GRAPH WORKSPACE -->
+        <section class="span-12" id="graphCard">
+            <div id="workspaceWrap" class="">
+                <div class="menu-row">
+                    <div class="node-row">
+                        <div class="node-menu">
+                            <button id="nodeMenuToggle" class="secondary">＋</button>
+                            <div id="nodeMenuList" class="node-menu-list hidden"></div>
+                        </div>
+                        <button id="exportGraph" class="ghost">Export</button>
+                        <button id="importGraph" class="ghost">Import</button>
+                        <button id="syncQrButton" class="ghost">QR</button>
+                    </div>
+                    <div class="header-actions">
+                        <a href="/router.py" download="router.py">
+                            <button>Router</button>
+                        </a>
+                        <button id="transportToggle" class="transport-btn">NKN</button>
+                    </div>
+                </div>
+                <svg id="linksSvg" width="100%" height="100%" preserveAspectRatio="none"></svg>
+                <div id="workspace">
+                    <div id="wsCanvas"  class="dot-bg"></div>
+                </div>
+                <div class="logdata">
+                    <div id="wiresBox" class="code" style="min-height:54px;"></div>
+                    <div id="logBox" class="code" style="min-height:120px;">(logs)</div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- SETTINGS MODAL (dynamic contents) -->
+    <div id="settingsModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="closeBackdrop"></div>
+        <div class="modal-panel">
+            <div class="modal-head">
+                <div class="modal-title">Node Settings</div>
+                <button class="ghost" id="closeSettings">✕</button>
+            </div>
+            <form id="settingsForm">
+                <div id="settingsFields" class="form-grid"></div>
+                <div class="help" id="settingsHelp" style="margin-top:6px;">—</div>
+                <div class="row" style="margin-top:12px;">
+                    <button id="saveSettings">Save to Node</button>
+                    <button class="ghost" id="cancelSettings" type="button">Close</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="qrModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="qrBackdrop"></div>
+        <div class="modal-panel" style="max-width:420px;">
+            <div class="modal-head">
+                <div class="modal-title">Scan NKN Address</div>
+                <button class="ghost" id="qrClose">✕</button>
+            </div>
+            <div class="qr-body">
+                <video id="qrVideo" autoplay playsinline muted></video>
+                <canvas id="qrCanvas" width="0" height="0"></canvas>
+                <div class="help">Align the QR code within the frame. The scanned value will populate the field
+                    automatically.</div>
+                <button class="ghost" type="button" id="qrStop">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="nknDmInviteModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="nknDmInviteBackdrop"></div>
+        <div class="modal-panel" style="max-width:360px;">
+            <div class="modal-head">
+                <div class="modal-title">NKN Connection Request</div>
+                <button class="ghost" id="nknDmInviteClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="help" data-nkndm-invite-text>—</div>
+                <div class="row" style="margin-top:12px;">
+                    <button id="nknDmInviteAccept" class="secondary">Accept</button>
+                    <button id="nknDmInviteDecline" class="ghost">Decline</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="syncQrModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="syncQrBackdrop"></div>
+        <div class="modal-panel" style="max-width:380px;">
+            <div class="modal-head">
+                <div class="modal-title">Workspace Share QR</div>
+                <button class="ghost" id="syncQrClose">✕</button>
+            </div>
+            <div class="modal-body" style="display:flex;flex-direction:column;align-items:center;gap:16px;">
+                <canvas id="syncQrCanvas" width="0" height="0"></canvas>
+                <div class="help" id="syncQrHelp" style="text-align:center;max-width:320px;">
+                    Scan this code on another device to send them your current workspace.
+                </div>
+                <div class="muted" id="syncQrLink" style="word-break:break-all;text-align:center;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="syncShareModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="syncShareBackdrop"></div>
+        <div class="modal-panel" style="max-width:360px;">
+            <div class="modal-head">
+                <div class="modal-title">Share Workspace</div>
+                <button class="ghost" id="syncShareClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="help" id="syncShareMessage">—</div>
+                <div class="row" style="margin-top:16px;">
+                    <button id="syncShareYes" class="secondary">Yes</button>
+                    <button id="syncShareNo" class="ghost">No</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="syncReceiveModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="syncReceiveBackdrop"></div>
+        <div class="modal-panel" style="max-width:360px;">
+            <div class="modal-head">
+                <div class="modal-title">Incoming Workspace</div>
+                <button class="ghost" id="syncReceiveClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="help" id="syncReceiveMessage">—</div>
+                <div class="row" style="margin-top:16px;">
+                    <button id="syncReceiveYes" class="secondary">Accept</button>
+                    <button id="syncReceiveNo" class="ghost">Decline</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import QRCode from "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm";
+        window.QRCode = QRCode;
+    </script>
+    <script>
+        (function ensureQR() {
+            if (window.QRCode && typeof window.QRCode.toCanvas === 'function') return;
+            var s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js';
+            document.head.appendChild(s);
+        })();
+    </script>
+    <script type="module" src="js/main.js"></script>
+</body>
+
+</html>
