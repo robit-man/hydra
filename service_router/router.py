@@ -29,7 +29,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, IO, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, IO, List, Optional, Tuple
+from collections import deque
 
 # ──────────────────────────────────────────────────────────────
 # Lightweight venv bootstrap so the router stays self-contained
@@ -93,9 +94,33 @@ DEFAULT_TARGETS = {
     "ollama": "http://127.0.0.1:11434",
     "asr": "http://127.0.0.1:8126",
     "tts": "http://127.0.0.1:8123",
+    "mcp": "http://127.0.0.1:9003",
+}
+
+SERVICE_TARGETS = {
+    "whisper_asr": {
+        "target": "asr",
+        "aliases": ["whisper_asr", "asr", "whisper"],
+    },
+    "piper_tts": {
+        "target": "tts",
+        "aliases": ["piper_tts", "tts", "piper"],
+    },
+    "ollama_farm": {
+        "target": "ollama",
+        "aliases": ["ollama_farm", "ollama", "llm"],
+    },
+    "mcp_server": {
+        "target": "mcp",
+        "aliases": ["mcp_server", "mcp", "context"],
+    },
 }
 
 DAEMON_SENTINEL = Path.home() / ".unified_router_daemon.json"
+
+
+def generate_seed_hex() -> str:
+    return secrets.token_hex(32)
 
 
 class DaemonManager:
@@ -739,10 +764,28 @@ LOGGER.setLevel(logging.INFO)
 
 
 def _default_config() -> dict:
-    seeds = [secrets.token_hex(32) for _ in range(3)]
+    service_relays = {}
+    nodes = []
+    assignments = {}
+    now = int(time.time())
+    targets = dict(DEFAULT_TARGETS)
+
+    for definition in ServiceWatchdog.DEFINITIONS:
+        svc = definition.name
+        seed = generate_seed_hex()
+        name = Router._relay_name_static(svc, seed)
+        relay_entry = {
+            "seed_hex": seed.lower().replace("0x", ""),
+            "name": name,
+            "created_at": now,
+        }
+        service_relays[svc] = relay_entry
+        nodes.append({"name": name, "seed_hex": relay_entry["seed_hex"]})
+        assignments[svc] = name
+
     return {
         "schema": 1,
-        "targets": DEFAULT_TARGETS,
+        "targets": targets,
         "http": {
             "workers": 4,
             "max_body_b": 2 * 1024 * 1024,
@@ -761,16 +804,9 @@ def _default_config() -> dict:
             "self_probe_ms": 12000,
             "self_probe_fails": 3,
         },
-        "nodes": [
-            {"name": "relay-A", "seed_hex": seeds[0]},
-            {"name": "relay-B", "seed_hex": seeds[1]},
-            {"name": "relay-C", "seed_hex": seeds[2]},
-        ],
-        "service_assignments": {
-            "piper_tts": "relay-A",
-            "whisper_asr": "relay-B",
-            "ollama_farm": "relay-C",
-        },
+        "service_relays": service_relays,
+        "nodes": nodes,
+        "service_assignments": assignments,
     }
 
 
@@ -938,6 +974,7 @@ class UnifiedUI:
         self.qr_cycle_lines: List[str] = []
         self.qr_next_ts: float = 0.0
         self.qr_locked: bool = False
+        self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=5)
 
     def add_node(self, node_id: str, name: str):
         self.nodes.setdefault(node_id, {
@@ -991,10 +1028,13 @@ class UnifiedUI:
                 target["out"] += 1
             elif kind == "ERR":
                 target["err"] += 1
+        ts = time.strftime("%H:%M:%S")
+        source = target.get("name") if target else node_id
+        self.activity.append((ts, source or node_id, kind, msg))
         if self.enabled:
-            self.events.put((node_id, kind, msg, time.strftime("%H:%M:%S")))
+            self.events.put((node_id, kind, msg, ts))
         else:
-            print(f"[{time.strftime('%H:%M:%S')}] {node_id:<8} {kind:<3} {msg}")
+            print(f"[{ts}] {source:<8} {kind:<3} {msg}")
 
     def run(self):
         if not self.enabled:
@@ -1080,6 +1120,10 @@ class UnifiedUI:
                     attr = header_attr
                 if rtype == "section":
                     attr = section_attr
+                if rtype in ("activity", "activity_header"):
+                    attr = node_attr
+                    if rtype == "activity_header":
+                        attr |= curses.A_BOLD
                 prefix = ""
                 if row.get("selectable"):
                     prefix = "• " if (selected_row and row is selected_row) else "  "
@@ -1142,36 +1186,47 @@ class UnifiedUI:
 
     def _build_rows(self) -> List[dict]:
         rows: List[dict] = []
-        rows.append({"type": "header", "text": "NKN Endpoints", "selectable": False})
-        for node_id, data in sorted(self.nodes.items()):
-            addr = data.get("addr") or "(awaiting bridge ready)"
-            status = data.get("state")
-            line = f"{data['name']}: {addr}"
-            rows.append({"type": "node", "id": node_id, "text": line, "selectable": True})
-            stats = f"   status:{status}  in:{data.get('in',0)} out:{data.get('out',0)} err:{data.get('err',0)} queue:{data.get('queue',0)}"
-            rows.append({"type": "info", "text": stats, "selectable": False})
-            started = data.get("started") or time.time()
-            duration = max(1.0, time.time() - started)
-            total = max(0, data.get("in", 0) + data.get("out", 0))
-            rate = total / duration
-            bar_len = min(40, int(rate * 4))
-            bar = "█" * bar_len + "░" * (40 - bar_len)
-            thr_line = f"   throughput {rate:.2f} req/s   [{bar}]"
-            rows.append({"type": "info", "text": thr_line, "selectable": False})
-
-        rows.append({"type": "separator", "text": "", "selectable": False})
         rows.append({"type": "section", "text": "Services", "selectable": False})
         for name, info in sorted(self.services.items()):
-            assigned = info.get("assigned_node") or "—"
-            addr = info.get("assigned_addr") or "—"
+            assigned = info.get("assigned_node") or ""
+            addr = info.get("assigned_addr") or ""
             status = info.get("status") or ("running" if info.get("running") else (info.get("last_error") or "stopped"))
             term = "yes" if info.get("terminal_alive") else "no"
-            line = f"{name} → node:{assigned}  addr:{addr}  status:{status}  terminal:{term}"
-            rows.append({"type": "service", "id": name, "text": line, "selectable": True})
+            identifier = self._service_identifier(addr, assigned)
+            summary = f"{name:<18} {identifier:<20} status:{status:<10} term:{term}"
+            rows.append({"type": "service", "id": name, "text": summary.rstrip(), "selectable": True})
 
         rows.append({"type": "separator", "text": "", "selectable": False})
         rows.append({"type": "daemon", "id": "daemon", "text": "Daemon controls (Enter)", "selectable": True})
+
+        rows.append({"type": "separator", "text": "", "selectable": False})
+        rows.append({"type": "activity_header", "text": "Service Activity", "selectable": False})
+        if self.activity:
+            for ts, source, kind, message in reversed(self.activity):
+                line = f"[{ts}] {source} {kind}: {message}"
+                rows.append({"type": "activity", "text": line, "selectable": False})
+        else:
+            rows.append({"type": "activity", "text": "(no recent activity)", "selectable": False})
         return rows
+
+    @staticmethod
+    def _extract_identifier_segment(value: str) -> str:
+        if not value:
+            return ""
+        segment = value.strip()
+        if "relay-" in segment:
+            segment = segment.split("relay-")[-1]
+        for sep in (":", "@"):
+            if sep in segment:
+                segment = segment.split(sep)[-1]
+        return segment
+
+    def _service_identifier(self, addr: str, assigned: str) -> str:
+        for candidate in (addr, assigned):
+            segment = self._extract_identifier_segment(candidate)
+            if segment:
+                return segment
+        return "—"
 
     def _handle_enter(self, stdscr, row: dict) -> None:
         row_type = row.get("type")
@@ -1613,14 +1668,18 @@ def req_from_asr_events(msg: dict) -> dict:
 class RelayNode:
     def __init__(self, node_cfg: dict, global_cfg: dict, ui: UnifiedUI,
                  assignment_lookup: Optional[Callable[[str], Tuple[Optional[str], Optional[str]]]],
-                 address_callback: Optional[Callable[[str, Optional[str]], None]]):
+                 address_callback: Optional[Callable[[str, Optional[str]], None]],
+                 rate_limit_callback: Optional[Callable[[str, str], bool]] = None):
         self.cfg = node_cfg
         self.global_cfg = global_cfg
         self.ui = ui
         self.node_id = node_cfg.get("name") or node_cfg.get("id") or secrets.token_hex(4)
         self.ui.add_node(self.node_id, self.node_id)
-        self.targets = global_cfg.get("targets", {}).copy()
-        self.targets.update(node_cfg.get("targets") or {})
+        explicit_targets = node_cfg.get("targets") or {}
+        if explicit_targets:
+            self.targets = {k: v for k, v in explicit_targets.items() if v}
+        else:
+            self.targets = global_cfg.get("targets", {}).copy()
         http_cfg = global_cfg.get("http", {})
         self.workers_count = int(node_cfg.get("workers") or http_cfg.get("workers") or 4)
         self.max_body = int(node_cfg.get("max_body_b") or http_cfg.get("max_body_b") or (2 * 1024 * 1024))
@@ -1635,19 +1694,33 @@ class RelayNode:
         self.jobs: "queue.Queue[dict]" = queue.Queue()
         self.assignment_lookup = assignment_lookup or self._default_assignment_lookup
         self.address_callback = address_callback or (lambda _node, _addr: None)
+        self.rate_limit_callback = rate_limit_callback
+        self.primary_service = node_cfg.get("primary_service") or self.node_id
+        aliases = node_cfg.get("aliases") or []
+        alias_map = {alias.lower(): self.primary_service for alias in aliases}
+        alias_map[self.primary_service] = self.primary_service
+        if not alias_map:
+            alias_map = {
+                "asr": "whisper_asr",
+                "whisper": "whisper_asr",
+                "whisper_asr": "whisper_asr",
+                "tts": "piper_tts",
+                "piper": "piper_tts",
+                "piper_tts": "piper_tts",
+                "ollama": "ollama_farm",
+                "llm": "ollama_farm",
+                "ollama_farm": "ollama_farm",
+                "mcp": "mcp_server",
+                "context": "mcp_server",
+                "mcp_server": "mcp_server",
+            }
+        self.alias_map = alias_map
         self.current_address: Optional[str] = None
-        self.alias_map = {
-            "asr": "whisper_asr",
-            "whisper": "whisper_asr",
-            "tts": "piper_tts",
-            "piper": "piper_tts",
-            "ollama": "ollama_farm",
-            "llm": "ollama_farm",
-            "mcp": "mcp_server",
-            "context": "mcp_server",
-        }
         self.bridge = self._build_bridge()
         self.workers: list[threading.Thread] = []
+        self.rate_limit_since: Optional[float] = None
+        self.rate_limit_hits: Deque[float] = deque(maxlen=64)
+        self.last_rate_limit: Optional[float] = None
 
     # lifecycle -------------------------------------------------
     def start(self):
@@ -1872,11 +1945,45 @@ class RelayNode:
 
         if want_stream:
             resp = self._http_request_with_retry(session, method, url, stream=True, **params)
+            if resp.status_code == 429:
+                self._register_rate_limit_hit()
+                self._send_simple_response(src, rid, resp)
+                return
+            self._reset_rate_limit()
             stream_mode = self._infer_stream_mode(stream_mode, resp)
             self._handle_stream(src, rid, resp, stream_mode)
             return
 
         resp = self._http_request_with_retry(session, method, url, **params)
+        self._handle_response_status(resp.status_code)
+        self._send_simple_response(src, rid, resp)
+
+    def _handle_response_status(self, status_code: int) -> None:
+        if status_code == 429:
+            self._register_rate_limit_hit()
+        else:
+            self._reset_rate_limit()
+
+    def _register_rate_limit_hit(self) -> None:
+        now = time.time()
+        if self.rate_limit_since is None:
+            self.rate_limit_since = now
+        self.last_rate_limit = now
+        self.rate_limit_hits.append(now)
+        while self.rate_limit_hits and now - self.rate_limit_hits[0] > 60.0:
+            self.rate_limit_hits.popleft()
+        if self.rate_limit_since and (now - self.rate_limit_since) >= 60.0:
+            if self.rate_limit_callback and self.rate_limit_callback(self.primary_service, self.node_id):
+                self.rate_limit_since = None
+                self.rate_limit_hits.clear()
+
+    def _reset_rate_limit(self) -> None:
+        if self.rate_limit_since is not None:
+            self.rate_limit_since = None
+            self.rate_limit_hits.clear()
+            self.last_rate_limit = None
+
+    def _send_simple_response(self, src: str, rid: str, resp: requests.Response) -> None:
         raw = resp.content or b""
         truncated = False
         if len(raw) > self.max_body:
@@ -2082,17 +2189,26 @@ class RelayNode:
 # Router supervisor
 # ──────────────────────────────────────────────────────────────
 class Router:
+    @staticmethod
+    def _service_slug_static(service: str) -> str:
+        slug = ''.join(ch if ch.isalnum() else '-' for ch in service.lower())
+        slug = '-'.join(filter(None, slug.split('-')))
+        return slug or 'relay'
+
+    @classmethod
+    def _relay_name_static(cls, service: str, seed_hex: str) -> str:
+        slug = cls._service_slug_static(service)
+        ident = (seed_hex or '').lower().replace('0x', '')
+        if ident:
+            ident = ident[:8]
+        return f"{slug}-relay-{ident}" if ident else f"{slug}-relay"
+
     def __init__(self, cfg: dict, use_ui: bool):
         self.cfg = cfg
         self.use_ui = use_ui
         self.ui = UnifiedUI(use_ui)
         self.ui.set_action_handler(self.handle_ui_action)
         ensure_bridge()
-
-        # Ensure node names exist for assignment mapping
-        for idx, node_cfg in enumerate(self.cfg.get("nodes", [])):
-            if not node_cfg.get("name"):
-                node_cfg["name"] = node_cfg.get("id") or f"relay-{idx+1}"
 
         self.watchdog = ServiceWatchdog(BASE_DIR)
         self.watchdog.ensure_sources()
@@ -2102,9 +2218,12 @@ class Router:
 
         self.assignment_lock = threading.Lock()
         self.config_dirty = False
+        self.rate_limit_state: Dict[str, dict] = {}
+        self.service_relays = self._ensure_service_relays()
         self.service_assignments = self._init_assignments()
 
         self.nodes: List[RelayNode] = []
+        self.service_nodes: Dict[str, RelayNode] = {}
         self.node_map: Dict[str, RelayNode] = {}
         self.node_addresses: Dict[str, Optional[str]] = {}
 
@@ -2115,10 +2234,11 @@ class Router:
         self.daemon_info = self.daemon_mgr.check()
         self.ui.set_daemon_info(self.daemon_info)
 
-        for node_cfg in self.cfg.get("nodes", []):
-            node = RelayNode(node_cfg, self.cfg, self.ui, self.lookup_assignment, self._update_node_address)
+        for service_name, relay_cfg in self.service_relays.items():
+            node = self._create_relay_node(service_name, relay_cfg)
             self.nodes.append(node)
             self.node_map[node.node_id] = node
+            self.service_nodes[service_name] = node
             self.node_addresses[node.node_id] = None
 
         self._refresh_node_assignments()
@@ -2161,24 +2281,87 @@ class Router:
         self._save_config()
 
     # ──────────────────────────────────────────
+    # Naming helpers
+    # ──────────────────────────────────────────
+    @staticmethod
+    def _service_slug(service: str) -> str:
+        return Router._service_slug_static(service)
+
+    def _relay_name_for_seed(self, service: str, seed_hex: str) -> str:
+        return Router._relay_name_static(service, seed_hex)
+
+    # ──────────────────────────────────────────
     # Assignments and status helpers
     # ──────────────────────────────────────────
+    def _ensure_service_relays(self) -> Dict[str, dict]:
+        relays = self.cfg.setdefault("service_relays", {})
+        assignments = self.cfg.get("service_assignments", {})
+        legacy_nodes = {node.get("name"): node for node in self.cfg.get("nodes", []) if node.get("name")}
+        changed = False
+        now = int(time.time())
+        valid_services = {definition.name for definition in ServiceWatchdog.DEFINITIONS}
+
+        for definition in ServiceWatchdog.DEFINITIONS:
+            svc = definition.name
+            entry = dict(relays.get(svc, {}))
+            seed = (entry.get("seed_hex") or "").strip()
+            if not seed:
+                node_name = assignments.get(svc)
+                if node_name and node_name in legacy_nodes:
+                    seed = (legacy_nodes[node_name].get("seed_hex") or "").strip()
+            if not seed:
+                seed = generate_seed_hex()
+                changed = True
+            normalized_seed = seed.lower().replace("0x", "")
+            old_seed = entry.get("seed_hex")
+            entry["seed_hex"] = normalized_seed
+            new_name = self._relay_name_for_seed(svc, normalized_seed)
+            if entry.get("name") != new_name or old_seed != normalized_seed:
+                changed = True
+            entry["name"] = new_name
+            entry.setdefault("created_at", now)
+            relays[svc] = entry
+
+        for svc in list(relays.keys()):
+            if svc not in valid_services:
+                relays.pop(svc, None)
+                changed = True
+
+        if changed:
+            self.config_dirty = True
+        return relays
+
     def _init_assignments(self) -> Dict[str, str]:
         assignments = self.cfg.setdefault("service_assignments", {})
-        node_names = [node_cfg.get("name") for node_cfg in self.cfg.get("nodes", [])]
-        if not node_names:
-            raise SystemExit("No relay nodes configured; cannot build router")
         changed = False
-        for idx, definition in enumerate(ServiceWatchdog.DEFINITIONS):
-            assigned = assignments.get(definition.name)
-            if assigned not in node_names:
-                assignments[definition.name] = node_names[idx % len(node_names)]
+        for definition in ServiceWatchdog.DEFINITIONS:
+            svc = definition.name
+            relay_entry = self.service_relays.get(svc, {})
+            desired = relay_entry.get("name") or svc
+            if assignments.get(svc) != desired:
+                assignments[svc] = desired
+                changed = True
+        for svc in list(assignments.keys()):
+            if svc not in self.service_relays:
+                assignments.pop(svc, None)
                 changed = True
         self.config_dirty = changed
         return assignments
 
     def _save_config(self):
         try:
+            self.cfg["service_relays"] = self.service_relays
+            self.cfg["service_assignments"] = {
+                svc: self.service_relays.get(svc, {}).get("name") or svc
+                for svc in self.service_relays
+            }
+            self.cfg["nodes"] = [
+                {
+                    "name": entry.get("name") or svc,
+                    "seed_hex": entry.get("seed_hex"),
+                }
+                for svc, entry in self.service_relays.items()
+            ]
             CONFIG_PATH.write_text(json.dumps(self.cfg, indent=2))
             self.config_dirty = False
             LOGGER.info("Config saved to %s", CONFIG_PATH)
@@ -2194,6 +2377,85 @@ class Router:
             self.ui.set_node_services(node_id, sorted(services))
         for service in self.service_assignments.keys():
             self._publish_assignment(service)
+
+    def _build_targets_for_service(self, service: str, relay_cfg: dict) -> Dict[str, str]:
+        explicit = relay_cfg.get("targets")
+        if explicit:
+            return {k: v for k, v in explicit.items() if v}
+        info = SERVICE_TARGETS.get(service)
+        if not info:
+            return self.cfg.get("targets", {}).copy()
+        target_key = info.get("target")
+        base_url = (
+            relay_cfg.get("target_url")
+            or self.cfg.get("targets", {}).get(target_key)
+            or DEFAULT_TARGETS.get(target_key)
+        )
+        if not base_url:
+            raise SystemExit(f"No target URL configured for service '{service}' (expected key '{info.get('target')}')")
+        return {alias: base_url for alias in info.get("aliases", [service])}
+
+    def _build_aliases_for_service(self, service: str, relay_cfg: dict) -> List[str]:
+        aliases = list(dict.fromkeys(relay_cfg.get("aliases", [])))
+        if aliases:
+            return aliases
+        info = SERVICE_TARGETS.get(service)
+        if not info:
+            return [service]
+        ordered = list(info.get("aliases", []))
+        if service not in ordered:
+            ordered.append(service)
+        return list(dict.fromkeys(ordered))
+
+    def _create_relay_node(self, service: str, relay_cfg: dict) -> RelayNode:
+        node_cfg = dict(relay_cfg)
+        node_cfg["name"] = relay_cfg.get("name") or self._relay_name_for_seed(service, relay_cfg.get("seed_hex") or '')
+        node_cfg["primary_service"] = service
+        node_cfg["targets"] = self._build_targets_for_service(service, relay_cfg)
+        node_cfg["aliases"] = self._build_aliases_for_service(service, relay_cfg)
+        return RelayNode(node_cfg, self.cfg, self.ui, self.lookup_assignment, self._update_node_address, rate_limit_callback=self._on_rate_limit)
+
+    def _on_rate_limit(self, service: str, node_id: str) -> bool:
+        state = self.rate_limit_state.setdefault(service, {"pending": False})
+        if state.get("pending"):
+            return False
+        state["pending"] = True
+        LOGGER.warning("Service %s on relay %s experiencing sustained 429 responses; rotating seed", service, node_id)
+        threading.Thread(target=self._rotate_service_address, args=(service,), daemon=True).start()
+        return True
+
+    def _rotate_service_address(self, service: str) -> None:
+        node = self.service_nodes.get(service)
+        state = self.rate_limit_state.setdefault(service, {})
+        try:
+            if not node:
+                return
+            LOGGER.info("Rotating relay seed for service %s", service)
+            node.stop()
+            old_node_id = node.node_id
+            with self.assignment_lock:
+                self.node_addresses.pop(old_node_id, None)
+            self.nodes = [n for n in self.nodes if n is not node]
+            self.node_map.pop(old_node_id, None)
+            entry = dict(self.service_relays.get(service, {}))
+            new_seed = generate_seed_hex()
+            entry["seed_hex"] = new_seed.lower().replace("0x", "")
+            entry["name"] = self._relay_name_for_seed(service, entry["seed_hex"])
+            entry["rotated_at"] = int(time.time())
+            self.service_relays[service] = entry
+            new_node = self._create_relay_node(service, entry)
+            self.nodes.append(new_node)
+            self.node_map[new_node.node_id] = new_node
+            self.service_nodes[service] = new_node
+            self.node_addresses[new_node.node_id] = None
+            with self.assignment_lock:
+                self.service_assignments[service] = new_node.node_id
+            new_node.start()
+            self._refresh_node_assignments()
+            self.config_dirty = True
+            self._save_config()
+        finally:
+            state["pending"] = False
 
     def _publish_assignment(self, service: str):
         status = self.latest_service_status.get(service, {})
