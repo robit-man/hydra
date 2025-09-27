@@ -37,7 +37,8 @@ const NodeStore = {
       maxTurns: 16,
       memory: [],
       capabilities: [],
-      think: false
+      think: false,
+      tools: []
     },
     TTS: {
       base: 'http://localhost:8123',
@@ -45,6 +46,14 @@ const NodeStore = {
       api: '',
       model: '',
       mode: 'stream'
+    },
+    ImageInput: {
+      image: '',
+      b64: '',
+      mime: '',
+      width: 0,
+      height: 0,
+      updatedAt: 0
     },
     TextInput: {
       placeholder: '',

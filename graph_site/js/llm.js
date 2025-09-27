@@ -13,6 +13,25 @@ function createLLM({
   const MODEL_PROMISE = new Map();
   const MODEL_METADATA = new Map();
   const IMAGE_PAYLOADS = new Map();
+  const MODEL_INFO_CACHE = new Map();
+  const MODEL_INFO_PROMISES = new Map();
+  const TOOL_PAYLOADS = new Map();
+
+  function stripLicense(value) {
+    if (Array.isArray(value)) return value.map(stripLicense);
+    if (!value || typeof value !== 'object') return value;
+    const out = {};
+    let removed = false;
+    for (const [key, val] of Object.entries(value)) {
+      if (typeof key === 'string' && key.toLowerCase() === 'license') {
+        removed = true;
+        continue;
+      }
+      out[key] = stripLicense(val);
+    }
+    if (removed) out.license = '[omitted]';
+    return out;
+  }
 
   function normalizeCapabilities(value) {
     if (!value) return [];
@@ -24,6 +43,77 @@ function createLLM({
         .filter(Boolean);
     }
     return [];
+  }
+
+  function normalizeImageSources(input, mimeHint) {
+    const out = [];
+    const visit = (value, hint) => {
+      if (value == null) return;
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item, hint));
+        return;
+      }
+      if (typeof value === 'string') {
+        let trimmed = value.trim();
+        if (!trimmed) return;
+        if (/^data:image\//i.test(trimmed)) {
+          const base64 = trimmed.includes(',') ? trimmed.split(',')[1] : trimmed;
+          if (base64) out.push(base64.trim());
+          return;
+        }
+        if (/^https?:\/\//i.test(trimmed)) {
+          return;
+        }
+        trimmed = trimmed.replace(/\s+/g, '');
+        if (trimmed) out.push(trimmed);
+        return;
+      }
+      if (typeof value === 'object') {
+        const obj = value;
+        const nextHint = obj.mime || obj.type || hint || null;
+        if (obj.images != null) {
+          visit(obj.images, nextHint);
+          return;
+        }
+        if (obj.data != null) {
+          visit(obj.data, nextHint);
+          return;
+        }
+        if (obj.image != null) {
+          visit(obj.image, nextHint);
+          return;
+        }
+        if (obj.b64 != null) {
+          visit(obj.b64, nextHint);
+          return;
+        }
+        if (obj.base64 != null) {
+          visit(obj.base64, nextHint);
+          return;
+        }
+        if (obj.url != null) {
+          visit(obj.url, nextHint);
+          return;
+        }
+        if (obj.src != null) {
+          visit(obj.src, nextHint);
+          return;
+        }
+        if (obj.payload != null) {
+          visit(obj.payload, nextHint);
+          return;
+        }
+        if (obj.value != null) {
+          visit(obj.value, nextHint);
+          return;
+        }
+        if (obj.path != null) {
+          visit(obj.path, nextHint);
+        }
+      }
+    };
+    visit(input, mimeHint);
+    return out.map((str) => String(str || '').trim()).filter(Boolean);
   }
 
   function mergeEntry(map, entry) {
@@ -64,6 +154,117 @@ function createLLM({
       source,
       capabilities
     };
+  }
+
+  function normalizeModelShow(model, raw) {
+    const data = stripLicense(raw || {});
+    const det = data.details || {};
+    const mi = data.modelinfo || {};
+
+    const paramsObj = {};
+    if (typeof data.parameters === 'string') {
+      data.parameters.split(/\n+/).forEach((line) => {
+        const m = line.match(/^\s*([A-Za-z0-9_]+)\s+(.+?)\s*$/);
+        if (m) paramsObj[m[1]] = m[2];
+      });
+    }
+
+    const paramNum = (key) => {
+      const value = paramsObj[key];
+      const num = Number(value);
+      return Number.isFinite(num) ? num : null;
+    };
+
+    const capabilities = (() => {
+      if (Array.isArray(data.capabilities)) return data.capabilities.map(String);
+      if (Array.isArray(det.capabilities)) return det.capabilities.map(String);
+      return [];
+    })();
+
+    const ctxFromModelInfo = (() => {
+      if (!mi || typeof mi !== 'object') return null;
+      for (const [k, v] of Object.entries(mi)) {
+        if (/context_length$/i.test(k)) {
+          const num = Number(v);
+          if (Number.isFinite(num)) return num;
+        }
+      }
+      return null;
+    })();
+
+    return {
+      id: data.model || model,
+      label: data.model || model,
+      name: data.model || model,
+      modified_at: data.modified_at || null,
+      format: det.format || null,
+      family: det.family || null,
+      families: Array.isArray(det.families) ? det.families.slice() : (det.family ? [det.family] : []),
+      parameter_size: det.parameter_size || null,
+      quantization: det.quantization || det.quantization_level || null,
+      num_ctx: ctxFromModelInfo || paramNum('num_ctx') || det.num_ctx || null,
+      license: data.license || null,
+      capabilities,
+      raw: data,
+      source: 'show'
+    };
+  }
+
+  function cacheModelInfo(nodeId, modelId, info) {
+    if (!modelId || !info) return;
+    const key = `${nodeId}:${modelId}`;
+    MODEL_INFO_CACHE.set(key, info);
+    const list = MODEL_METADATA.get(nodeId);
+    if (list && Array.isArray(list)) {
+      const entry = list.find((item) => item.id === modelId);
+      if (entry) {
+        entry.capabilities = Array.isArray(info.capabilities) ? info.capabilities.map(String) : [];
+        entry.raw = entry.raw || {};
+        entry.raw.details = entry.raw.details || {};
+        entry.raw.details.capabilities = entry.capabilities;
+      }
+    }
+  }
+
+  async function fetchModelInfo(nodeId, modelId, { force = false } = {}) {
+    if (!modelId) return null;
+    const key = `${nodeId}:${modelId}`;
+    if (!force && MODEL_INFO_CACHE.has(key)) return MODEL_INFO_CACHE.get(key);
+    if (!force && MODEL_INFO_PROMISES.has(key)) return MODEL_INFO_PROMISES.get(key);
+
+    const rec = NodeStore.ensure(nodeId, 'LLM');
+    const cfg = rec?.config || {};
+    const base = (cfg.base || '').trim();
+    if (!base) return null;
+    const viaNkn = CFG.transport === 'nkn';
+    const relay = (cfg.relay || '').trim();
+    const api = (cfg.api || '').trim();
+
+    const promise = Net.postJSON(base.replace(/\/+$/, ''), '/api/show', { name: modelId }, api, viaNkn, relay)
+      .then((data) => {
+        try {
+          console.log('[LLM] model show response', {
+            nodeId,
+            modelId,
+            raw: data
+          });
+        } catch (err) {
+          // ignore logging failures
+        }
+        const info = normalizeModelShow(modelId, data || {});
+        cacheModelInfo(nodeId, modelId, info);
+        return info;
+      })
+      .catch((err) => {
+        MODEL_INFO_CACHE.delete(key);
+        throw err;
+      })
+      .finally(() => {
+        MODEL_INFO_PROMISES.delete(key);
+      });
+
+    MODEL_INFO_PROMISES.set(key, promise);
+    return promise;
   }
 
   async function fetchModelMetadataList(base, api, viaNkn, relay) {
@@ -155,6 +356,8 @@ function createLLM({
   }
 
   function getModelInfo(nodeId, modelId) {
+    const cached = MODEL_INFO_CACHE.get(`${nodeId}:${modelId}`);
+    if (cached) return cached;
     const metadata = listModels(nodeId);
     return metadata.find((item) => item.id === modelId) || null;
   }
@@ -253,14 +456,55 @@ function createLLM({
       }
     };
 
+    const normalizedImages = supportsImages ? normalizeImageSources(imagePayload) : [];
+
     const buildRequestBody = (streamMode) => {
-      const body = { model, messages, stream: streamMode };
+      const preparedMessages = messages.map((msg) => ({ ...msg }));
+
+      if (normalizedImages.length) {
+        let injected = false;
+        for (let i = preparedMessages.length - 1; i >= 0; i--) {
+          const msg = preparedMessages[i];
+          if (!msg || msg.role !== 'user') continue;
+          const clone = { ...msg };
+          let textContent = clone.content;
+          if (Array.isArray(textContent)) {
+            textContent = textContent
+              .map((part) => {
+                if (typeof part === 'string') return part;
+                if (part && typeof part === 'object') {
+                  if (typeof part.text === 'string') return part.text;
+                  if (typeof part.content === 'string') return part.content;
+                }
+                return '';
+              })
+              .filter(Boolean)
+              .join('\n');
+          } else if (textContent && typeof textContent === 'object') {
+            textContent = JSON.stringify(textContent);
+          }
+          if (typeof textContent !== 'string') textContent = '';
+          clone.content = textContent;
+          clone.images = normalizedImages.slice();
+          preparedMessages[i] = clone;
+          injected = true;
+          break;
+        }
+        if (!injected) {
+          const fallbackText = typeof text === 'string' ? text.trim() : '';
+          preparedMessages.push({ role: 'user', content: fallbackText, images: normalizedImages.slice() });
+        }
+      }
+
+      const body = { model, messages: preparedMessages, stream: streamMode };
       if (thinkingEnabled) {
         body.thinking = true;
         body.options = Object.assign({}, body.options, { thinking: true });
       }
-      if (imagePayload) {
-        body.images = Array.isArray(imagePayload) ? imagePayload : [imagePayload];
+      const toolPayload = TOOL_PAYLOADS.get(nodeId) ?? cfg.tools;
+      if (Array.isArray(toolPayload) ? toolPayload.length : !!toolPayload) {
+        body.tools = toolPayload;
+        body.options = Object.assign({}, body.options, { tools: toolPayload });
       }
       return body;
     };
@@ -410,19 +654,29 @@ function createLLM({
     NodeStore.update(nodeId, { system: text, useSystem: true });
   }
 
-  function extractImagePayload(payload) {
-    if (payload == null) return null;
-    if (typeof payload === 'string') return payload;
-    if (payload.data != null) return payload.data;
-    if (payload.image != null) return payload.image;
-    if (payload.payload != null) return payload.payload;
-    return payload;
+  function onImage(nodeId, payload) {
+    const images = normalizeImageSources(payload);
+    if (!images.length) return;
+    IMAGE_PAYLOADS.set(nodeId, images);
   }
 
-  function onImage(nodeId, payload) {
-    const data = extractImagePayload(payload);
-    if (data == null) return;
-    IMAGE_PAYLOADS.set(nodeId, data);
+  function onTools(nodeId, payload) {
+    if (!nodeId) return;
+    if (payload == null || (typeof payload === 'string' && !payload.trim())) {
+      TOOL_PAYLOADS.delete(nodeId);
+      NodeStore.update(nodeId, { type: 'LLM', tools: [] });
+      return;
+    }
+    let normalized = payload;
+    if (typeof payload === 'string') {
+      try {
+        normalized = JSON.parse(payload);
+      } catch (err) {
+        normalized = payload;
+      }
+    }
+    TOOL_PAYLOADS.set(nodeId, normalized);
+    NodeStore.update(nodeId, { type: 'LLM', tools: normalized });
   }
 
   async function ensureDefaults(nodeId) {
@@ -434,14 +688,14 @@ function createLLM({
       const selected = (updated.model || '').trim();
       if (selected) {
         const info = getModelInfo(nodeId, selected);
-        if (info) NodeStore.update(nodeId, { capabilities: info.capabilities || [] });
+        if (info) NodeStore.update(nodeId, { type: 'LLM', capabilities: info.capabilities || [] });
       }
     } catch (err) {
       // ignore background discovery failures
     }
   }
 
-  return { onPrompt, onSystem, onImage, ensureDefaults, ensureModels, listModels, getModelInfo };
+  return { onPrompt, onSystem, onImage, onTools, ensureDefaults, ensureModels, listModels, getModelInfo, fetchModelInfo };
 }
 
 export { createLLM };

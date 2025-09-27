@@ -1,4 +1,4 @@
-import { LS, qs, qsa, setBadge, log } from './utils.js';
+import { LS, qs, qsa, setBadge, log, convertBooleanSelect } from './utils.js';
 
 function createGraph({
   Router,
@@ -31,6 +31,11 @@ function createGraph({
     drag: null,
     view: { x: 0, y: 0, scale: 1 },
     _redrawReq: false
+  };
+
+  const convertBooleanSelectsIn = (container) => {
+    if (!container) return;
+    container.querySelectorAll('select').forEach((sel) => convertBooleanSelect(sel));
   };
 
   function ensureSvgLayer() {
@@ -89,6 +94,138 @@ function createGraph({
   };
   const pendingModelPrefetch = new Set();
   const MODEL_PROVIDERS = { LLM, TTS, ASR };
+  const LLM_BASE_INPUTS = new Set(['prompt', 'image', 'system']);
+  const LLM_CAPABILITY_PORT_SPECS = [
+    {
+      name: 'tools',
+      label: 'Tools',
+      matches: (cap) => /tool|function/.test(cap)
+    }
+  ];
+
+  function initImageInputNode(node) {
+    if (!node?.el || node.type !== 'ImageInput') return;
+    const dropArea = node.el.querySelector('[data-image-drop]');
+    const preview = node.el.querySelector('[data-image-preview]');
+    const status = node.el.querySelector('[data-image-status]');
+    if (!dropArea || dropArea._imageInitialized) return;
+    dropArea._imageInitialized = true;
+
+    const fileInput = dropArea.querySelector('input[type="file"]');
+
+    const rec = NodeStore.ensure(node.id, 'ImageInput');
+    const cfg = rec?.config || {};
+
+    const renderImage = (dataUrl, mime, info) => {
+      if (preview) {
+        preview.src = dataUrl;
+        preview.classList.remove('hidden');
+      }
+      if (status) {
+        const parts = [];
+        if (mime) parts.push(mime);
+        if (info?.width && info?.height) parts.push(`${info.width}×${info.height}`);
+        status.textContent = parts.length ? parts.join(' • ') : 'Image ready';
+      }
+    };
+
+    if (cfg.image) {
+      renderImage(cfg.image, cfg.mime, { width: cfg.width, height: cfg.height });
+    }
+
+    const sendPayload = (dataUrl, file) => {
+      if (!dataUrl) return;
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      const img = new Image();
+      img.onload = () => {
+        const payload = {
+          nodeId: node.id,
+          from: node.id,
+          kind: 'image',
+          mime: (file && file.type) || 'image/png',
+          dataUrl,
+          b64: base64,
+          image: base64,
+          width: img.width,
+          height: img.height,
+          ts: Date.now(),
+          route: 'image'
+        };
+        NodeStore.update(node.id, {
+          type: 'ImageInput',
+          image: dataUrl,
+          b64: base64,
+          mime: payload.mime,
+          width: img.width,
+          height: img.height,
+          updatedAt: Date.now()
+        });
+        renderImage(dataUrl, payload.mime, img);
+        Router.sendFrom(node.id, 'image', payload);
+      };
+      img.onerror = () => {
+        setBadge('Unable to read image', false);
+      };
+      img.src = dataUrl;
+    };
+
+    const handleFiles = (files) => {
+      if (!files || !files.length) return;
+      const file = files[0];
+      if (!file.type.startsWith('image/')) {
+        setBadge('Unsupported file type', false);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        sendPayload(dataUrl, file);
+      };
+      reader.onerror = () => {
+        setBadge('Failed to read image', false);
+      };
+      reader.readAsDataURL(file);
+    };
+
+    dropArea.addEventListener('click', () => {
+      fileInput?.click();
+    });
+
+    if (fileInput) {
+      fileInput.addEventListener('change', (e) => {
+        handleFiles(e.target.files);
+        fileInput.value = '';
+      });
+    }
+
+    dropArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropArea.classList.add('dragover');
+    });
+    dropArea.addEventListener('dragleave', () => {
+      dropArea.classList.remove('dragover');
+    });
+    dropArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropArea.classList.remove('dragover');
+      handleFiles(e.dataTransfer?.files);
+    });
+
+    dropArea.addEventListener('paste', (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            handleFiles([file]);
+            e.preventDefault();
+            break;
+          }
+        }
+      }
+    });
+  }
 
   function scheduleModelPrefetch(nodeId, nodeType, delay = 200) {
     const run = MODEL_PREFETCHERS[nodeType];
@@ -197,6 +334,200 @@ function createGraph({
       imagePort.style.display = hasImages ? '' : 'none';
     }
     if (!hasImages) removeWiresAt(nodeId, 'in', 'image');
+
+    ensureLlmCapabilityPorts(nodeId, capabilities);
+  }
+
+  function handleInputPayload(node, portName, payload) {
+    if (!node) return;
+    if (node.type === 'LLM') {
+      if (portName === 'prompt') {
+        pullLlmSystemInput(node.id);
+        const pendingImages = pullLlmImageInput(node.id);
+        if (pendingImages.length && typeof LLM.onImage === 'function') {
+          LLM.onImage(node.id, pendingImages);
+        }
+        return LLM.onPrompt(node.id, payload);
+      }
+      if (portName === 'image') return LLM.onImage?.(node.id, payload);
+      if (portName === 'system') return LLM.onSystem(node.id, payload);
+      if (portName === 'tools') return LLM.onTools?.(node.id, payload);
+      return;
+    }
+    if (node.type === 'TTS') {
+      if (portName === 'text') return TTS.onText(node.id, payload);
+      return;
+    }
+    if (node.type === 'NknDM') {
+      if (portName === 'text') return NknDM.onText(node.id, payload);
+      return;
+    }
+    if (node.type === 'MCP') {
+      if (portName === 'query') return MCP.onQuery(node.id, payload);
+      if (portName === 'tool') return MCP.onTool(node.id, payload);
+      if (portName === 'refresh') return MCP.onRefresh(node.id, payload);
+      return;
+    }
+    if (node.type === 'MediaStream') {
+      if (portName === 'media') return Media.onInput(node.id, payload);
+      return;
+    }
+    if (node.type === 'TextDisplay') {
+      if (portName === 'text') return handleTextDisplayInput(node.id, payload);
+      return;
+    }
+    if (node.type === 'Template') {
+      if (portName === 'trigger') return handleTemplateTrigger(node.id, payload);
+      return;
+    }
+  }
+
+  function unregisterInputPort(node, portName) {
+    const baseKey = `${node.id}:in:${portName}`;
+    Router.ports.delete(baseKey);
+    const fromTypeMatch = /^([a-z]+):([^:]+):(.+)$/.exec(baseKey);
+    if (fromTypeMatch) {
+      Router.ports.delete(`${fromTypeMatch[2]}:in:${fromTypeMatch[3]}`);
+    }
+    const typeGuess = node.type?.toLowerCase?.();
+    if (typeGuess) Router.ports.delete(`${typeGuess}:${node.id}:${portName}`);
+  }
+
+  function createInputPort(node, container, portName, label = portName) {
+    if (!node || !container) return null;
+    node.portEls = node.portEls || {};
+    const existing = node.portEls[`in:${portName}`];
+    if (existing && existing.isConnected) return existing;
+    const portEl = document.createElement('div');
+    portEl.className = 'wp-port in';
+    portEl.dataset.port = portName;
+    const title = `${label} (Alt-click to disconnect)`;
+    portEl.title = title;
+    portEl.innerHTML = `<span class="dot"></span><span>${label}</span>`;
+    node.portEls[`in:${portName}`] = portEl;
+
+    portEl.addEventListener('click', (ev) => {
+      if (ev.altKey || ev.metaKey || ev.ctrlKey) {
+        removeWiresAt(node.id, 'in', portName);
+        return;
+      }
+      onPortClick(node.id, 'in', portName, portEl);
+    });
+
+    portEl.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch') ev.preventDefault();
+      const wires = connectedWires(node.id, 'in', portName);
+      if (wires.length) {
+        const w = wires[wires.length - 1];
+        w.path?.setAttribute('stroke-dasharray', '6 4');
+        const move = (e) => {
+          if (e.pointerType === 'touch') e.preventDefault();
+          if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+          const pt = clientToWorkspace(e.clientX, e.clientY);
+          drawRetarget(w, 'to', pt.x, pt.y);
+          if (WS.drag) updateDropHover(WS.drag.expected);
+        };
+        const up = (e) => {
+          setDropHover(null);
+          finishAnyDrag(e.clientX, e.clientY);
+        };
+        WS.drag = {
+          kind: 'retarget',
+          wireId: w.id,
+          grabSide: 'to',
+          path: w.path,
+          pointerId: ev.pointerId,
+          expected: 'out',
+          lastClient: { x: ev.clientX, y: ev.clientY },
+          _cleanup: () => window.removeEventListener('pointermove', move)
+        };
+        window.addEventListener('pointermove', move, { passive: false });
+        window.addEventListener('pointerup', up, { once: true, passive: false });
+        updateDropHover('out');
+        return;
+      }
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', 'rgba(255,255,255,.6)');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('opacity', '0.9');
+      path.setAttribute('stroke-dasharray', '6 4');
+      path.setAttribute('vector-effect', 'non-scaling-stroke');
+      path.setAttribute('pointer-events', 'none');
+      WS.svgLayer.appendChild(path);
+
+      const move = (e) => {
+        if (e.pointerType === 'touch') e.preventDefault();
+        if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+        const pt = clientToWorkspace(e.clientX, e.clientY);
+        drawTempFromPort({ nodeId: node.id, side: 'in', portName }, pt.x, pt.y);
+        updateDropHover(WS.drag?.expected);
+      };
+      const up = (e) => {
+        setDropHover(null);
+        finishAnyDrag(e.clientX, e.clientY);
+      };
+      WS.drag = {
+        kind: 'newFromInput',
+        toNodeId: node.id,
+        toPort: portName,
+        path,
+        pointerId: ev.pointerId,
+        expected: 'out',
+        lastClient: { x: ev.clientX, y: ev.clientY },
+        _cleanup: () => window.removeEventListener('pointermove', move)
+      };
+      window.addEventListener('pointermove', move, { passive: false });
+      window.addEventListener('pointerup', up, { once: true, passive: false });
+      const pt = clientToWorkspace(ev.clientX, ev.clientY);
+      drawTempFromPort({ nodeId: node.id, side: 'in', portName }, pt.x, pt.y);
+      updateDropHover('out');
+    });
+
+    container.appendChild(portEl);
+    Router.register(`${node.id}:in:${portName}`, portEl, (payload) => handleInputPayload(node, portName, payload));
+    return portEl;
+  }
+
+  function ensureLlmCapabilityPorts(nodeId, capsOverride) {
+    const node = WS.nodes.get(nodeId);
+    if (!node || node.type !== 'LLM') return;
+    const left = node.el?.querySelector('.side.left');
+    if (!left) return;
+    const rec = NodeStore.ensure(nodeId, 'LLM');
+    const cfgCaps = capsOverride || rec?.config?.capabilities || [];
+    const normalized = Array.isArray(cfgCaps)
+      ? cfgCaps.map((c) => String(c).toLowerCase())
+      : [];
+
+    const desired = new Map();
+    for (const spec of LLM_CAPABILITY_PORT_SPECS) {
+      if (normalized.some((cap) => spec.matches(cap))) {
+        desired.set(spec.name, spec.label);
+      }
+    }
+
+    const existingEls = Array.from(left.querySelectorAll('.wp-port.in'));
+    const existingNames = new Set(existingEls.map((el) => el.dataset.port));
+
+    for (const [portName, label] of desired) {
+      if (!existingNames.has(portName)) {
+        createInputPort(node, left, portName, label);
+      }
+    }
+
+    for (const el of existingEls) {
+      const name = el.dataset.port;
+      if (!name) continue;
+      if (LLM_BASE_INPUTS.has(name)) continue;
+      if (desired.has(name)) continue;
+      removeWiresAt(nodeId, 'in', name);
+      unregisterInputPort(node, name);
+      el.remove();
+      delete node.portEls[`in:${name}`];
+    }
   }
 
   function normalizeRelayState(state) {
@@ -483,19 +814,19 @@ function createGraph({
           <div class="muted" style="margin-top:6px;">Partial</div>
           <div class="bubble" data-asr-partial style="min-height:28px"></div>
           <div class="muted" style="margin-top:6px;">Finals</div>
-          <div class="code" data-asr-final style="min-height:60px;max-height:120px"></div>
+          <div class="code" data-asr-final style="min-height:60px;max-height:360px"></div>
         ` : ''}
         ${node.type === 'LLM' ? `
           <div class="muted" style="margin-top:6px;">Output</div>
-          <div class="code" data-llm-out style="min-height:60px;max-height:120px;overflow:auto;white-space:pre-wrap"></div>
+          <div class="code" data-llm-out style="min-height:60px;max-height:360px;overflow:auto;white-space:pre-wrap"></div>
         ` : ''}
         ${node.type === 'MCP' ? `
           <div class="muted" style="margin-top:6px;">Status</div>
           <div class="bubble" data-mcp-status>(idle)</div>
           <div class="muted" style="margin-top:6px;">Server</div>
-          <div class="code" data-mcp-server style="min-height:48px;max-height:120px;overflow:auto;"></div>
+          <div class="code" data-mcp-server style="min-height:48px;max-height:360px;overflow:auto;"></div>
           <div class="muted" style="margin-top:6px;">Resources</div>
-          <div class="code" data-mcp-resources style="min-height:48px;max-height:120px;overflow:auto;"></div>
+          <div class="code" data-mcp-resources style="min-height:48px;max-height:360px;overflow:auto;"></div>
           <div class="muted" style="margin-top:6px;">Last Context</div>
           <div class="code" data-mcp-context style="min-height:60px;max-height:160px;overflow:auto;white-space:pre-wrap"></div>
         ` : ''}
@@ -532,7 +863,7 @@ function createGraph({
             </div>
           </div>
           <div class="muted" style="margin-top:6px;">Log</div>
-          <div class="code" data-nkndm-log style="min-height:60px;max-height:120px"></div>
+          <div class="code" data-nkndm-log style="min-height:60px;max-height:360px"></div>
         ` : ''}
         ${node.type === 'TextInput' ? `
           <div class="text-input-area" style="margin-top:6px;">
@@ -553,6 +884,16 @@ function createGraph({
           <div class="template-editor" style="margin-top:6px;">
             <textarea data-template-editor placeholder="Hello {name}, welcome to {place}."></textarea>
             <div class="template-preview" data-template-preview></div>
+          </div>
+        ` : ''}
+        ${node.type === 'ImageInput' ? `
+          <div class="image-input" style="margin-top:6px;">
+            <div class="image-input-drop" data-image-drop>
+              <input type="file" accept="image/*" hidden />
+              <div class="image-input-instructions">Drop image, paste, or click to upload</div>
+            </div>
+            <img data-image-preview class="image-input-preview hidden" alt="Selected image" />
+            <div class="muted" data-image-status>Awaiting image</div>
           </div>
         ` : ''}
       </div>
@@ -661,118 +1002,12 @@ function createGraph({
       initNknDmNode(node);
     }
 
+    if (node.type === 'ImageInput') {
+      initImageInputNode(node);
+    }
+
     for (const p of (t.inputs || [])) {
-      const portEl = document.createElement('div');
-      portEl.className = 'wp-port in';
-      portEl.dataset.port = p.name;
-      portEl.title = `${p.name} (Alt-click to disconnect)`;
-      portEl.innerHTML = `<span class="dot"></span><span>${p.name}</span>`;
-      node.portEls[`in:${p.name}`] = portEl;
-      portEl.addEventListener('click', (ev) => {
-        if (ev.altKey || ev.metaKey || ev.ctrlKey) {
-          removeWiresAt(node.id, 'in', p.name);
-          return;
-        }
-        onPortClick(node.id, 'in', p.name, portEl);
-      });
-
-      portEl.addEventListener('pointerdown', (ev) => {
-        if (ev.pointerType === 'touch') ev.preventDefault();
-        const wires = connectedWires(node.id, 'in', p.name);
-        if (wires.length) {
-          const w = wires[wires.length - 1];
-          w.path?.setAttribute('stroke-dasharray', '6 4');
-          const move = (e) => {
-            if (e.pointerType === 'touch') e.preventDefault();
-            if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
-            const pt = clientToWorkspace(e.clientX, e.clientY);
-            drawRetarget(w, 'to', pt.x, pt.y);
-            if (WS.drag) updateDropHover(WS.drag.expected);
-          };
-          const up = (e) => {
-            setDropHover(null);
-            finishAnyDrag(e.clientX, e.clientY);
-          };
-          WS.drag = {
-            kind: 'retarget',
-            wireId: w.id,
-            grabSide: 'to',
-            path: w.path,
-            pointerId: ev.pointerId,
-            expected: 'out',
-            lastClient: { x: ev.clientX, y: ev.clientY },
-            _cleanup: () => window.removeEventListener('pointermove', move)
-          };
-          window.addEventListener('pointermove', move, { passive: false });
-          window.addEventListener('pointerup', up, { once: true, passive: false });
-          updateDropHover('out');
-          return;
-        }
-
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', 'rgba(255,255,255,.6)');
-        path.setAttribute('stroke-width', '2');
-        path.setAttribute('stroke-linecap', 'round');
-        path.setAttribute('opacity', '0.9');
-        path.setAttribute('stroke-dasharray', '6 4');
-        path.setAttribute('vector-effect', 'non-scaling-stroke');
-        path.setAttribute('pointer-events', 'none');
-        WS.svgLayer.appendChild(path);
-
-        const move = (e) => {
-          if (e.pointerType === 'touch') e.preventDefault();
-          if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
-          const pt = clientToWorkspace(e.clientX, e.clientY);
-          drawTempFromPort({ nodeId: node.id, side: 'in', portName: p.name }, pt.x, pt.y);
-          updateDropHover(WS.drag?.expected);
-        };
-        const up = (e) => {
-          setDropHover(null);
-          finishAnyDrag(e.clientX, e.clientY);
-        };
-        WS.drag = {
-          kind: 'newFromInput',
-          toNodeId: node.id,
-          toPort: p.name,
-          path,
-          pointerId: ev.pointerId,
-          expected: 'out',
-          lastClient: { x: ev.clientX, y: ev.clientY },
-          _cleanup: () => window.removeEventListener('pointermove', move)
-        };
-        window.addEventListener('pointermove', move, { passive: false });
-        window.addEventListener('pointerup', up, { once: true, passive: false });
-        const pt = clientToWorkspace(ev.clientX, ev.clientY);
-        drawTempFromPort({ nodeId: node.id, side: 'in', portName: p.name }, pt.x, pt.y);
-        updateDropHover('out');
-      });
-
-      left.appendChild(portEl);
-      Router.register(`${node.id}:in:${p.name}`, portEl, (payload) => {
-        if (node.type === 'LLM') {
-          if (p.name === 'prompt') {
-            pullLlmSystemInput(node.id);
-            return LLM.onPrompt(node.id, payload);
-          }
-          if (p.name === 'image') return LLM.onImage?.(node.id, payload);
-          if (p.name === 'system') return LLM.onSystem(node.id, payload);
-        } else if (node.type === 'TTS') {
-          if (p.name === 'text') return TTS.onText(node.id, payload);
-        } else if (node.type === 'NknDM') {
-          if (p.name === 'text') return NknDM.onText(node.id, payload);
-        } else if (node.type === 'MCP') {
-          if (p.name === 'query') return MCP.onQuery(node.id, payload);
-          if (p.name === 'tool') return MCP.onTool(node.id, payload);
-          if (p.name === 'refresh') return MCP.onRefresh(node.id, payload);
-        } else if (node.type === 'MediaStream') {
-          if (p.name === 'media') return Media.onInput(node.id, payload);
-        } else if (node.type === 'TextDisplay') {
-          if (p.name === 'text') return handleTextDisplayInput(node.id, payload);
-        } else if (node.type === 'Template') {
-          if (p.name === 'trigger') return handleTemplateTrigger(node.id, payload);
-        }
-      });
+      createInputPort(node, left, p.name, p.label || p.name);
     }
 
     for (const p of (t.outputs || [])) {
@@ -1472,6 +1707,12 @@ function createGraph({
         { key: 'mode', label: 'Mode', type: 'select', options: ['stream', 'file'], def: 'stream' }
       ]
     },
+    ImageInput: {
+      title: 'Image Input',
+      inputs: [],
+      outputs: [{ name: 'image' }],
+      schema: []
+    },
     TextInput: {
       title: 'Text Input',
       inputs: [],
@@ -2014,6 +2255,38 @@ function createGraph({
     return NodeStore.update(nodeId, patch);
   }
 
+  function extractImagePayloadFromNode(node) {
+    if (!node) return [];
+    const cfg = NodeStore.ensure(node.id, node.type).config || {};
+    if (node.type === 'ImageInput') {
+      const src = cfg.b64 || cfg.image || '';
+      return src ? [src] : [];
+    }
+    if (node.type === 'MediaStream') {
+      const last = cfg.lastFrame || cfg.lastImage || '';
+      return last ? [last] : [];
+    }
+    if (cfg && typeof cfg === 'object') {
+      if (cfg.image) return [cfg.image];
+      if (cfg.images) return Array.isArray(cfg.images) ? cfg.images : [cfg.images];
+      if (cfg.b64) return [cfg.b64];
+    }
+    return [];
+  }
+
+  function pullLlmImageInput(nodeId) {
+    const llmNode = WS.nodes.get(nodeId);
+    if (!llmNode) return [];
+    const wires = WS.wires.filter((w) => w.to.node === nodeId && w.to.port === 'image');
+    if (!wires.length) return [];
+    for (const wire of wires) {
+      const sourceNode = WS.nodes.get(wire.from.node);
+      const images = extractImagePayloadFromNode(sourceNode);
+      if (Array.isArray(images) && images.length) return images;
+    }
+    return [];
+  }
+
   function initNknDmNode(node) {
     const copyBtn = node.el?.querySelector('[data-nkndm-copy]');
     const approveBtn = node.el?.querySelector('[data-nkndm-approve]');
@@ -2135,21 +2408,115 @@ function createGraph({
           detailBox.textContent = 'Select a model to view details';
           wrapper.appendChild(detailBox);
 
+          let capsRow = null;
+          let capsRequestToken = 0;
+
+          const renderCapabilities = (info, state = 'ready') => {
+            if (!capsRow) return;
+            capsRow.innerHTML = '';
+            capsRow.dataset.state = state;
+
+            if (state === 'loading') {
+              const chip = document.createElement('span');
+              chip.className = 'model-cap-chip pending';
+              chip.textContent = 'Loading…';
+              capsRow.appendChild(chip);
+              return;
+            }
+
+            if (state === 'error') {
+              const chip = document.createElement('span');
+              chip.className = 'model-cap-chip error';
+              chip.textContent = 'Unavailable';
+              capsRow.appendChild(chip);
+              return;
+            }
+
+            const caps = Array.isArray(info?.capabilities)
+              ? info.capabilities
+              : Array.isArray(info)
+                ? info
+                : [];
+
+            if (!caps.length) {
+              const chip = document.createElement('span');
+              chip.className = 'model-cap-chip muted';
+              chip.textContent = '—';
+              capsRow.appendChild(chip);
+              return;
+            }
+
+            caps.forEach((cap) => {
+              const chip = document.createElement('span');
+              chip.className = 'model-cap-chip';
+              chip.textContent = String(cap);
+              capsRow.appendChild(chip);
+            });
+          };
+
+          if (node.type === 'LLM') {
+            capsRow = document.createElement('div');
+            capsRow.className = 'model-picker-capabilities';
+            renderCapabilities([], 'idle');
+            wrapper.appendChild(capsRow);
+          }
+
           fields.appendChild(label);
           fields.appendChild(wrapper);
+
+          const applyCapabilities = (caps) => {
+            if (node.type !== 'LLM') return;
+            const normalized = Array.isArray(caps)
+              ? caps.map((c) => String(c).trim()).filter(Boolean)
+              : [];
+            NodeStore.update(node.id, { type: 'LLM', capabilities: normalized });
+            refreshLlmControls(node.id);
+          };
 
           const setSelection = (meta) => {
             if (!meta) return;
             hiddenInput.value = meta.id;
             const pretty = JSON.stringify(meta.raw || {}, null, 2);
-            const caps = Array.isArray(meta.capabilities) && meta.capabilities.length ? `Capabilities: ${meta.capabilities.join(', ')}\n\n` : '';
-            detailBox.textContent = caps + pretty;
+            detailBox.textContent = pretty;
             detailBox.dataset.modelId = meta.id;
             wrapper.dataset.selectedModel = meta.id;
             buttonRow.querySelectorAll('button').forEach((btn) => {
               if (btn.dataset.modelId === meta.id) btn.classList.add('selected');
               else btn.classList.remove('selected');
             });
+
+            if (capsRow) {
+              const cachedInfo = typeof modelProvider.getModelInfo === 'function'
+                ? modelProvider.getModelInfo(node.id, meta.id)
+                : null;
+              if (cachedInfo && Array.isArray(cachedInfo.capabilities) && cachedInfo.capabilities.length) {
+                renderCapabilities(cachedInfo, 'ready');
+                applyCapabilities(cachedInfo.capabilities);
+              } else {
+                renderCapabilities([], 'loading');
+              }
+
+              const requestToken = ++capsRequestToken;
+              const promise = typeof modelProvider.fetchModelInfo === 'function'
+                ? modelProvider.fetchModelInfo(node.id, meta.id)
+                : null;
+              if (promise && typeof promise.then === 'function') {
+                promise
+                  .then((info) => {
+                    if (requestToken !== capsRequestToken) return;
+                    if (info) renderCapabilities(info, 'ready');
+                    else if (!cachedInfo) renderCapabilities([], 'idle');
+                    if (info) applyCapabilities(info.capabilities);
+                  })
+                  .catch(() => {
+                    if (requestToken !== capsRequestToken) return;
+                    if (!cachedInfo) renderCapabilities([], 'error');
+                  });
+              } else if (!cachedInfo) {
+                renderCapabilities([], 'idle');
+              }
+            }
+            applyCapabilities(meta.capabilities);
           };
 
           const renderButtons = () => {
@@ -2245,6 +2612,7 @@ function createGraph({
         }
         fields.appendChild(label);
         fields.appendChild(select);
+        convertBooleanSelect(select);
       } else {
         const input = field.type === 'textarea' ? document.createElement('textarea') : document.createElement('input');
         if (field.type !== 'textarea') input.type = field.type || 'text';
@@ -2273,6 +2641,20 @@ function createGraph({
         fields.appendChild(label);
         fields.appendChild(control);
       }
+    }
+    convertBooleanSelectsIn(fields);
+    if (!fields._boolToggleObserver) {
+      const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          m.addedNodes?.forEach((node) => {
+            if (!(node instanceof HTMLElement)) return;
+            if (node.tagName === 'SELECT') convertBooleanSelect(node);
+            node.querySelectorAll?.('select').forEach((sel) => convertBooleanSelect(sel));
+          });
+        }
+      });
+      observer.observe(fields, { childList: true, subtree: true });
+      fields._boolToggleObserver = observer;
     }
     form.dataset.nodeId = nodeId;
     help.textContent = `${GraphTypes[node.type].title} • ${nodeId}`;
@@ -2444,6 +2826,7 @@ function createGraph({
       setupTemplateNode(node, leftSide);
       pullTemplateInputs(id);
     });
+    if (type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
     if (type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
     if (type === 'MCP') requestAnimationFrame(() => MCP.init(id));
     if (type === 'MediaStream') requestAnimationFrame(() => Media.init(id));
@@ -2537,6 +2920,7 @@ function createGraph({
       { type: 'TextInput', label: 'Text Input', x: 420, y: 120 },
       { type: 'TextDisplay', label: 'Text Display', x: 540, y: 180 },
       { type: 'Template', label: 'Template', x: 540, y: 220 },
+      { type: 'ImageInput', label: 'Image Input', x: 600, y: 220 },
       { type: 'NknDM', label: 'NKN DM', x: 720, y: 140 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },

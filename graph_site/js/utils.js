@@ -35,6 +35,66 @@ const b64ToBytes = (b64) => {
   return out;
 };
 
+const TRUE_STRINGS = new Set(['true', '1', 'yes', 'on']);
+const FALSE_STRINGS = new Set(['false', '0', 'no', 'off']);
+
+const normalizeBoolChoice = (value) => {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (TRUE_STRINGS.has(text)) return true;
+  if (FALSE_STRINGS.has(text)) return false;
+  return null;
+};
+
+function convertBooleanSelect(select) {
+  if (!select) return null;
+  const options = Array.from(select.options || []);
+  if (!options.length) return null;
+  if (!options.every((opt) => normalizeBoolChoice(opt.value ?? opt.text) !== null)) return null;
+  const name = select.name;
+  if (!name) return null;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'toggle-boolean-wrap';
+
+  const hiddenInput = document.createElement('input');
+  hiddenInput.type = 'hidden';
+  hiddenInput.name = name;
+  wrap.appendChild(hiddenInput);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'toggle-boolean';
+  wrap.appendChild(btn);
+
+  const apply = (state) => {
+    const enabled = !!state;
+    const val = enabled ? 'true' : 'false';
+    hiddenInput.value = val;
+    btn.dataset.state = val;
+    btn.textContent = val;
+    btn.setAttribute('aria-pressed', val);
+  };
+
+  const fallback = normalizeBoolChoice(options[0].value ?? options[0].text);
+  const initial = normalizeBoolChoice(select.value ?? options[0].value ?? options[0].text);
+  apply(initial === null ? (fallback === null ? true : fallback) : initial);
+
+  btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    apply(hiddenInput.value !== 'true');
+  });
+
+  const parent = select.parentElement;
+  if (parent) parent.replaceChild(wrap, select);
+  return { wrap, button: btn, input: hiddenInput };
+}
+
+function convertBooleanSelects(container) {
+  if (!container) return;
+  const selects = container.querySelectorAll('select');
+  selects.forEach((sel) => convertBooleanSelect(sel));
+}
+
 function j(x) {
   try {
     return JSON.stringify(x, null, 2);
@@ -64,6 +124,8 @@ export {
   qsa,
   td,
   b64ToBytes,
+  convertBooleanSelect,
+  convertBooleanSelects,
   j,
   log,
   setBadge

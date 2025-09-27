@@ -215,6 +215,7 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
         kind: 'video',
         mime: dataUrl.slice(5, dataUrl.indexOf(';')) || 'image/webp',
         b64,
+        image: b64,
         width: st.canvas.width,
         height: st.canvas.height,
         ts: Date.now(),
