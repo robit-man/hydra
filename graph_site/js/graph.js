@@ -75,15 +75,281 @@ function createGraph({
     return 'n' + Math.random().toString(36).slice(2, 8);
   }
 
+  const relayStates = new Map();
+  const RELAY_STATE_CLASSES = new Set(['ok', 'warn', 'err']);
+  const DEFAULT_PENDING_MESSAGE = 'Awaiting connection';
+
+  const MODEL_PREFETCHERS = {
+    ASR: (id) => ASR?.ensureDefaults?.(id),
+    LLM: (id) => LLM?.ensureDefaults?.(id),
+    TTS: (id) => TTS?.ensureDefaults?.(id)
+  };
+  const pendingModelPrefetch = new Set();
+  const MODEL_PROVIDERS = { LLM, TTS, ASR };
+
+  function scheduleModelPrefetch(nodeId, nodeType, delay = 200) {
+    const run = MODEL_PREFETCHERS[nodeType];
+    if (typeof run !== 'function') return;
+    const rec = NodeStore.ensure(nodeId, nodeType);
+    const cfg = rec?.config || {};
+    const baseRaw = cfg.base;
+    const base = typeof baseRaw === 'string'
+      ? baseRaw.trim()
+      : String(baseRaw ?? '').trim();
+    if (!base) return;
+    const modelValue = cfg.model;
+    const hasModel = typeof modelValue === 'string'
+      ? modelValue.trim().length > 0
+      : Boolean(modelValue);
+    if (hasModel) return;
+    const key = `${nodeType}:${nodeId}`;
+    if (pendingModelPrefetch.has(key)) return;
+    pendingModelPrefetch.add(key);
+    const exec = () => {
+      Promise.resolve(run(nodeId))
+        .then(() => {
+          if (nodeType === 'LLM') refreshLlmControls(nodeId);
+        })
+        .catch(() => {})
+        .finally(() => pendingModelPrefetch.delete(key));
+    };
+    if (delay > 0) setTimeout(exec, delay);
+    else exec();
+  }
+
+  function initLlmControls(node) {
+    if (!node || node.type !== 'LLM') return;
+    const body = node.el?.querySelector('.body');
+    if (!body) return;
+    if (node.llmControls?.container?.isConnected) return;
+
+    const container = document.createElement('div');
+    container.dataset.llmControls = 'true';
+    container.className = 'llm-controls';
+
+    const capLine = document.createElement('div');
+    capLine.dataset.llmCapabilities = 'true';
+    capLine.className = 'llm-capabilities';
+    container.appendChild(capLine);
+
+    const thinkWrap = document.createElement('label');
+    thinkWrap.dataset.llmThink = 'true';
+    thinkWrap.className = 'llm-think hidden';
+    const thinkInput = document.createElement('input');
+    thinkInput.type = 'checkbox';
+    thinkInput.dataset.llmThinkInput = 'true';
+    thinkWrap.appendChild(thinkInput);
+    thinkWrap.appendChild(document.createTextNode(' Think'));
+    container.appendChild(thinkWrap);
+
+    const imageNote = document.createElement('div');
+    imageNote.dataset.llmImageNote = 'true';
+    imageNote.className = 'llm-image-note hidden';
+    imageNote.textContent = 'Image input available via image port.';
+    container.appendChild(imageNote);
+
+    body.insertBefore(container, body.firstChild || null);
+
+    thinkInput.addEventListener('change', () => {
+      NodeStore.update(node.id, { type: 'LLM', think: !!thinkInput.checked });
+      refreshLlmControls(node.id);
+    });
+
+    node.llmControls = {
+      container,
+      capLine,
+      thinkWrap,
+      thinkInput,
+      imageNote
+    };
+  }
+
+  function refreshLlmControls(nodeId) {
+    const node = WS.nodes.get(nodeId);
+    if (!node || node.type !== 'LLM') return;
+    initLlmControls(node);
+    const controls = node.llmControls;
+    if (!controls) return;
+    const rec = NodeStore.ensure(nodeId, 'LLM');
+    const cfg = rec?.config || {};
+    const capabilities = Array.isArray(cfg.capabilities)
+      ? cfg.capabilities.map((c) => String(c).toLowerCase())
+      : [];
+    const displayCaps = Array.isArray(cfg.capabilities) && cfg.capabilities.length
+      ? cfg.capabilities.join(', ')
+      : '—';
+    if (controls.capLine) controls.capLine.textContent = `Capabilities: ${displayCaps}`;
+
+    const hasThinking = capabilities.some((cap) => cap === 'thinking' || cap === 'think' || cap === 'reasoning');
+    if (controls.thinkWrap) controls.thinkWrap.classList.toggle('hidden', !hasThinking);
+    if (controls.thinkInput && hasThinking) {
+      const current = !!cfg.think;
+      if (controls.thinkInput.checked !== current) controls.thinkInput.checked = current;
+    }
+
+    const hasImages = capabilities.some((cap) => cap === 'images' || cap === 'image' || cap === 'vision');
+    if (controls.imageNote) controls.imageNote.classList.toggle('hidden', !hasImages);
+    const imagePort = node.portEls?.['in:image'];
+    if (imagePort) {
+      imagePort.style.display = hasImages ? '' : 'none';
+    }
+    if (!hasImages) removeWiresAt(nodeId, 'in', 'image');
+  }
+
+  function normalizeRelayState(state) {
+    const value = String(state || '').toLowerCase();
+    return RELAY_STATE_CLASSES.has(value) ? value : 'warn';
+  }
+
+  function getTypeInfo(type) {
+    return typeof type === 'string' && GraphTypes ? GraphTypes[type] : null;
+  }
+
+  function getRelayValueFromConfig(cfg, info) {
+    if (!info || !info.relayKey) return '';
+    const raw = cfg ? cfg[info.relayKey] : '';
+    return typeof raw === 'string' ? raw.trim() : '';
+  }
+
+  function getNodeRelayState(nodeId) {
+    return relayStates.get(nodeId) || null;
+  }
+
+  function clearNodeRelayState(nodeId) {
+    relayStates.delete(nodeId);
+  }
+
+  function ensurePendingRelayState(nodeId, message = DEFAULT_PENDING_MESSAGE) {
+    if (!relayStates.has(nodeId)) {
+      relayStates.set(nodeId, { state: 'warn', message, at: Date.now() });
+    }
+  }
+
+  function setNodeRelayState(nodeId, stateOrDetail, message) {
+    const node = WS.nodes.get(nodeId);
+    if (!node) return;
+    const info = getTypeInfo(node.type);
+    if (!info?.supportsNkn) return;
+    let state = 'warn';
+    let msg = '';
+    if (typeof stateOrDetail === 'string') {
+      state = stateOrDetail;
+      msg = typeof message === 'string' ? message : '';
+    } else if (stateOrDetail && typeof stateOrDetail === 'object') {
+      state = stateOrDetail.state ?? stateOrDetail.status ?? 'warn';
+      msg = stateOrDetail.message ?? stateOrDetail.reason ?? stateOrDetail.detail ?? '';
+    }
+    state = normalizeRelayState(state);
+    relayStates.set(nodeId, { state, message: msg, at: Date.now() });
+    refreshNodeTransport(nodeId);
+  }
+
+  function parseNknAddress(rawText) {
+    if (rawText == null) return '';
+    let text = String(rawText).trim();
+    if (!text) return '';
+    try {
+      const url = new URL(text);
+      const params = url.searchParams;
+      let candidate = '';
+      const preferredKeys = ['nkn', 'address', 'addr', 'target'];
+      for (const key of preferredKeys) {
+        const value = params.get(key);
+        if (value) {
+          candidate = value;
+          break;
+        }
+      }
+      if (!candidate && params.size === 1) {
+        candidate = Array.from(params.values())[0] || '';
+      }
+      if (!candidate && url.search && url.search.length > 1) {
+        candidate = url.search.slice(1);
+      }
+      if (!candidate && url.hash && url.hash.length > 1) {
+        candidate = url.hash.slice(1);
+      }
+      if (!candidate && url.pathname && url.pathname !== '/') {
+        candidate = url.pathname.replace(/^\/+/, '');
+      }
+      if (candidate) text = candidate;
+    } catch (err) {
+      // not a URL, keep original text
+    }
+    try {
+      text = decodeURIComponent(text);
+    } catch (err) {
+      // ignore decode issues
+    }
+    text = text.trim().replace(/^[?#/]+/, '').replace(/[?#/]+$/, '');
+    if (!text) return '';
+    if (text.includes('?')) text = text.split('?')[0];
+    if (text.includes('&')) text = text.split('&')[0];
+    if (text.includes('=')) text = text.split('=')[1] || text;
+    text = text.replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:~-]{2,}$/.test(text)) return '';
+    return text;
+  }
+
+  function applyRelayValue(nodeId, nodeType, info, value) {
+    if (!info?.supportsNkn) return;
+    const key = info.relayKey || 'relay';
+    if (key === 'relay') {
+      NodeStore.setRelay(nodeId, nodeType, value);
+    } else {
+      NodeStore.update(nodeId, { type: nodeType, [key]: value });
+    }
+  }
+
+  function handleRelayScan(nodeId, nodeType, rawText, options = {}) {
+    const { skipIfSet = false, pendingMessage = DEFAULT_PENDING_MESSAGE, badgeOnSave = 'NKN address saved', badgeOnNoChange = 'NKN address already set', badgeOnInvalid = 'Invalid NKN address' } = options;
+    const node = WS.nodes.get(nodeId);
+    if (!node) return false;
+    const info = getTypeInfo(nodeType || node.type);
+    if (!info?.supportsNkn) return false;
+    const parsed = parseNknAddress(rawText);
+    if (!parsed) {
+      setBadge(badgeOnInvalid, false);
+      return false;
+    }
+    const rec = NodeStore.ensure(nodeId, node.type);
+    const cfg = rec.config || {};
+    const current = getRelayValueFromConfig(cfg, info);
+    if (current) {
+      if (skipIfSet) {
+        refreshNodeTransport(nodeId);
+        return false;
+      }
+      if (current === parsed) {
+        ensurePendingRelayState(nodeId, pendingMessage);
+        refreshNodeTransport(nodeId);
+        setBadge(badgeOnNoChange);
+        return false;
+      }
+    }
+    applyRelayValue(nodeId, node.type, info, parsed);
+    scheduleModelPrefetch(node.id, node.type, 0);
+    ensurePendingRelayState(nodeId, pendingMessage);
+    saveGraph();
+    if (info.relayKey === 'relay') updateTransportButton();
+    setBadge(badgeOnSave);
+    refreshNodeTransport(nodeId);
+    return true;
+  }
+
   function refreshNodeTransport(nodeId) {
     const node = WS.nodes.get(nodeId);
     if (!node) return;
+    const info = getTypeInfo(node.type);
+    if (!info?.supportsNkn) return;
     const btn = node.el?.querySelector('.node-transport');
     if (!btn) return;
     const rec = NodeStore.ensure(node.id, node.type);
-    const relay = (rec.config?.relay || '').trim();
+    const cfg = rec.config || {};
+    const relay = getRelayValueFromConfig(cfg, info);
     btn.innerHTML = '';
     btn.classList.remove('active');
+    btn.removeAttribute('data-relay-state');
     const dot = document.createElement('span');
     dot.className = 'dot';
     const label = document.createElement('span');
@@ -91,11 +357,28 @@ function createGraph({
     label.textContent = 'NKN';
     if (relay) {
       btn.classList.add('active');
-      if (CFG.transport === 'nkn' && Net?.nkn?.ready && Net.nkn.addr) dot.classList.add('ok');
-      else if (CFG.transport === 'nkn') dot.classList.add('warn');
-      else dot.classList.add('warn');
-      btn.title = relay;
+      let entry = relayStates.get(node.id);
+      if (!entry) {
+        ensurePendingRelayState(node.id);
+        entry = relayStates.get(node.id);
+      }
+      let stateClass = entry?.state || 'warn';
+      stateClass = normalizeRelayState(stateClass);
+      let detailMessage = entry?.message || '';
+      if (CFG.transport !== 'nkn') {
+        stateClass = 'warn';
+        if (!detailMessage) detailMessage = 'HTTP transport active';
+      } else if (!Net?.nkn?.ready) {
+        stateClass = 'warn';
+        if (!detailMessage) detailMessage = 'NKN transport connecting';
+      }
+      dot.classList.add(stateClass);
+      btn.dataset.relayState = stateClass;
+      const titleLines = [relay];
+      if (detailMessage) titleLines.push(detailMessage);
+      btn.title = titleLines.join('\n');
     } else {
+      clearNodeRelayState(node.id);
       dot.classList.add('err');
       btn.title = 'Scan a relay QR code';
     }
@@ -106,19 +389,19 @@ function createGraph({
     WS.nodes.forEach((n) => refreshNodeTransport(n.id));
   }
 
-  registerQrResultHandler(({ text, target }) => {
+  registerQrResultHandler(({ text }) => {
     if (!text) return;
     const form = qs('#settingsForm');
     const nodeId = form?.dataset?.nodeId;
     if (!nodeId) return;
     try {
-      const node = WS.nodes.get(nodeId);
-      if (!node) return;
-      NodeStore.setRelay(nodeId, node.type, text);
+      handleRelayScan(nodeId, WS.nodes.get(nodeId)?.type, text, {
+        skipIfSet: true,
+        badgeOnSave: 'NKN address saved',
+        badgeOnNoChange: 'NKN address unchanged',
+        badgeOnInvalid: 'Invalid NKN QR payload'
+      });
       refreshNodeTransport(nodeId);
-      saveGraph();
-      updateTransportButton();
-      setBadge('NKN relay saved');
     } catch (err) {
       log('[qr] ' + (err?.message || err));
     }
@@ -135,9 +418,49 @@ function createGraph({
     if (node.h) el.style.height = `${node.h}px`;
     el.dataset.id = node.id;
 
+    const computeMinDimensions = () => {
+      const head = el.querySelector('.head');
+      const body = el.querySelector('.body');
+      const headHeight = head ? head.offsetHeight : 0;
+      const bodyHeight = body ? body.scrollHeight : 0;
+      const baseMinHeight = Math.max(120, Math.ceil(headHeight + bodyHeight));
+      const headWidth = head ? head.scrollWidth : 0;
+      const bodyWidth = body ? body.scrollWidth : 0;
+      const baseMinWidth = Math.max(230, Math.ceil(Math.max(headWidth, bodyWidth)));
+      return { minHeight: baseMinHeight, minWidth: baseMinWidth };
+    };
+
+    const applyMinDimensions = ({ save = false } = {}) => {
+      const dims = computeMinDimensions();
+      el.style.minHeight = `${dims.minHeight}px`;
+      el.style.minWidth = `${dims.minWidth}px`;
+      let adjusted = false;
+      const currentW = Number.parseFloat(el.style.width) || el.offsetWidth;
+      const currentH = Number.parseFloat(el.style.height) || el.offsetHeight;
+      if (currentW < dims.minWidth) {
+        el.style.width = `${dims.minWidth}px`;
+        node.w = dims.minWidth;
+        adjusted = true;
+      }
+      if (currentH < dims.minHeight) {
+        el.style.height = `${dims.minHeight}px`;
+        node.h = dims.minHeight;
+        adjusted = true;
+      }
+      if (adjusted) {
+        requestRedraw();
+        if (save) saveGraph();
+      }
+      return dims;
+    };
+
+    const transportMarkup = t.supportsNkn
+      ? '<button type="button" class="node-transport" title="Toggle NKN relay">NKN</button>'
+      : '';
+
     el.innerHTML = `
       <div class="head">
-        <div class="titleRow"><div class="title">${t.title}</div><button type="button" class="node-transport">NKN</button></div>
+        <div class="titleRow"><div class="title">${t.title}</div>${transportMarkup}</div>
         <div class="row" style="gap:6px;">
           <button class="gear" title="Settings">⚙</button>
           ${node.type === 'ASR' ? `<button class="gear asrPlay" title="Start/Stop">▶</button>` : ''}
@@ -233,26 +556,20 @@ function createGraph({
     `;
 
     const transportBtn = el.querySelector('.node-transport');
-    if (transportBtn) {
+    if (transportBtn && t.supportsNkn) {
       transportBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         const rec = NodeStore.ensure(node.id, node.type);
-        const relay = (rec.config?.relay || '').trim();
-        if (relay) {
-          NodeStore.setRelay(node.id, node.type, '');
-          refreshNodeTransport(node.id);
-          saveGraph();
-          updateTransportButton();
-          setBadge('Switched to HTTP');
-        } else {
+        const cfg = rec.config || {};
+        const info = t;
+        const currentRelay = getRelayValueFromConfig(cfg, info);
+        if (!currentRelay) {
           openQrScanner(null, (txt) => {
             if (!txt) return;
-            NodeStore.setRelay(node.id, node.type, txt.trim());
-            refreshNodeTransport(node.id);
-            saveGraph();
-            updateTransportButton();
-            setBadge('NKN relay saved');
+            handleRelayScan(node.id, node.type, txt, { pendingMessage: DEFAULT_PENDING_MESSAGE });
           });
+        } else {
+          setBadge(info.relayKey === 'relay' ? 'NKN relay already configured' : 'NKN address already set');
         }
       });
       refreshNodeTransport(node.id);
@@ -280,12 +597,15 @@ function createGraph({
     resizeHandle.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       const bounds = el.getBoundingClientRect();
+      const minDims = applyMinDimensions();
       resizeState = {
         id: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
         startW: bounds.width,
-        startH: bounds.height
+        startH: bounds.height,
+        minW: minDims.minWidth,
+        minH: minDims.minHeight
       };
       resizeHandle.setPointerCapture(e.pointerId);
       document.body.style.cursor = 'se-resize';
@@ -295,8 +615,11 @@ function createGraph({
       if (!resizeState) return;
       const dx = e.clientX - resizeState.startX;
       const dy = e.clientY - resizeState.startY;
-      const minW = 180;
-      const minH = 120;
+      const dynamicMin = computeMinDimensions();
+      const minW = Math.max(resizeState.minW, dynamicMin.minWidth);
+      const minH = Math.max(resizeState.minH, dynamicMin.minHeight);
+      el.style.minWidth = `${minW}px`;
+      el.style.minHeight = `${minH}px`;
       const w = Math.max(minW, Math.round(resizeState.startW + dx));
       const h = Math.max(minH, Math.round(resizeState.startH + dy));
       el.style.width = `${w}px`;
@@ -310,13 +633,18 @@ function createGraph({
       if (!resizeState) return;
       resizeState = null;
       document.body.style.cursor = '';
-      saveGraph();
+      applyMinDimensions({ save: true });
     };
     resizeHandle.addEventListener('pointerup', endResize);
     resizeHandle.addEventListener('pointercancel', endResize);
 
     const left = el.querySelector('.side.left');
     const right = el.querySelector('.side.right');
+    node.portEls = node.portEls || {};
+
+    if (node.type === 'LLM') {
+      initLlmControls(node);
+    }
 
     if (node.type === 'TextInput') {
       initTextInputNode(node);
@@ -336,6 +664,7 @@ function createGraph({
       portEl.dataset.port = p.name;
       portEl.title = `${p.name} (Alt-click to disconnect)`;
       portEl.innerHTML = `<span class="dot"></span><span>${p.name}</span>`;
+      node.portEls[`in:${p.name}`] = portEl;
       portEl.addEventListener('click', (ev) => {
         if (ev.altKey || ev.metaKey || ev.ctrlKey) {
           removeWiresAt(node.id, 'in', p.name);
@@ -423,6 +752,7 @@ function createGraph({
             pullLlmSystemInput(node.id);
             return LLM.onPrompt(node.id, payload);
           }
+          if (p.name === 'image') return LLM.onImage?.(node.id, payload);
           if (p.name === 'system') return LLM.onSystem(node.id, payload);
         } else if (node.type === 'TTS') {
           if (p.name === 'text') return TTS.onText(node.id, payload);
@@ -448,6 +778,7 @@ function createGraph({
       portEl.dataset.port = p.name;
       portEl.title = `${p.name} (Alt-click to disconnect)`;
       portEl.innerHTML = `<span>${p.name}</span><span class="dot"></span>`;
+      node.portEls[`out:${p.name}`] = portEl;
       portEl.addEventListener('click', (ev) => {
         if (ev.altKey || ev.metaKey || ev.ctrlKey) {
           removeWiresAt(node.id, 'out', p.name);
@@ -613,11 +944,18 @@ function createGraph({
     }
     btnDel.addEventListener('click', () => removeNode(node.id));
     if ('ResizeObserver' in window) {
-      const ro = new ResizeObserver(() => requestRedraw());
+      const ro = new ResizeObserver(() => {
+        applyMinDimensions();
+      });
       ro.observe(el);
       node._ro = ro;
     }
 
+    if (node.type === 'LLM') {
+      refreshLlmControls(node.id);
+    }
+
+    requestAnimationFrame(() => applyMinDimensions());
     return el;
   }
 
@@ -944,6 +1282,7 @@ function createGraph({
       node.el = makeNodeEl(node);
       WS.canvas.appendChild(node.el);
       WS.nodes.set(node.id, node);
+      scheduleModelPrefetch(node.id, node.type, 400);
       if (node.type === 'TTS') requestAnimationFrame(() => TTS.refreshUI(node.id));
       if (node.type === 'TextInput') requestAnimationFrame(() => initTextInputNode(node));
       if (node.type === 'TextDisplay') requestAnimationFrame(() => initTextDisplayNode(node));
@@ -1068,6 +1407,8 @@ function createGraph({
   const GraphTypes = {
     ASR: {
       title: 'ASR',
+      supportsNkn: true,
+      relayKey: 'relay',
       inputs: [],
       outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }],
       schema: [
@@ -1094,7 +1435,9 @@ function createGraph({
     },
     LLM: {
       title: 'LLM',
-      inputs: [{ name: 'prompt' }, { name: 'system' }],
+      supportsNkn: true,
+      relayKey: 'relay',
+      inputs: [{ name: 'prompt' }, { name: 'image' }, { name: 'system' }],
       outputs: [{ name: 'delta' }, { name: 'final' }, { name: 'memory' }],
       schema: [
         { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:11434' },
@@ -1111,6 +1454,8 @@ function createGraph({
     },
     TTS: {
       title: 'TTS',
+      supportsNkn: true,
+      relayKey: 'relay',
       inputs: [{ name: 'text' }],
       outputs: [],
       schema: [
@@ -1145,6 +1490,8 @@ function createGraph({
     },
     NknDM: {
       title: 'NKN DM',
+      supportsNkn: true,
+      relayKey: 'address',
       inputs: [{ name: 'text' }],
       outputs: [{ name: 'incoming' }, { name: 'status' }, { name: 'raw' }],
       schema: [
@@ -1189,6 +1536,8 @@ function createGraph({
     },
     MCP: {
       title: 'MCP Server',
+      supportsNkn: true,
+      relayKey: 'relay',
       inputs: [{ name: 'query' }, { name: 'tool' }, { name: 'refresh' }],
       outputs: [{ name: 'system' }, { name: 'prompt' }, { name: 'context' }, { name: 'resources' }, { name: 'status' }, { name: 'raw' }],
       schema: [
@@ -1760,6 +2109,94 @@ function createGraph({
         continue;
       }
       if (field.type === 'select') {
+        const modelProvider = field.key === 'model' ? MODEL_PROVIDERS[node.type] : null;
+        if (modelProvider && typeof modelProvider.ensureModels === 'function') {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'model-picker';
+
+          const hiddenInput = document.createElement('input');
+          hiddenInput.type = 'hidden';
+          hiddenInput.name = field.key;
+          hiddenInput.value = String(cfg[field.key] ?? field.def ?? '');
+          wrapper.appendChild(hiddenInput);
+
+          const buttonRow = document.createElement('div');
+          buttonRow.className = 'model-picker-buttons';
+          wrapper.appendChild(buttonRow);
+
+          const detailBox = document.createElement('pre');
+          detailBox.className = 'model-picker-detail';
+          detailBox.textContent = 'Select a model to view details';
+          wrapper.appendChild(detailBox);
+
+          fields.appendChild(label);
+          fields.appendChild(wrapper);
+
+          const setSelection = (meta) => {
+            if (!meta) return;
+            hiddenInput.value = meta.id;
+            const pretty = JSON.stringify(meta.raw || {}, null, 2);
+            const caps = Array.isArray(meta.capabilities) && meta.capabilities.length ? `Capabilities: ${meta.capabilities.join(', ')}\n\n` : '';
+            detailBox.textContent = caps + pretty;
+            detailBox.dataset.modelId = meta.id;
+            wrapper.dataset.selectedModel = meta.id;
+            buttonRow.querySelectorAll('button').forEach((btn) => {
+              if (btn.dataset.modelId === meta.id) btn.classList.add('selected');
+              else btn.classList.remove('selected');
+            });
+          };
+
+          const renderButtons = () => {
+            const models = modelProvider.listModels?.(node.id) || [];
+            buttonRow.innerHTML = '';
+            if (!models.length) {
+              const msg = document.createElement('div');
+              msg.className = 'model-picker-empty';
+              msg.textContent = 'No models found';
+              buttonRow.appendChild(msg);
+              return;
+            }
+            models.forEach((meta) => {
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.dataset.modelId = meta.id;
+              btn.className = 'model-picker-button';
+              btn.textContent = meta.label;
+              btn.addEventListener('click', () => setSelection(meta));
+              buttonRow.appendChild(btn);
+            });
+            const currentId = hiddenInput.value && modelProvider.getModelInfo?.(node.id, hiddenInput.value)
+              ? hiddenInput.value
+              : models[0].id;
+            const selectedMeta = modelProvider.getModelInfo?.(node.id, currentId) || models[0];
+            setSelection(selectedMeta);
+          };
+
+          const cachedModels = modelProvider.listModels?.(node.id) || [];
+          if (cachedModels.length) {
+            renderButtons();
+          } else {
+            const status = document.createElement('div');
+            status.className = 'model-picker-status';
+            status.textContent = 'Loading models…';
+            buttonRow.appendChild(status);
+          }
+
+          modelProvider.ensureModels(node.id)
+            .then(() => {
+              renderButtons();
+            })
+            .catch((err) => {
+              const available = modelProvider.listModels?.(node.id) || [];
+              if (available.length) return;
+              buttonRow.innerHTML = '';
+              const status = document.createElement('div');
+              status.className = 'model-picker-status';
+              status.textContent = `Failed to load models: ${err?.message || err}`;
+              buttonRow.appendChild(status);
+            });
+          continue;
+        }
         const select = document.createElement('select');
         select.name = field.key;
         const currentValue = String((cfg[field.key] ?? field.def ?? ''));
@@ -1937,8 +2374,22 @@ function createGraph({
           patch[k] = String(v);
         }
       }
+      if (patch.model && MODEL_PROVIDERS[node.type]?.getModelInfo) {
+        const info = MODEL_PROVIDERS[node.type].getModelInfo(nodeId, patch.model);
+        if (info && node.type === 'LLM') {
+          patch.capabilities = info.capabilities || [];
+        }
+      }
       patch.type = node.type;
       const updatedCfg = NodeStore.update(nodeId, patch);
+      const typeInfo = GraphTypes[node.type];
+      if (typeInfo?.supportsNkn) {
+        const relayValue = getRelayValueFromConfig(updatedCfg, typeInfo);
+        if (relayValue) ensurePendingRelayState(nodeId, DEFAULT_PENDING_MESSAGE);
+        else clearNodeRelayState(nodeId);
+        if (typeInfo.relayKey === 'relay') updateTransportButton();
+        refreshNodeTransport(nodeId);
+      }
       if (node.type === 'TTS') {
         TTS.refreshUI(node.id);
       }
@@ -1962,6 +2413,10 @@ function createGraph({
       if (node.type === 'Template') {
         pullTemplateInputs(nodeId);
       }
+      if (node.type === 'LLM') {
+        refreshLlmControls(nodeId);
+      }
+      scheduleModelPrefetch(nodeId, node.type, 150);
       setBadge('Settings saved');
       closeSettings();
     });
@@ -1974,6 +2429,7 @@ function createGraph({
     node.el = makeNodeEl(node);
     WS.canvas.appendChild(node.el);
     WS.nodes.set(id, node);
+    scheduleModelPrefetch(id, type, 300);
     if (type === 'TTS') requestAnimationFrame(() => TTS.refreshUI(id));
     if (type === 'TextInput') requestAnimationFrame(() => initTextInputNode(node));
     if (type === 'TextDisplay') requestAnimationFrame(() => initTextDisplayNode(node));
@@ -2341,7 +2797,9 @@ function createGraph({
     exportWorkspace: exportWorkspaceSnapshot,
     importWorkspace: importWorkspaceSnapshot,
     getNode: (id) => WS.nodes.get(id),
-    refreshTransportButtons: refreshAllNodeTransport
+    refreshTransportButtons: refreshAllNodeTransport,
+    setRelayState: setNodeRelayState,
+    getRelayState: getNodeRelayState
   };
 }
 

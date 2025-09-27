@@ -24,6 +24,9 @@ const graphAccess = {
   getNode: () => null
 };
 
+let applyRelayState = () => {};
+const setRelayState = (...args) => applyRelayState(...args);
+
 const LLM = createLLM({
   getNode: (id) => graphAccess.getNode(id),
   NodeStore,
@@ -33,7 +36,8 @@ const LLM = createLLM({
   createSentenceMux,
   makeNdjsonPump,
   stripEOT,
-  log
+  log,
+  setRelayState
 });
 
 const TTS = createTTS({
@@ -42,7 +46,8 @@ const TTS = createTTS({
   Net,
   CFG,
   log,
-  b64ToBytes
+  b64ToBytes,
+  setRelayState
 });
 
 const ASR = createASR({
@@ -54,7 +59,8 @@ const ASR = createASR({
   SIGNOFF_RE,
   td,
   setBadge,
-  log
+  log,
+  setRelayState
 });
 
 const NknDM = createNknDM({
@@ -63,7 +69,8 @@ const NknDM = createNknDM({
   Net,
   CFG,
   Router,
-  log
+  log,
+  setRelayState
 });
 
 const MCP = createMCP({
@@ -73,7 +80,8 @@ const MCP = createMCP({
   Net,
   CFG,
   log,
-  setBadge
+  setBadge,
+  setRelayState
 });
 
 const Media = createMediaNode({
@@ -121,6 +129,7 @@ const Graph = createGraph({
 });
 
 graphAccess.getNode = (id) => Graph.getNode(id);
+applyRelayState = (...args) => Graph.setRelayState(...args);
 
 const WorkspaceSync = createWorkspaceSync({
   Graph,

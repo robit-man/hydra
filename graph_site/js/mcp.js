@@ -5,7 +5,8 @@ function createMCP({
   Net,
   CFG,
   log,
-  setBadge
+  setBadge,
+  setRelayState = () => {}
 }) {
   const stateByNode = new Map();
 
@@ -52,6 +53,23 @@ function createMCP({
     const state = ensureState(nodeId);
     Object.assign(state, patch || {});
     renderState(nodeId, state);
+    try {
+      const cfg = NodeStore.ensure(nodeId, 'MCP').config || {};
+      const relay = (cfg.relay || '').trim();
+      if (!relay) return;
+      if (CFG.transport !== 'nkn') return;
+      if (state.status === 'ready') {
+        setRelayState(nodeId, { state: 'ok', message: 'Server ready' });
+      } else if (state.status === 'error') {
+        setRelayState(nodeId, { state: 'err', message: state.lastError || 'Connection error' });
+      } else if (state.status === 'loading') {
+        setRelayState(nodeId, { state: 'warn', message: 'Connecting…' });
+      } else {
+        setRelayState(nodeId, { state: 'warn', message: 'Idle' });
+      }
+    } catch (err) {
+      // ignore relay state update issues
+    }
   }
 
   function renderState(nodeId, state) {

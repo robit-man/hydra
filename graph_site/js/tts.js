@@ -1,5 +1,96 @@
-function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
+function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayState = () => {} }) {
   const state = new Map();
+  const MODEL_PROMISE = new Map();
+  const MODEL_METADATA = new Map();
+
+  function normalizeModelEntry(raw) {
+    if (raw == null) return null;
+    if (typeof raw === 'string') {
+      const id = raw.trim();
+      if (!id) return null;
+      return { id, label: id, raw: { name: id } };
+    }
+    if (typeof raw !== 'object') return null;
+    const id = String(raw.id || raw.name || raw.model || raw.voice || '').trim();
+    if (!id) return null;
+    const label = String(raw.name || raw.id || raw.voice || id).trim() || id;
+    return { id, label, raw };
+  }
+
+  async function fetchModelMetadata(base, api, viaNkn, relay) {
+    const cleaned = (base || '').replace(/\/+$/, '');
+    if (!cleaned) return [];
+    try {
+      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay);
+      const list = [];
+      const push = (entry) => {
+        const normalized = normalizeModelEntry(entry);
+        if (normalized) list.push(normalized);
+      };
+      if (Array.isArray(res?.models)) res.models.forEach(push);
+      else if (Array.isArray(res?.data)) res.data.forEach(push);
+      else if (Array.isArray(res)) res.forEach(push);
+      const dedup = new Map();
+      for (const item of list) {
+        if (!dedup.has(item.id)) dedup.set(item.id, item);
+      }
+      return Array.from(dedup.values()).sort((a, b) => a.label.localeCompare(b.label));
+    } catch (err) {
+      return [];
+    }
+  }
+
+  async function ensureModelMetadata(nodeId, cfg, { force = false } = {}) {
+    const base = (cfg.base || '').trim();
+    if (!base) {
+      MODEL_METADATA.set(nodeId, []);
+      return [];
+    }
+    if (!force && MODEL_METADATA.has(nodeId)) return MODEL_METADATA.get(nodeId);
+    if (MODEL_PROMISE.has(nodeId)) {
+      return MODEL_PROMISE.get(nodeId);
+    }
+    const viaNkn = CFG.transport === 'nkn';
+    const relay = (cfg.relay || '').trim();
+    const api = (cfg.api || '').trim();
+    const task = (async () => {
+      const list = await fetchModelMetadata(base, api, viaNkn, relay);
+      MODEL_METADATA.set(nodeId, list);
+      return list;
+    })();
+    MODEL_PROMISE.set(nodeId, task);
+    try {
+      return await task;
+    } finally {
+      MODEL_PROMISE.delete(nodeId);
+    }
+  }
+
+  async function ensureModelConfigured(nodeId, cfg) {
+    const base = (cfg.base || '').trim();
+    if (!base) return cfg;
+    const metadata = await ensureModelMetadata(nodeId, cfg);
+    if (!metadata.length) return cfg;
+    const currentId = (cfg.model || '').trim();
+    const chosen = metadata.find((item) => item.id === currentId) || metadata[0];
+    NodeStore.update(nodeId, { type: 'TTS', model: chosen.id });
+    return NodeStore.ensure(nodeId, 'TTS').config || cfg;
+  }
+
+  async function ensureModels(nodeId, options = {}) {
+    const rec = NodeStore.ensure(nodeId, 'TTS');
+    const cfg = rec?.config || {};
+    return ensureModelMetadata(nodeId, cfg, options) || [];
+  }
+
+  function listModels(nodeId) {
+    return MODEL_METADATA.get(nodeId) || [];
+  }
+
+  function getModelInfo(nodeId, modelId) {
+    const models = listModels(nodeId);
+    return models.find((item) => item.id === modelId) || null;
+  }
 
   function ensure(nodeId) {
     let entry = state.get(nodeId);
@@ -224,13 +315,19 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
   async function onText(nodeId, payload) {
     const node = getNode(nodeId);
     if (!node) return;
-    const cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
+    let cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
+    cfg = await ensureModelConfigured(nodeId, cfg);
     const base = (cfg.base || '').trim();
     const api = (cfg.api || '').trim();
     const relay = (cfg.relay || '').trim();
     const model = (cfg.model || '').trim();
     const viaNkn = CFG.transport === 'nkn';
     const mode = cfg.mode || 'stream';
+    const usingNkn = viaNkn && !!relay;
+    const updateRelayState = (state, message) => {
+      if (!usingNkn) return;
+      setRelayState(nodeId, { state, message });
+    };
 
     const raw = (payload && (payload.text || payload)) || '';
     const eos = !!(payload && payload.eos);
@@ -241,6 +338,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
     if (!clean) return;
 
     const speakOnce = async () => {
+      if (usingNkn) updateRelayState('warn', mode === 'stream' ? 'Awaiting audio stream' : 'Synthesizing audio');
       if (mode === 'stream') {
         await st.ac.resume();
         showStreamUI(st);
@@ -265,6 +363,12 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
             let expected = null;
             const stash = new Map();
             const seen = new Set();
+            let relayMarkedOk = false;
+            const markRelayOk = (msg) => {
+              if (!usingNkn || relayMarkedOk) return;
+              relayMarkedOk = true;
+              updateRelayState('ok', msg);
+            };
             const flush = () => {
               while (expected != null && stash.has(expected)) {
                 handleBytes(stash.get(expected));
@@ -284,6 +388,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
               {
                 onBegin: () => {},
                 onChunk: (u8, seqRaw) => {
+                  markRelayOk('Streaming audio');
                   const seq = seqRaw | 0;
                   if (seen.has(seq)) return;
                   seen.add(seq);
@@ -297,6 +402,10 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
                   }
                 },
                 onEnd: () => {
+                  if (usingNkn) {
+                    const completionMessage = relayMarkedOk ? 'Stream complete' : 'No audio received';
+                    updateRelayState(relayMarkedOk ? 'ok' : 'warn', completionMessage);
+                  }
                   flush();
                 },
                 lingerEndMs: 350
@@ -330,6 +439,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
           }
         } catch (err) {
           log(`[tts ${nodeId}] ${err.message}`);
+          if (usingNkn) updateRelayState('err', err?.message || 'TTS relay failed');
         }
 
         enqueue(st, new Float32Array(Math.round((st.sr || 22050) * 0.03)));
@@ -357,6 +467,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
           } else {
             throw new Error('no audio');
           }
+          if (usingNkn) updateRelayState('ok', 'Audio ready');
           const url = URL.createObjectURL(blob);
           if (st.audioEl) {
             await new Promise((resolve) => {
@@ -371,6 +482,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
           }
         } catch (err) {
           log(`[tts ${nodeId}] ${err.message}`);
+          if (usingNkn) updateRelayState('err', err?.message || 'TTS relay failed');
         }
       }
     };
@@ -379,10 +491,25 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes }) {
     return st.chain;
   }
 
+  async function ensureDefaults(nodeId) {
+    try {
+      const rec = NodeStore.ensure(nodeId, 'TTS');
+      const cfg = rec?.config || {};
+      await ensureModels(nodeId);
+      await ensureModelConfigured(nodeId, cfg);
+    } catch (err) {
+      // ignore background discovery failures
+    }
+  }
+
   return {
     ensure,
     refreshUI,
-    onText
+    onText,
+    ensureDefaults,
+    ensureModels,
+    listModels,
+    getModelInfo
   };
 }
 

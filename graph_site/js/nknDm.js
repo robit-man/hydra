@@ -1,6 +1,6 @@
 import { setBadge } from './utils.js';
 
-function createNknDM({ getNode, NodeStore, Net, CFG, Router, log }) {
+function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState = () => {} }) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const nodeState = new Map();
@@ -753,6 +753,15 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log }) {
       el.classList.add('offline');
       el.title = 'Offline';
     }
+    const relayStateMap = {
+      online: { state: 'ok', message: 'Peer connected' },
+      pending: { state: 'warn', message: 'Awaiting peer response' },
+      warning: { state: 'warn', message: 'Heartbeat delayed' },
+      critical: { state: 'err', message: 'Heartbeat timeout' },
+      offline: { state: 'warn', message: 'Offline' }
+    };
+    const relayDetail = relayStateMap[status] || relayStateMap.offline;
+    setRelayState(nodeId, relayDetail);
   }
 
   function togglePeerActions(nodeId, show) {

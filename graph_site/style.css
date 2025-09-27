@@ -60,6 +60,8 @@ main {
   margin-left: auto;
 }
 
+
+.model-picker-buttons{display:flex;flex-flow:wrap;gap:0.5rem;}
 .icon {
   line-height: 1;
   height: 1.5rem;
@@ -426,6 +428,86 @@ textarea {
 
 .input-with-btn button {
   flex: 0 0 auto;
+}
+
+.model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-picker-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-picker-button {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.model-picker-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.model-picker-button.selected {
+  background: var(--accent);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: black;
+}
+
+.model-picker-status,
+.model-picker-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.model-picker-detail {
+  max-height: 200px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.llm-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.llm-capabilities {
+  font-weight: 600;
+}
+
+.llm-think {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.llm-image-note {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.llm-think.hidden,
+.llm-image-note.hidden {
+  display: none;
 }
 
 #qrModal video {

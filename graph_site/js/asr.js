@@ -7,8 +7,99 @@ function createASR({
   SIGNOFF_RE,
   td,
   setBadge,
-  log
+  log,
+  setRelayState = () => {}
 }) {
+  const MODEL_PROMISE = new Map();
+  const MODEL_METADATA = new Map();
+
+  function normalizeModelEntry(raw) {
+    if (raw == null) return null;
+    if (typeof raw === 'string') {
+      const id = raw.trim();
+      if (!id) return null;
+      return { id, label: id, raw: { name: id } };
+    }
+    if (typeof raw !== 'object') return null;
+    const id = String(raw.id || raw.name || raw.model || raw.slug || '').trim();
+    if (!id) return null;
+    const label = String(raw.name || raw.id || id).trim() || id;
+    return { id, label, raw };
+  }
+
+  async function fetchModelMetadata(base, api, viaNkn, relay) {
+    const cleaned = (base || '').replace(/\/+$/, '');
+    if (!cleaned) return [];
+    try {
+      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay);
+      const list = [];
+      const push = (entry) => {
+        const normalized = normalizeModelEntry(entry);
+        if (normalized) list.push(normalized);
+      };
+      if (Array.isArray(res?.models)) res.models.forEach(push);
+      else if (Array.isArray(res?.data)) res.data.forEach(push);
+      else if (Array.isArray(res)) res.forEach(push);
+      const dedup = new Map();
+      for (const item of list) {
+        if (!dedup.has(item.id)) dedup.set(item.id, item);
+      }
+      return Array.from(dedup.values()).sort((a, b) => a.label.localeCompare(b.label));
+    } catch (err) {
+      return [];
+    }
+  }
+
+  async function ensureModelMetadata(nodeId, cfg, { force = false } = {}) {
+    const base = (cfg.base || '').trim();
+    if (!base) {
+      MODEL_METADATA.set(nodeId, []);
+      return [];
+    }
+    if (!force && MODEL_METADATA.has(nodeId)) return MODEL_METADATA.get(nodeId);
+    if (MODEL_PROMISE.has(nodeId)) return MODEL_PROMISE.get(nodeId);
+    const viaNkn = CFG.transport === 'nkn';
+    const relay = (cfg.relay || '').trim();
+    const api = (cfg.api || '').trim();
+    const task = (async () => {
+      const list = await fetchModelMetadata(base, api, viaNkn, relay);
+      MODEL_METADATA.set(nodeId, list);
+      return list;
+    })();
+    MODEL_PROMISE.set(nodeId, task);
+    try {
+      return await task;
+    } finally {
+      MODEL_PROMISE.delete(nodeId);
+    }
+  }
+
+  async function ensureModelConfigured(nodeId, cfg) {
+    const base = (cfg.base || '').trim();
+    if (!base) return cfg;
+    const metadata = await ensureModelMetadata(nodeId, cfg);
+    if (!metadata.length) return cfg;
+    const currentId = (cfg.model || '').trim();
+    const chosen = metadata.find((item) => item.id === currentId) || metadata[0];
+    NodeStore.update(nodeId, { type: 'ASR', model: chosen.id });
+    return NodeStore.ensure(nodeId, 'ASR').config || cfg;
+  }
+
+  async function ensureModels(nodeId, options = {}) {
+    const rec = NodeStore.ensure(nodeId, 'ASR');
+    const cfg = rec?.config || {};
+    return ensureModelMetadata(nodeId, cfg, options) || [];
+  }
+
+  function listModels(nodeId) {
+    return MODEL_METADATA.get(nodeId) || [];
+  }
+
+  function getModelInfo(nodeId, modelId) {
+    const models = listModels(nodeId);
+    return models.find((item) => item.id === modelId) || null;
+  }
+
   const ASR = {
     ownerId: null,
     running: false,
@@ -28,6 +119,10 @@ function createASR({
     _api: '',
     _relay: '',
     _viaNkn: false,
+    _relayStatus(state, message) {
+      if (!this.ownerId || !this._viaNkn || !this._relay) return;
+      setRelayState(this.ownerId, { state, message });
+    },
     _live: true,
     _sawSpeech: false,
     finalizing: false,
@@ -348,10 +443,12 @@ function createASR({
         this.sid = (data && (data.sid || data.id || data.session)) || null;
         if (!this.sid) throw new Error('no sid');
         const sid = this.sid;
+        this._relayStatus('ok', 'Session ready');
         this.openEvents(sid, this._viaNkn, this._base, this._relay, this._api, cfg).catch(() => {});
         this.flushLoop(this._rate, this._chunk, this._viaNkn, this._base, this._relay, this._api).catch(() => {});
       } catch (err) {
         log('[asr] start(lazy) ' + (err?.message || err));
+        this._relayStatus('err', err?.message || 'Session start failed');
       } finally {
         this._startingSid = false;
       }
@@ -395,7 +492,8 @@ function createASR({
         await this.stop();
       }
       const rec = NodeStore.ensure(nodeId, 'ASR');
-      const cfg = rec.config || {};
+      let cfg = rec.config || {};
+      cfg = await ensureModelConfigured(nodeId, cfg);
       this.ownerId = nodeId;
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
@@ -404,6 +502,7 @@ function createASR({
       this._base = cfg.base || '';
       this._relay = cfg.relay || '';
       this._api = cfg.api || '';
+      this._relayStatus('warn', 'Initializing session');
       this._sawSpeech = false;
       this.finalizing = false;
       this._uplinkOn = false;
@@ -577,6 +676,7 @@ function createASR({
       this._preInit(this._rate || 16000);
       if (visId) this._stopVis(visId);
       this._setVU(0);
+      this._relayStatus('warn', 'Idle');
       this.ownerId = null;
     },
 
@@ -625,80 +725,99 @@ function createASR({
     },
 
     async openEvents(sid, viaNkn, base, relay, api, cfg) {
-      const pump = (() => {
-        let buffer = '';
-        return (u8) => {
-          buffer += td.decode(u8, { stream: true });
-          let index;
-          while ((index = buffer.indexOf('\n\n')) >= 0) {
-            const chunk = buffer.slice(0, index);
-            buffer = buffer.slice(index + 2);
-            let ev = null;
-            let data = '';
-            for (const line of chunk.split(/\r?\n/)) {
-              if (!line) continue;
-              if (line.startsWith(':')) continue;
-              if (line.startsWith('event:')) ev = line.slice(6).trim();
-              else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
-            }
-            if (data) {
-              try {
-                const obj = JSON.parse(data);
-                const type = (obj.type || obj.event || '').toLowerCase();
-                if (type === 'asr.partial' || type === 'partial') {
-                  const text = obj.text || (obj.result && obj.result.text) || '';
-                  const sameSid = (sid === ASR.sid);
-                  const ok = sameSid && !ASR.finalizing && ASR._uplinkOn && ASR.vad.state === 'voice' && !ASR._ignorePartials;
-                  if (ok) {
-                    ASR.printPartial(text, cfg);
-                    if (text) {
-                      ASR._sawSpeech = true;
-                      ASR._lastPartialAt = performance.now();
-                      ASR._sawPartialForUplink = true;
+      let sawEvent = false;
+      const markReceiving = () => {
+        if (sawEvent) return;
+        sawEvent = true;
+        this._relayStatus('ok', 'Receiving transcripts');
+      };
+
+      try {
+        const pump = (() => {
+          let buffer = '';
+          return (u8) => {
+            buffer += td.decode(u8, { stream: true });
+            let index;
+            while ((index = buffer.indexOf('\n\n')) >= 0) {
+              const chunk = buffer.slice(0, index);
+              buffer = buffer.slice(index + 2);
+              let ev = null;
+              let data = '';
+              for (const line of chunk.split(/\r?\n/)) {
+                if (!line) continue;
+                if (line.startsWith(':')) continue;
+                if (line.startsWith('event:')) ev = line.slice(6).trim();
+                else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
+              }
+              if (data) {
+                try {
+                  const obj = JSON.parse(data);
+                  const type = (obj.type || obj.event || '').toLowerCase();
+                  if (type === 'asr.partial' || type === 'partial') {
+                    const text = obj.text || (obj.result && obj.result.text) || '';
+                    const sameSid = (sid === ASR.sid);
+                    const ok = sameSid && !ASR.finalizing && ASR._uplinkOn && ASR.vad.state === 'voice' && !ASR._ignorePartials;
+                    if (ok) {
+                      markReceiving();
+                      ASR.printPartial(text, cfg);
+                      if (text) {
+                        ASR._sawSpeech = true;
+                        ASR._lastPartialAt = performance.now();
+                        ASR._sawPartialForUplink = true;
+                      }
                     }
-                  }
-                } else if (type === 'asr.detected' || type === 'detected') {
-                  const s = obj.text || (obj.result && obj.result.text) || '';
-                  if (s) {
+                  } else if (type === 'asr.detected' || type === 'detected') {
+                    const s = obj.text || (obj.result && obj.result.text) || '';
+                    if (s) {
+                      markReceiving();
+                      const meta = obj.result || obj;
+                      if (!ASR.shouldDropAsHallucination(s, meta)) ASR._routePhrase(s);
+                    }
+                  } else if (type === 'asr.final' || type === 'final') {
+                    const s = (obj.result && obj.result.text) || obj.text || '';
                     const meta = obj.result || obj;
-                    if (!ASR.shouldDropAsHallucination(s, meta)) ASR._routePhrase(s);
-                  }
-                } else if (type === 'asr.final' || type === 'final') {
-                  const s = (obj.result && obj.result.text) || obj.text || '';
-                  const meta = obj.result || obj;
-                  if (s) {
-                    if (ASR.shouldDropAsHallucination(s, meta)) {
-                      log('[asr] dropped probable sign-off: "' + s + '"');
-                    } else {
-                      ASR._ignorePartials = true;
-                      ASR.appendFinal(s);
-                      ASR.handleFinalFlush(s);
+                    if (s) {
+                      markReceiving();
+                      if (ASR.shouldDropAsHallucination(s, meta)) {
+                        log('[asr] dropped probable sign-off: "' + s + '"');
+                      } else {
+                        ASR._ignorePartials = true;
+                        ASR.appendFinal(s);
+                        ASR.handleFinalFlush(s);
+                      }
                     }
                   }
+                } catch (err) {
+                  // ignore parse errors
                 }
-              } catch (err) {
-                // ignore parse errors
               }
             }
-          }
-        };
-      })();
+          };
+        })();
 
-      if (viaNkn) {
-        await Net.nknStream(
-          { url: base.replace(/\/+$/, '') + `/recognize/stream/${encodeURIComponent(sid)}/events`, method: 'GET', headers: Net.auth({ 'X-Relay-Stream': 'chunks' }, api), timeout_ms: 10 * 60 * 1000 },
-          relay,
-          { onBegin: () => {}, onChunk: (u8) => pump(u8), onEnd: () => {} }
-        );
-      } else {
-        const res = await fetch(base.replace(/\/+$/, '') + `/recognize/stream/${encodeURIComponent(sid)}/events`, { headers: Net.auth({}, api) });
-        if (!res.ok || !res.body) return;
-        const reader = res.body.getReader();
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value && value.byteLength) pump(value);
+        if (viaNkn) {
+          await Net.nknStream(
+            { url: base.replace(/\/+$/, '') + `/recognize/stream/${encodeURIComponent(sid)}/events`, method: 'GET', headers: Net.auth({ 'X-Relay-Stream': 'chunks' }, api), timeout_ms: 10 * 60 * 1000 },
+            relay,
+            { onBegin: () => {}, onChunk: (u8) => pump(u8), onEnd: () => {} }
+          );
+        } else {
+          const res = await fetch(base.replace(/\/+$/, '') + `/recognize/stream/${encodeURIComponent(sid)}/events`, { headers: Net.auth({}, api) });
+          if (!res.ok || !res.body) return;
+          const reader = res.body.getReader();
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value && value.byteLength) pump(value);
+          }
         }
+
+        if (this._viaNkn && this._relay && !sawEvent) {
+          this._relayStatus('warn', 'No events received');
+        }
+      } catch (err) {
+        this._relayStatus('err', err?.message || 'Event stream failed');
+        throw err;
       }
     },
 
@@ -721,6 +840,7 @@ function createASR({
             this._lastPostAt = performance.now();
           } catch (err) {
             log('[asr] audio send ' + (err && err.message || err));
+            if (viaNkn) this._relayStatus('err', err?.message || 'Audio send failed');
           } finally {
             this.out--;
           }
@@ -729,6 +849,21 @@ function createASR({
       }
     }
   };
+
+  ASR.ensureDefaults = async (nodeId) => {
+    try {
+      const rec = NodeStore.ensure(nodeId, 'ASR');
+      const cfg = rec?.config || {};
+      await ensureModels(nodeId);
+      await ensureModelConfigured(nodeId, cfg);
+    } catch (err) {
+      // ignore discovery issues in background
+    }
+  };
+
+  ASR.ensureModels = ensureModels;
+  ASR.listModels = listModels;
+  ASR.getModelInfo = getModelInfo;
 
   return ASR;
 }

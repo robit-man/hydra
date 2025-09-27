@@ -35,7 +35,9 @@ const NodeStore = {
       memoryOn: false,
       persistMemory: false,
       maxTurns: 16,
-      memory: []
+      memory: [],
+      capabilities: [],
+      think: false
     },
     TTS: {
       base: 'http://localhost:8123',
