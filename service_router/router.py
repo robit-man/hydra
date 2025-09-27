@@ -1947,7 +1947,7 @@ class RelayNode:
             resp = self._http_request_with_retry(session, method, url, stream=True, **params)
             if resp.status_code == 429:
                 self._register_rate_limit_hit()
-                self._send_simple_response(src, rid, resp)
+                self._send_simple_response(src, rid, resp, req)
                 return
             self._reset_rate_limit()
             stream_mode = self._infer_stream_mode(stream_mode, resp)
@@ -1956,7 +1956,7 @@ class RelayNode:
 
         resp = self._http_request_with_retry(session, method, url, **params)
         self._handle_response_status(resp.status_code)
-        self._send_simple_response(src, rid, resp)
+        self._send_simple_response(src, rid, resp, req)
 
     def _handle_response_status(self, status_code: int) -> None:
         if status_code == 429:
@@ -1983,7 +1983,7 @@ class RelayNode:
             self.rate_limit_hits.clear()
             self.last_rate_limit = None
 
-    def _send_simple_response(self, src: str, rid: str, resp: requests.Response) -> None:
+    def _send_simple_response(self, src: str, rid: str, resp: requests.Response, req: Optional[dict] = None) -> None:
         raw = resp.content or b""
         truncated = False
         if len(raw) > self.max_body:
@@ -2003,7 +2003,8 @@ class RelayNode:
         content_type = (resp.headers.get("Content-Type") or "").lower()
         if "application/json" in content_type:
             try:
-                payload["json"] = resp.json()
+                parsed_json = resp.json()
+                payload["json"] = self._sanitize_response_json(req, parsed_json)
             except Exception:
                 payload["body_b64"] = base64.b64encode(raw).decode("ascii")
         elif len(raw) <= self.max_body:
@@ -2012,6 +2013,57 @@ class RelayNode:
             payload["body_b64"] = base64.b64encode(raw).decode("ascii")
         self.bridge.dm(src, payload, DM_OPTS_SINGLE)
         self.ui.bump(self.node_id, "OUT", f"{payload['status']} {rid}")
+
+    def _sanitize_response_json(self, req: Optional[dict], data: Any) -> Any:
+        try:
+            if not isinstance(data, (dict, list)):
+                return data
+
+            target = str((req or {}).get("service") or (req or {}).get("target") or "").lower()
+            path = str((req or {}).get("path") or "").lower()
+            url = str((req or {}).get("url") or "").lower()
+
+            def looks_like_show_payload(obj: Any, depth: int = 0) -> bool:
+                if depth > 3:
+                    return False
+                if isinstance(obj, dict):
+                    if any(isinstance(k, str) and k.lower() == "license" for k in obj.keys()):
+                        return True
+                    if "modelfile" in obj or "modelfile_sha" in obj:
+                        return True
+                    return any(looks_like_show_payload(v, depth + 1) for v in obj.values())
+                if isinstance(obj, list):
+                    return any(looks_like_show_payload(v, depth + 1) for v in obj)
+                return False
+
+            maybe_show = False
+            if any(seg in target for seg in ("ollama", "llm")) and any(seg in path or seg in url for seg in ("/show", "/api/show")):
+                maybe_show = True
+            elif looks_like_show_payload(data):
+                maybe_show = True
+
+            if not maybe_show:
+                return data
+
+            def strip_license(obj: Any) -> Any:
+                if isinstance(obj, dict):
+                    new_obj = {}
+                    removed = False
+                    for key, value in obj.items():
+                        if isinstance(key, str) and key.lower() == "license":
+                            removed = True
+                            continue
+                        new_obj[key] = strip_license(value)
+                    if removed:
+                        new_obj["license"] = "[omitted]"
+                    return new_obj
+                if isinstance(obj, list):
+                    return [strip_license(item) for item in obj]
+                return obj
+
+            return strip_license(data)
+        except Exception:
+            return data
 
     def _infer_stream_mode(self, mode: str, resp: requests.Response) -> str:
         if mode in ("lines", "ndjson", "line"):
