@@ -39,7 +39,10 @@ function createGraph({
       WS.svgLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       WS.svg.appendChild(WS.svgLayer);
     }
+    // keep SVG wires layer in sync with current view
+    WS.svgLayer.setAttribute('transform', `translate(${WS.view.x},${WS.view.y}) scale(${WS.view.scale})`);
   }
+
 
   function requestRedraw() {
     if (WS._redrawReq) return;
@@ -110,7 +113,7 @@ function createGraph({
         .then(() => {
           if (nodeType === 'LLM') refreshLlmControls(nodeId);
         })
-        .catch(() => {})
+        .catch(() => { })
         .finally(() => pendingModelPrefetch.delete(key));
     };
     if (delay > 0) setTimeout(exec, delay);
@@ -1259,9 +1262,12 @@ function createGraph({
     WS.canvas.innerHTML = '';
     WS.svg.innerHTML = '';
     ensureSvgLayer();
+    // reapply current transform after recreating the <g> layer
+    applyViewTransform();
+
     WS.nodes.clear();
     WS.wires = [];
-  if (!data) {
+    if (!data) {
       const a = addNode('ASR', 90, 200);
       const l = addNode('LLM', 380, 180);
       const t = addNode('TTS', 680, 200);
@@ -2281,7 +2287,7 @@ function createGraph({
       statusBtn.addEventListener('click', (e) => {
         e.preventDefault();
         const res = MCP.refresh(node.id, { quiet: false });
-        if (res && typeof res.catch === 'function') res.catch(() => {});
+        if (res && typeof res.catch === 'function') res.catch(() => { });
       });
       testRow.appendChild(statusBtn);
       const queryBtn = document.createElement('button');
@@ -2292,7 +2298,7 @@ function createGraph({
         e.preventDefault();
         const payload = { text: 'Diagnostics', system: 'Provide a connectivity status summary.' };
         const res = MCP.onQuery(node.id, payload);
-        if (res && typeof res.catch === 'function') res.catch(() => {});
+        if (res && typeof res.catch === 'function') res.catch(() => { });
       });
       testRow.appendChild(queryBtn);
       fields.appendChild(testRow);
@@ -2405,7 +2411,7 @@ function createGraph({
       }
       if (node.type === 'MCP') {
         const res = MCP.refresh(nodeId, { quiet: true });
-        if (res && typeof res.catch === 'function') res.catch(() => {});
+        if (res && typeof res.catch === 'function') res.catch(() => { });
       }
       if (node.type === 'MediaStream') {
         Media.refresh(nodeId);
