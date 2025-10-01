@@ -79,6 +79,11 @@ function createGraph({
     return { x, y };
   }
 
+  function currentViewCenter() {
+    const rect = WS.root?.getBoundingClientRect?.() || document.body.getBoundingClientRect();
+    return clientToWorkspace(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }
+
   function uid() {
     return 'n' + Math.random().toString(36).slice(2, 8);
   }
@@ -766,8 +771,8 @@ function createGraph({
 
     const applyMinDimensions = ({ save = false } = {}) => {
       const dims = computeMinDimensions();
-      el.style.minHeight = `${dims.minHeight}px`;
       el.style.minWidth = `${dims.minWidth}px`;
+      el.style.minHeight = `${dims.minHeight}px`;
       let adjusted = false;
       const currentW = Number.parseFloat(el.style.width) || el.offsetWidth;
       const currentH = Number.parseFloat(el.style.height) || el.offsetHeight;
@@ -785,8 +790,23 @@ function createGraph({
         requestRedraw();
         if (save) saveGraph();
       }
-      return dims;
+      return { minWidth: dims.minWidth, minHeight: dims.minHeight };
     };
+
+    const scheduleAutoGrow = (() => {
+      let raf = 0;
+      let pendingSave = false;
+      return (shouldSave = false) => {
+        pendingSave = pendingSave || shouldSave;
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const save = pendingSave;
+          pendingSave = false;
+          if (!node._resizing) applyMinDimensions({ save });
+        });
+      };
+    })();
 
     const transportMarkup = t.supportsNkn
       ? '<button type="button" class="node-transport" title="Toggle NKN relay">NKN</button>'
@@ -811,10 +831,20 @@ function createGraph({
         </div>
         ${node.type === 'ASR' ? `
           <canvas data-asr-vis style="margin-top:6px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px"></canvas>
-          <div class="muted" style="margin-top:6px;">Partial</div>
+          <div class="asr-partial-row" style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <div class="muted" data-asr-partial-flag data-state="idle">Waiting</div>
+            <div class="asr-rms" data-asr-rms data-state="idle">0.000</div>
+          </div>
           <div class="bubble" data-asr-partial style="min-height:28px"></div>
           <div class="muted" style="margin-top:6px;">Finals</div>
           <div class="code" data-asr-final style="min-height:60px;max-height:360px"></div>
+        ` : ''}
+        ${node.type === 'TTS' ? `
+          <div class="row" style="margin-top:6px;align-items:center;justify-content:space-between;gap:12px;">
+              <input type="range" min="0" max="1" step="0.01" data-tts-volume class="slider" style="width:100%;">
+          </div>
+          <canvas data-tts-vis style="margin-top:4px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px"></canvas>
+          <audio data-tts-audio controls style="margin-top:6px;display:none;"></audio>
         ` : ''}
         ${node.type === 'LLM' ? `
           <div class="muted" style="margin-top:6px;">Output</div>
@@ -941,7 +971,8 @@ function createGraph({
     resizeHandle.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       const bounds = el.getBoundingClientRect();
-      const minDims = applyMinDimensions();
+      const minDims = computeMinDimensions();
+      node._resizing = true;
       resizeState = {
         id: e.pointerId,
         startX: e.clientX,
@@ -959,11 +990,8 @@ function createGraph({
       if (!resizeState) return;
       const dx = e.clientX - resizeState.startX;
       const dy = e.clientY - resizeState.startY;
-      const dynamicMin = computeMinDimensions();
-      const minW = Math.max(resizeState.minW, dynamicMin.minWidth);
-      const minH = Math.max(resizeState.minH, dynamicMin.minHeight);
-      el.style.minWidth = `${minW}px`;
-      el.style.minHeight = `${minH}px`;
+      const minW = resizeState.minW;
+      const minH = resizeState.minH;
       const w = Math.max(minW, Math.round(resizeState.startW + dx));
       const h = Math.max(minH, Math.round(resizeState.startH + dy));
       el.style.width = `${w}px`;
@@ -977,6 +1005,11 @@ function createGraph({
       if (!resizeState) return;
       resizeState = null;
       document.body.style.cursor = '';
+      const widthNow = Number.parseFloat(el.style.width) || el.offsetWidth;
+      const heightNow = Number.parseFloat(el.style.height) || el.offsetHeight;
+      node.w = widthNow;
+      node.h = heightNow;
+      node._resizing = false;
       applyMinDimensions({ save: true });
     };
     resizeHandle.addEventListener('pointerup', endResize);
@@ -1139,9 +1172,14 @@ function createGraph({
       };
       glyph();
       btnASR.addEventListener('click', async () => {
-        if (ASR.running && ASR.ownerId === node.id) await ASR.stop();
-        else await ASR.start(node.id);
-        setTimeout(glyph, 0);
+        try {
+          if (ASR.ownerId === node.id && (ASR.running || ASR._startingSid)) await ASR.stop();
+          else await ASR.start(node.id);
+        } catch (err) {
+          setBadge(`ASR error: ${err?.message || err}`, false);
+        } finally {
+          setTimeout(glyph, 0);
+        }
       });
     }
     const btnMedia = el.querySelector('.mediaToggle');
@@ -1183,17 +1221,26 @@ function createGraph({
     btnDel.addEventListener('click', () => removeNode(node.id));
     if ('ResizeObserver' in window) {
       const ro = new ResizeObserver(() => {
-        applyMinDimensions();
+        scheduleAutoGrow(false);
       });
       ro.observe(el);
       node._ro = ro;
+    }
+
+    if ('MutationObserver' in window) {
+      const body = el.querySelector('.body');
+      if (body) {
+        const mo = new MutationObserver(() => scheduleAutoGrow(true));
+        mo.observe(body, { childList: true, subtree: true, characterData: true });
+        node._mo = mo;
+      }
     }
 
     if (node.type === 'LLM') {
       refreshLlmControls(node.id);
     }
 
-    requestAnimationFrame(() => applyMinDimensions());
+    requestAnimationFrame(() => scheduleAutoGrow(false));
     return el;
   }
 
@@ -1483,7 +1530,13 @@ function createGraph({
         h: Math.round(n.el?.offsetHeight || n.h || 0)
       })),
       links: WS.wires.map((w) => ({ from: w.from, to: w.to })),
-      nodeConfigs: {}
+      nodeConfigs: {},
+      viewport: {
+        x: Math.round(WS.view.x),
+        y: Math.round(WS.view.y),
+        scale: Number(WS.view.scale.toFixed(4))
+      },
+      transport: CFG.transport === 'nkn' ? 'nkn' : 'http'
     };
     for (const n of WS.nodes.values()) {
       const rec = NodeStore.load(n.id);
@@ -1517,6 +1570,26 @@ function createGraph({
         if (obj && obj.type && obj.config) NodeStore.saveObj(id, obj);
       }
     }
+    if (data.viewport && typeof data.viewport === 'object') {
+      const vx = Number(data.viewport.x);
+      const vy = Number(data.viewport.y);
+      const vs = Number(data.viewport.scale);
+      if (Number.isFinite(vx)) WS.view.x = vx;
+      if (Number.isFinite(vy)) WS.view.y = vy;
+      if (Number.isFinite(vs) && vs > 0.1 && vs < 8) WS.view.scale = vs;
+      applyViewTransform();
+    }
+
+    if (typeof data.transport === 'string') {
+      const nextTransport = data.transport === 'nkn' ? 'nkn' : 'http';
+      if (CFG.transport !== nextTransport) {
+        CFG.transport = nextTransport;
+        saveCFG();
+        updateTransportButton();
+        if (CFG.transport === 'nkn') Net.ensureNkn();
+      }
+    }
+
     for (const n of (data.nodes || [])) {
       const node = { id: n.id, type: n.type, x: n.x, y: n.y, w: n.w, h: n.h };
       NodeStore.ensure(node.id, node.type);
@@ -2848,6 +2921,14 @@ function createGraph({
       }
       delete node._ro;
     }
+    if (node._mo) {
+      try {
+        node._mo.disconnect();
+      } catch (err) {
+        // ignore
+      }
+      delete node._mo;
+    }
     if (node.type === 'NknDM') {
       NknDM.dispose(nodeId);
     }
@@ -2879,36 +2960,6 @@ function createGraph({
     if (ASR.ownerId === nodeId) ASR.stop();
   }
 
-  function exportGraph() {
-    const data = LS.get('graph.workspace', { nodes: [], links: [], nodeConfigs: {} });
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'realtime-graph.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function importGraph() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      file.text()
-        .then((text) => {
-          const data = JSON.parse(text);
-          LS.set('graph.workspace', data);
-          loadGraph();
-          setBadge('Graph imported');
-        })
-        .catch((err) => setBadge('Import failed: ' + err.message, false));
-    };
-    input.click();
-  }
-
   function bindToolbar() {
     const menuToggle = qs('#nodeMenuToggle');
     const menuList = qs('#nodeMenuList');
@@ -2930,15 +2981,154 @@ function createGraph({
 
     if (menuList) {
       menuList.innerHTML = '';
+
+      const createPreview = (label) => {
+        const el = document.createElement('div');
+        el.className = 'node-drag-preview';
+        el.textContent = label;
+        el.style.position = 'fixed';
+        el.style.pointerEvents = 'none';
+        el.style.zIndex = '999';
+        el.style.padding = '8px 12px';
+        el.style.borderRadius = '8px';
+        el.style.background = 'rgba(20, 24, 30, 0.92)';
+        el.style.color = '#fff';
+        el.style.fontSize = '0.85rem';
+        el.style.boxShadow = '0 10px 24px rgba(0, 0, 0, 0.35)';
+        el.style.transform = 'translate(-50%, -50%)';
+        el.style.userSelect = 'none';
+        return el;
+      };
+
+      const spawnNodeAtPoint = (type, point) => {
+        const pt = { x: Math.round(point.x), y: Math.round(point.y) };
+        const node = addNode(type, pt.x, pt.y);
+        if (node?.el) {
+          const width = node.el.offsetWidth || 0;
+          const height = node.el.offsetHeight || 0;
+          const centeredX = Math.round(pt.x - width / 2);
+          const centeredY = Math.round(pt.y - height / 2);
+          node.x = centeredX;
+          node.y = centeredY;
+          node.el.style.left = `${centeredX}px`;
+          node.el.style.top = `${centeredY}px`;
+          saveGraph();
+          requestRedraw();
+        }
+        return node;
+      };
+
+      const attachInteractions = (btn, def) => {
+        const DRAG_THRESHOLD = 6;
+        let pointerState = null;
+        let suppressClick = false;
+
+        const cleanupPreview = () => {
+          if (pointerState?.preview) {
+            try {
+              pointerState.preview.remove();
+            } catch (err) {
+              // ignore removal issues
+            }
+          }
+          pointerState = null;
+        };
+
+        const start = (ev) => {
+          if (ev.button !== undefined && ev.button !== 0) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          suppressClick = false;
+          pointerState = {
+            pointerId: ev.pointerId,
+            type: def.type,
+            label: def.label,
+            startX: ev.clientX,
+            startY: ev.clientY,
+            dragging: false,
+            preview: null
+          };
+          btn.setPointerCapture?.(ev.pointerId);
+        };
+
+        const move = (ev) => {
+          if (!pointerState || ev.pointerId !== pointerState.pointerId) return;
+          const dx = ev.clientX - pointerState.startX;
+          const dy = ev.clientY - pointerState.startY;
+          if (!pointerState.dragging) {
+            if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+            pointerState.dragging = true;
+            pointerState.preview = createPreview(def.label);
+            document.body.appendChild(pointerState.preview);
+          }
+          if (pointerState.preview) {
+            pointerState.preview.style.left = `${ev.clientX}px`;
+            pointerState.preview.style.top = `${ev.clientY}px`;
+          }
+        };
+
+        const finish = (ev, cancelled = false) => {
+          if (!pointerState || ev.pointerId !== pointerState.pointerId) return;
+          ev.preventDefault();
+          btn.releasePointerCapture?.(ev.pointerId);
+          const wasDragging = pointerState.dragging;
+          const dropClientX = ev.clientX;
+          const dropClientY = ev.clientY;
+          cleanupPreview();
+          suppressClick = true;
+          if (cancelled) return;
+          if (wasDragging) {
+            const rootRect = WS.root?.getBoundingClientRect?.();
+            if (
+              rootRect &&
+              (dropClientX < rootRect.left ||
+                dropClientX > rootRect.right ||
+                dropClientY < rootRect.top ||
+                dropClientY > rootRect.bottom)
+            ) {
+              menuList.classList.add('hidden');
+              return;
+            }
+            const pt = clientToWorkspace(dropClientX, dropClientY);
+            spawnNodeAtPoint(def.type, pt);
+          } else {
+            const center = currentViewCenter();
+            spawnNodeAtPoint(def.type, center);
+          }
+          menuList.classList.add('hidden');
+        };
+
+        btn.addEventListener('pointerdown', start, { passive: false });
+        btn.addEventListener('pointermove', move, { passive: false });
+        btn.addEventListener('pointerup', (ev) => finish(ev, false), { passive: false });
+        btn.addEventListener('pointercancel', (ev) => finish(ev, true), { passive: false });
+
+        btn.addEventListener('keydown', (ev) => {
+          if (ev.key !== 'Enter' && ev.key !== ' ') return;
+          ev.preventDefault();
+          menuList.classList.add('hidden');
+          const center = currentViewCenter();
+          spawnNodeAtPoint(def.type, center);
+        });
+
+        btn.addEventListener('click', (ev) => {
+          if (suppressClick) {
+            suppressClick = false;
+            return;
+          }
+          ev.preventDefault();
+          menuList.classList.add('hidden');
+          const center = currentViewCenter();
+          spawnNodeAtPoint(def.type, center);
+        });
+      };
+
       nodeButtons.forEach((btnDef) => {
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'ghost';
+        btn.className = 'ghost node-menu-entry';
         btn.textContent = btnDef.label;
-        btn.addEventListener('click', () => {
-          menuList.classList.add('hidden');
-          addNode(btnDef.type, btnDef.x, btnDef.y);
-        });
+        attachInteractions(btn, btnDef);
         menuList.appendChild(btn);
       });
     }
@@ -2959,8 +3149,6 @@ function createGraph({
       });
     }
 
-    qs('#exportGraph')?.addEventListener('click', exportGraph);
-    qs('#importGraph')?.addEventListener('click', importGraph);
   }
 
   function cancelLinking() {
@@ -3112,6 +3300,7 @@ function createGraph({
       WS.view.x = pan.ox + dx;
       WS.view.y = pan.oy + dy;
       applyViewTransform();
+      saveGraph();
     };
 
     const onPanUp = (e) => {
@@ -3138,7 +3327,9 @@ function createGraph({
       e.preventDefault();
       const intensity = e.deltaMode === 1 ? 0.05 : 0.0015;
       const dz = -dy * intensity;
+      const beforeScale = WS.view.scale;
       zoomAt(e.clientX, e.clientY, dz);
+      if (Math.abs(WS.view.scale - beforeScale) > 1e-4) saveGraph();
     };
 
     const rootEl = WS.root || WS.el;

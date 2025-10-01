@@ -22,8 +22,7 @@
                             <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
                             <div id="nodeMenuList" class="node-menu-list hidden"></div>
                         </div>
-                        <button id="exportGraph" class="ghost"><img src="img/download.svg" alt="" class="icon inverted"></button>
-                        <button id="importGraph" class="ghost"><img src="img/upload.svg" alt="" class="icon inverted"></button>
+                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
                         <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
                     </div>
                     <div class="header-actions">
@@ -62,6 +61,17 @@
                     <button class="ghost" id="cancelSettings" type="button">Close</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <div id="flowsModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="flowsBackdrop"></div>
+        <div class="modal-panel" style="max-width:600px;">
+            <div class="modal-head">
+                <div class="modal-title" data-flows-title>Flows</div>
+                <button class="ghost" id="flowsClose">✕</button>
+            </div>
+            <div class="modal-body" id="flowsBody"></div>
         </div>
     </div>
 

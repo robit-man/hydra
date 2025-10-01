@@ -109,6 +109,7 @@ function createASR({
     node: null,
     an: null,
     _vis: new Map(),
+    _lastSid: null,
     bufF32: new Float32Array(0),
     out: 0,
     sid: null,
@@ -145,6 +146,8 @@ function createASR({
     _lingerMs: 700,
     _minTailMs: 350,
     _forceQuietMaxMs: 2800,
+    _rmsTh: 0.2,
+    _lastPartialSeq: -1,
 
     _nodeEl() {
       return this.ownerId ? getNode(this.ownerId)?.el : null;
@@ -156,9 +159,33 @@ function createASR({
       if (el) el.style.width = `${width}%`;
     },
 
+    _setRms(value, compareValue = value, targetId) {
+      const id = targetId || this.ownerId;
+      if (!id) return;
+      const node = getNode(id);
+      const el = node?.el?.querySelector('[data-asr-rms]');
+      if (!el) return;
+      const val = Number.isFinite(value) ? value : 0;
+      el.textContent = val ? val.toFixed(3) : '0.000';
+      const th = Number.isFinite(this._rmsTh) ? this._rmsTh : 0.2;
+      const cmp = Number.isFinite(compareValue) ? compareValue : val;
+      el.dataset.state = cmp >= th ? 'active' : 'idle';
+    },
+
     _setPartial(text) {
       const el = this._nodeEl()?.querySelector('[data-asr-partial]');
       if (el) el.textContent = text || '';
+    },
+
+    _setPartialStatus(state) {
+      const flag = this._nodeEl()?.querySelector('[data-asr-partial-flag]');
+      if (!flag) return;
+      const next = state || 'live';
+      let label = 'Partial';
+      if (next === 'final') label = 'Stable';
+      else if (next === 'idle') label = 'Waiting';
+      flag.dataset.state = next;
+      flag.textContent = label;
     },
 
     _setFinal(text) {
@@ -166,6 +193,15 @@ function createASR({
       if (!el) return;
       el.textContent = (el.textContent ? `${el.textContent}\n` : '') + text;
       el.scrollTop = el.scrollHeight;
+    },
+
+    _prependF32(chunk) {
+      if (!chunk || !chunk.length) return;
+      const copy = chunk.slice ? chunk.slice(0) : new Float32Array(chunk);
+      const out = new Float32Array(copy.length + this.bufF32.length);
+      out.set(copy, 0);
+      out.set(this.bufF32, copy.length);
+      this.bufF32 = out;
     },
 
     pushF32(f32) {
@@ -373,8 +409,10 @@ function createASR({
       this.aggr.prev = text;
     },
 
-    _routePartial(text) {
-      if (this.ownerId) Router.sendFrom(this.ownerId, 'partial', { type: 'text', text: text || '' });
+    _routePartial(data) {
+      const text = data && typeof data.text === 'string' ? data.text : '';
+      const final = !!(data && data.final);
+      if (this.ownerId) Router.sendFrom(this.ownerId, 'partial', { type: 'text', text, final });
     },
 
     _routePhrase(text) {
@@ -387,10 +425,19 @@ function createASR({
       if (this.ownerId) Router.sendFrom(this.ownerId, 'final', { type: 'text', text, eos: true });
     },
 
-    printPartial(text, cfg) {
-      this._setPartial(text || '');
-      this._routePartial(text || '');
-      this.handlePartialForPhrases(text || '', cfg);
+    printPartial(event, cfg) {
+      const seq = (event && typeof event.seq === 'number') ? event.seq : null;
+      const isFinal = !!(event && event.final);
+      if (seq !== null) {
+        if (seq < this._lastPartialSeq) return;
+        if (seq === this._lastPartialSeq && !isFinal) return;
+        this._lastPartialSeq = seq;
+      }
+      const text = event && typeof event.text === 'string' ? event.text : '';
+      this._setPartial(text);
+      this._setPartialStatus(isFinal ? 'final' : 'live');
+      this._routePartial({ text, final: isFinal });
+      this.handlePartialForPhrases(text, cfg);
     },
 
     appendFinal(text) {
@@ -420,6 +467,7 @@ function createASR({
     async _ensureLiveSession(cfg) {
       if (!this._live || this.sid || this._startingSid || !this.running) return;
       this._startingSid = true;
+      const activeId = this.ownerId;
       try {
         const prompt = (cfg.prompt || '').trim();
         const mode = cfg.mode || 'fast';
@@ -440,8 +488,14 @@ function createASR({
           ...(model ? { model } : {})
         };
         const data = await Net.postJSON(this._base, '/recognize/stream/start', body, this._api, this._viaNkn, this._relay, 45000);
+        if (!this.running || this.ownerId !== activeId) {
+          this.sid = null;
+          this._startingSid = false;
+          return;
+        }
         this.sid = (data && (data.sid || data.id || data.session)) || null;
         if (!this.sid) throw new Error('no sid');
+        this._lastSid = this.sid;
         const sid = this.sid;
         this._relayStatus('ok', 'Session ready');
         this.openEvents(sid, this._viaNkn, this._base, this._relay, this._api, cfg).catch(() => {});
@@ -449,6 +503,9 @@ function createASR({
       } catch (err) {
         log('[asr] start(lazy) ' + (err?.message || err));
         this._relayStatus('err', err?.message || 'Session start failed');
+        this.sid = null;
+        this._lastSid = null;
+        this._uplinkOn = false;
       } finally {
         this._startingSid = false;
       }
@@ -458,6 +515,8 @@ function createASR({
       if (this.finalizing || !this.sid) return;
       this.finalizing = true;
       const oldSid = this.sid;
+      this.sid = null;
+      this._lastSid = oldSid;
       this._ignorePartials = true;
       const softDeadline = performance.now() + Math.max(900, this._lingerMs + 600);
       while (performance.now() < softDeadline) {
@@ -469,16 +528,17 @@ function createASR({
         await new Promise((resolve) => setTimeout(resolve, 12));
       }
       try {
-        const resp = await Net.postJSON(this._base, `/recognize/stream/${encodeURIComponent(oldSid)}/end`, {}, this._api, this._viaNkn, this._relay, 20000);
-        const finalText = resp?.final?.text || resp?.final?.result?.text || resp?.text || resp?.result?.text || '';
-        if (finalText) {
-          this.handleFinalFlush(finalText);
-          this.appendFinal(finalText);
+        if (oldSid) {
+          const resp = await Net.postJSON(this._base, `/recognize/stream/${encodeURIComponent(oldSid)}/end`, {}, this._api, this._viaNkn, this._relay, 20000);
+          const finalText = resp?.final?.text || resp?.final?.result?.text || resp?.text || resp?.result?.text || '';
+          if (finalText) {
+            this.handleFinalFlush(finalText);
+            this.appendFinal(finalText);
+          }
         }
       } catch (err) {
         log('[asr] finalize-live ' + (err?.message || err));
       } finally {
-        this.sid = null;
         this.finalizing = false;
       }
     },
@@ -515,6 +575,9 @@ function createASR({
       this._preInit(this._rate);
       this._lastFinal = { text: '', at: 0 };
       this.resetAggr();
+      this._rmsTh = parseFloat(cfg.rms) || 0.2;
+      this._setRms(0, 0, nodeId);
+      this._lastPartialSeq = -1;
 
       try {
         this.ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -534,7 +597,7 @@ function createASR({
         const bufDurMs = (this.node.bufferSize / from) * 1000;
         const emaMs = (cfg.emaMs | 0) || 120;
         const alpha = 1 - Math.exp(-bufDurMs / Math.max(emaMs, 1));
-        const rmsTh = parseFloat(cfg.rms) || 0.2;
+        const rmsTh = this._rmsTh;
         const holdMs = (cfg.hold | 0) || 250;
         const silence = (cfg.silence | 0) || 900;
         const tailBaseMs = Math.max(this._minTailMs, silence);
@@ -569,13 +632,11 @@ function createASR({
               this._ensureLiveSession(cfg).then(() => {
                 if (this.sid) this._openUplink(now, tailMs, f32);
               });
-            } else if (this._uplinkOn) {
-              if (now > this._tailDeadline) {
-                const postQuiet = (now - this._lastPostAt) >= this._lingerMs;
-                const partialQuiet = (!this._sawPartialForUplink) || ((now - this._lastPartialAt) >= this._lingerMs);
-                const hardQuiet = (now - Math.max(this._lastPostAt, this._lastPartialAt || 0)) >= this._forceQuietMaxMs;
-                if ((postQuiet && partialQuiet) || hardQuiet) this._closeUplinkAndMaybeFinalize();
-              }
+            } else if (this._uplinkOn && now > this._tailDeadline) {
+              const postQuiet = (now - this._lastPostAt) >= this._lingerMs;
+              const partialQuiet = (!this._sawPartialForUplink) || ((now - this._lastPartialAt) >= this._lingerMs);
+              const hardQuiet = (now - Math.max(this._lastPostAt, this._lastPartialAt || 0)) >= this._forceQuietMaxMs;
+              if ((postQuiet && partialQuiet) || hardQuiet) this._closeUplinkAndMaybeFinalize();
             }
           } else {
             if (ema >= offTh) {
@@ -602,6 +663,7 @@ function createASR({
           }
 
           this._setVU(ema);
+          this._setRms(rmsCur, ema);
 
           if (!this._live) {
             if (ema < offTh) {
@@ -638,46 +700,79 @@ function createASR({
       }
 
       this._setPartial('');
+      this._setPartialStatus('idle');
       const finalBox = this._nodeEl()?.querySelector('[data-asr-final]');
       if (finalBox) finalBox.textContent = '';
       this.running = true;
     },
 
     async stop() {
-      if (!this.running) return;
-      this.running = false;
+      if (!this.running && !this._startingSid && !this.ownerId) return;
       const visId = this.ownerId;
-      try {
-        if (this.sid) {
-          await Net.postJSON(this._base, `/recognize/stream/${encodeURIComponent(this.sid)}/end`, {}, this._api, this._viaNkn, this._relay, 20000);
-        }
-      } catch (err) {
-        // ignore
-      }
+      const endSid = this.sid;
+      const base = this._base;
+      const api = this._api;
+      const relay = this._relay;
+      const viaNkn = this._viaNkn;
+
+      this.running = false;
+      this._startingSid = false;
       this.sid = null;
+      this._lastSid = null;
       this._uplinkOn = false;
-      try {
-        this.node && this.node.disconnect();
-      } catch (err) {}
-      try {
-        this.source && this.source.disconnect();
-      } catch (err) {}
-      try {
-        this.media && this.media.getTracks().forEach((t) => t.stop());
-      } catch (err) {}
-      try {
-        this.ac && this.ac.close();
-      } catch (err) {}
+      this._lastPartialSeq = -1;
+
+      const node = this.node;
+      const source = this.source;
+      const media = this.media;
+      const ac = this.ac;
+
+      this.node = null;
+      this.source = null;
+      this.media = null;
+      this.ac = null;
       this.an = null;
-      this.node = this.source = this.media = this.ac = null;
+
+      try {
+        if (node) {
+          node.onaudioprocess = null;
+          node.disconnect();
+        }
+      } catch (err) {}
+      try {
+        source && source.disconnect();
+      } catch (err) {}
+      try {
+        if (media) media.getTracks().forEach((t) => t.stop());
+      } catch (err) {}
+      try {
+        ac && ac.close();
+      } catch (err) {}
+
       clearInterval(this._vadWatch);
       this._vadWatch = null;
       this.bufF32 = new Float32Array(0);
       this._preInit(this._rate || 16000);
+      this._sawPartialForUplink = false;
+      this._lastPartialAt = 0;
+      this._lastPostAt = 0;
+      this._ignorePartials = true;
+      this._silenceSince = 0;
+      this._tailDeadline = 0;
       if (visId) this._stopVis(visId);
       this._setVU(0);
+      this._setRms(0, 0, visId);
+      this._setPartial('');
+      this._setPartialStatus('idle');
       this._relayStatus('warn', 'Idle');
       this.ownerId = null;
+
+      if (!endSid) return;
+      try {
+        await Net.postJSON(base, `/recognize/stream/${encodeURIComponent(endSid)}/end`, {}, api, viaNkn, relay, 20000);
+      } catch (err) {
+        // ignore
+      }
     },
 
     async finalizeOnce(rate) {
@@ -755,12 +850,23 @@ function createASR({
                   const type = (obj.type || obj.event || '').toLowerCase();
                   if (type === 'asr.partial' || type === 'partial') {
                     const text = obj.text || (obj.result && obj.result.text) || '';
-                    const sameSid = (sid === ASR.sid);
-                    const ok = sameSid && !ASR.finalizing && ASR._uplinkOn && ASR.vad.state === 'voice' && !ASR._ignorePartials;
+                    const sameSid = sid && (sid === ASR.sid || sid === ASR._lastSid);
+                    const isFinalFlag = !!(obj.final || obj.stable);
+                    const ok = sameSid && !ASR.finalizing && !ASR._ignorePartials && (ASR._uplinkOn || isFinalFlag);
                     if (ok) {
                       markReceiving();
-                      ASR.printPartial(text, cfg);
-                      if (text) {
+                      const seq = (typeof obj.seq === 'number') ? obj.seq : (typeof obj.sequence === 'number' ? obj.sequence : null);
+                      const payload = {
+                        text,
+                        final: isFinalFlag,
+                        wordsAdded: obj.words_added || obj.wordsAdded || '',
+                        gapMs: typeof obj.gap_ms === 'number' ? obj.gap_ms : obj.gapMs,
+                        tailRms: typeof obj.tail_rms === 'number' ? obj.tail_rms : obj.tailRms,
+                        ts: obj.ts || performance.now(),
+                        seq
+                      };
+                      ASR.printPartial(payload, cfg);
+                      if (!isFinalFlag && text) {
                         ASR._sawSpeech = true;
                         ASR._lastPartialAt = performance.now();
                         ASR._sawPartialForUplink = true;
@@ -784,8 +890,19 @@ function createASR({
                         ASR._ignorePartials = true;
                         ASR.appendFinal(s);
                         ASR.handleFinalFlush(s);
+                        ASR._setPartial(s);
+                        ASR._setPartialStatus('final');
                       }
                     }
+                    if (ASR.sid === sid) {
+                      ASR._uplinkOn = false;
+                      ASR.sid = null;
+                    }
+                    if (ASR._lastSid === sid) ASR._lastSid = null;
+                    ASR._sawPartialForUplink = false;
+                    ASR._tailDeadline = 0;
+                    ASR._startingSid = false;
+                    ASR.vad.state = 'silence';
                   }
                 } catch (err) {
                   // ignore parse errors
@@ -824,7 +941,11 @@ function createASR({
     async flushLoop(rate, chunk, viaNkn, base, relay, api) {
       const need = () => Math.round(rate * (chunk / 1000));
       while (this.running && this.sid) {
-        if (this.bufF32.length >= need() && this.out < 4 && this._uplinkOn) {
+        if (!this._uplinkOn) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(10, chunk / 2)));
+          continue;
+        }
+        if (this.bufF32.length >= need() && this.out < 4) {
           const f32 = this.drainF32(need());
           const bytes = this.i16(f32);
           const url = base.replace(/\/+$/, '') + `/recognize/stream/${encodeURIComponent(this.sid)}/audio?format=pcm16&sr=${rate}`;
@@ -841,6 +962,20 @@ function createASR({
           } catch (err) {
             log('[asr] audio send ' + (err && err.message || err));
             if (viaNkn) this._relayStatus('err', err?.message || 'Audio send failed');
+            this._uplinkOn = false;
+            const failedSid = this.sid;
+            this.sid = null;
+            this._lastSid = failedSid;
+            this._prependF32(f32);
+            this._relayStatus('warn', 'Session reset');
+            if (failedSid) {
+              try {
+                await Net.postJSON(base, `/recognize/stream/${encodeURIComponent(failedSid)}/end`, {}, api, viaNkn, relay, 10000);
+              } catch (endErr) {
+                // ignore double-end failures
+              }
+            }
+            break;
           } finally {
             this.out--;
           }

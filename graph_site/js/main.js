@@ -16,6 +16,7 @@ import { createOrientationNode } from './orientation.js';
 import { createLocationNode } from './location.js';
 import { createWorkspaceSync } from './workspaceSync.js';
 import { createGraph } from './graph.js';
+import { createFlowsLibrary } from './flows.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -130,6 +131,8 @@ const Graph = createGraph({
 
 graphAccess.getNode = (id) => Graph.getNode(id);
 applyRelayState = (...args) => Graph.setRelayState(...args);
+
+const Flows = createFlowsLibrary({ Graph, log });
 
 const WorkspaceSync = createWorkspaceSync({
   Graph,

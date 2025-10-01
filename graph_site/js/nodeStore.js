@@ -45,7 +45,8 @@ const NodeStore = {
       relay: '',
       api: '',
       model: '',
-      mode: 'stream'
+      mode: 'stream',
+      volume: 1
     },
     ImageInput: {
       image: '',

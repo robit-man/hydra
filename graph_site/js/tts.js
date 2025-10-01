@@ -3,6 +3,12 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   const MODEL_PROMISE = new Map();
   const MODEL_METADATA = new Map();
 
+  const clampVolume = (value) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 1;
+    return Math.max(0, Math.min(1, num));
+  };
+
   function normalizeModelEntry(raw) {
     if (raw == null) return null;
     if (typeof raw === 'string') {
@@ -96,6 +102,10 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     let entry = state.get(nodeId);
     if (entry) return entry;
 
+    const cfgEntry = NodeStore.ensure(nodeId, 'TTS');
+    const cfg = cfgEntry?.config || {};
+    const initialVolume = clampVolume(cfg.volume ?? 1);
+
     const ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 22050 });
     const node = ac.createScriptProcessor
       ? ac.createScriptProcessor(4096, 1, 1)
@@ -106,13 +116,17 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const analyser = ac.createAnalyser();
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.85;
+    const gain = ac.createGain();
+    gain.gain.value = initialVolume;
     node.connect(analyser);
-    analyser.connect(ac.destination);
+    analyser.connect(gain);
+    gain.connect(ac.destination);
 
     const st = {
       ac,
       node,
       an: analyser,
+      gain,
       q: [],
       queued: 0,
       sr: ac.sampleRate || 22050,
@@ -122,6 +136,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       raf: null,
       _resizeObs: null,
       audioEl: null,
+      volumeControl: null,
+      volume: initialVolume,
       chain: Promise.resolve()
     };
 
@@ -154,24 +170,54 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const graphNode = getNode(nodeId);
     const body = graphNode?.el?.querySelector('.body');
     if (body) {
-      if (!body.querySelector('[data-tts-vis]')) {
-        const canvas = document.createElement('canvas');
-        canvas.dataset.ttsVis = '';
-        canvas.style.cssText = 'margin-top:6px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px;display:none';
-        body.appendChild(canvas);
+      const canvas = body.querySelector('[data-tts-vis]');
+      if (canvas) {
         st.canvas = canvas;
         st.ctx = canvas.getContext('2d');
+      } else {
+        const el = document.createElement('canvas');
+        el.dataset.ttsVis = '';
+        el.style.cssText = 'margin-top:4px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px';
+        body.appendChild(el);
+        st.canvas = el;
+        st.ctx = el.getContext('2d');
       }
-      if (!body.querySelector('audio')) {
-        const audio = document.createElement('audio');
-        audio.controls = true;
-        audio.style.marginTop = '6px';
-        body.appendChild(audio);
+
+      const audio = body.querySelector('[data-tts-audio]');
+      if (audio) {
         st.audioEl = audio;
       } else {
-        st.audioEl = body.querySelector('audio');
+        const el = document.createElement('audio');
+        el.dataset.ttsAudio = '';
+        el.controls = true;
+        el.style.marginTop = '6px';
+        el.style.display = 'none';
+        body.appendChild(el);
+        st.audioEl = el;
+      }
+
+      const vol = body.querySelector('[data-tts-volume]');
+      if (vol) {
+        st.volumeControl = vol;
+        vol.value = String(initialVolume);
+        if (!vol._ttsBound) {
+          vol.addEventListener('input', () => {
+            const value = clampVolume(vol.value);
+            vol.value = String(value);
+            st.volume = value;
+            if (st.audioEl) st.audioEl.volume = value;
+            if (st.gain) st.gain.gain.value = value;
+            NodeStore.update(nodeId, { type: 'TTS', volume: value });
+          });
+          vol._ttsBound = true;
+        }
+        if (st.audioEl) st.audioEl.volume = initialVolume;
+        if (st.gain) st.gain.gain.value = initialVolume;
       }
     }
+
+    if (st.audioEl) st.audioEl.volume = initialVolume;
+    if (st.gain) st.gain.gain.value = initialVolume;
 
     try {
       const cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
@@ -252,13 +298,19 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     if (st.canvas) {
       st.canvas.style.display = 'block';
       startVis(st);
+      const value = st.volumeControl ? clampVolume(st.volumeControl.value) : clampVolume(st.volume);
+      if (st.gain) st.gain.gain.value = value;
     }
   }
 
   function showFileUI(st) {
     stopVis(st);
     if (st.canvas) st.canvas.style.display = 'none';
-    if (st.audioEl) st.audioEl.style.display = 'block';
+    if (st.audioEl) {
+      st.audioEl.style.display = 'block';
+      const value = st.volumeControl ? clampVolume(st.volumeControl.value) : clampVolume(st.volume);
+      st.audioEl.volume = value;
+    }
   }
 
   function f32FromI16(int16) {

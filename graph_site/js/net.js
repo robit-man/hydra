@@ -23,7 +23,8 @@ const Net = {
   },
 
   async getJSON(base, path, api, useNkn, relay) {
-    if (!useNkn) {
+    const useRelay = useNkn && relay;
+    if (!useRelay) {
       const headers = this.auth({}, api);
       delete headers['Content-Type'];
       headers['Accept'] = 'application/json';
@@ -35,7 +36,8 @@ const Net = {
   },
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {
-    if (!useNkn) {
+    const useRelay = useNkn && relay;
+    if (!useRelay) {
       const res = await fetch(base.replace(/\/+$/, '') + path, {
         method: 'POST',
         headers: this.auth({}, api),
@@ -48,7 +50,8 @@ const Net = {
   },
 
   async fetchBlob(fullUrl, useNkn, relay, api) {
-    if (!useNkn) {
+    const useRelay = useNkn && relay;
+    if (!useRelay) {
       const res = await fetch(fullUrl, { headers: this.auth({}, api) });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.blob();

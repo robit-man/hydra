@@ -60,6 +60,7 @@ graph_site (browser UI) ⇆ service_router/router.py (Python orchestrator) ⇆ l
 - **Transport Toggle UI**: `makeTransportButtonUpdater` renders the status pill based on current transport state (`graph_site/js/transport.js:3`).
 - **QR Scanner**: Camera capture + jsQR integration for filling inputs from codes (`graph_site/js/qrScanner.js:21`).
 - **Sentence & Streaming Helpers**: Handles NDJSON/Server-Sent Events and sentence stabilization for LLM streams (`graph_site/js/sentence.js:11`).
+- **Flows Library**: Modal-based flow manager for saving, importing, editing, and loading named workspaces (`graph_site/js/flows.js:1`).
 
 ## Node Implementations
 
@@ -108,6 +109,10 @@ python3 service_router/router.py --config router_config.json
 (cd service_router/bridge-node && npm install)
 ```
 - `package.json` pins `nkn-sdk`; reinstall if Node modules were pruned.
+
+### Manage Workspace Flows
+- Use the `Flows` button in the toolbar to open the modal library.
+- Save the current canvas, import/export JSON snapshots, or load flows back into the editor within the same modal (`graph_site/js/flows.js`).
 
 ## Troubleshooting Checklist
 

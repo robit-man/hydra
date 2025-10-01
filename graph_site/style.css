@@ -51,6 +51,42 @@ main {
   background-color: var(--bg);
 }
 
+
+.slider {
+  padding:unset!important;
+  -webkit-appearance: none;
+  width: 100%;
+  height:1px;
+  background: #ffffff;
+  outline: none;
+  border-radius:1rem;
+  opacity: 1;
+  -webkit-transition: .2s;
+  transition: opacity .2s;
+}
+
+.slider:hover {
+  opacity: 1;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius:1rem;
+  border:2px solid #ffffff;
+  background: #000000;
+  cursor: pointer;
+}
+
+.slider::-moz-range-thumb {
+  width: 25px;
+  height: 25px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
 .hidden {
   display: none !important;
 }
@@ -826,8 +862,6 @@ button.danger {
   min-width: 230px;
   min-height: 230px;
   min-height: min-content;
-  max-width: 512px;
-  max-height: 512px;
   background: rgba(255, 255, 255, .02);
   border: 1px solid rgba(255, 255, 255, .18);
   border-radius: 14px;
@@ -919,6 +953,80 @@ button.danger {
 
 .node .body {
   padding: 10px
+}
+
+.tts-volume input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+}
+
+.tts-volume input[type="range"]:focus {
+  outline: none;
+}
+
+.tts-volume input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.45);
+}
+
+.tts-volume input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: #fff;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.45);
+}
+
+.asr-partial-row {
+  font-size: 12px;
+}
+
+.asr-partial-row [data-asr-partial-flag] {
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+
+.asr-partial-row [data-asr-partial-flag][data-state='live'] {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.asr-partial-row [data-asr-partial-flag][data-state='final'] {
+  color: var(--ok);
+}
+
+.asr-partial-row [data-asr-partial-flag][data-state='idle'] {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.asr-rms {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  transition: color 0.2s ease, background 0.2s ease;
+}
+
+.asr-rms[data-state='active'] {
+  color: var(--ok);
+  background: rgba(125, 255, 176, 0.12);
+}
+
+.asr-rms[data-state='idle'] {
+  color: var(--err);
+  background: rgba(255, 107, 107, 0.12);
 }
 
 .node .text-input-area textarea {
@@ -1191,7 +1299,7 @@ button.danger {
 
 .form-grid {
   display: grid;
-  grid-template-columns: 160px 1fr;
+  grid-template-columns: 100px 1fr;
   gap: 8px
 }
 
