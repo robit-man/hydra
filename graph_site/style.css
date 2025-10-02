@@ -307,35 +307,6 @@ header {
 
 @media screen and (max-width:740px) {
 
-
-  .node .head::before {
-    pointer-events: none !important;
-    content: '';
-    width: 80px;
-    background-size: contain;
-    background-position: top left;
-    background-repeat: no-repeat;
-    transform: scale(100%)translatey(-1.5%) !important;
-    background-image: url('/img/left.svg');
-    height: 40px;
-    position: absolute;
-    left: 4rem;
-  }
-
-  .node .head::after {
-    pointer-events: none !important;
-    content: '';
-    background-repeat: no-repeat;
-    width: 80px;
-    transform: scale(100%)translatey(-1.5%) !important;
-    background-image: url('/img/right.svg');
-    background-size: contain;
-    background-position: top right;
-    height: 40px;
-    position: absolute;
-    right: 5rem;
-  }
-
 }
 
 @media(max-width: 640px) {
@@ -990,7 +961,7 @@ button.danger {
   border-radius: 14px;
   box-sizing: border-box;
   backdrop-filter: blur(10px);
-  clip-path: polygon(8.6rem 38px, calc(100% - 8.6rem) 38px, calc(100% - 6.2rem) 0, 100% 0, 100% 100%, 0 100%, 0 0, 6.2rem 0);
+  clip-path: polygon(8.6rem 36px, calc(100% - 8.6rem) 36px, calc(100% - 6.4rem) 0, 100% 0, 100% 100%, 0 100%, 0 0, 6.4rem 0);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -1078,8 +1049,8 @@ button.danger {
   background-position: top left;
   background-repeat: no-repeat;
   transform-origin: top left;
-top:0px;
-  transform: scale(100%)translatey(-1.25%);
+  top:0px;
+  transform: scale(100%);
   background-image: url('/img/left.svg');
   height: 40px;
   position: absolute;
@@ -1092,8 +1063,8 @@ top:0px;
   background-repeat: no-repeat;
   width: 80px;
   transform-origin: top right;
-top:0px;
-  transform: scale(100%)translatey(-1.25%);
+  top:0px;
+  transform: scale(100%);
   background-image: url('/img/right.svg');
   background-size: contain;
   background-position: top right;
@@ -1136,12 +1107,12 @@ top:0px;
 .node .head>.titleRow::before {
   pointer-events: none !important;
   content: '';
-  width: calc(100% - 8rem - 10.95rem);
+  width: calc(100% - 19.6rem);
   border-bottom: 1px solid rgba(255, 255, 255, 1);
   height: 1px;
   position: absolute;
-  left: 9.45rem;
-  top: 37px;
+  left: 9.8rem;
+  top: 38px;
   border-top-right-radius: 14px;
 }
 
