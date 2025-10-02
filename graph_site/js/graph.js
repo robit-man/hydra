@@ -37,6 +37,56 @@ function createGraph({
   const NODE_MIN_HEIGHT = 120;
   const NODE_MAX_WIDTH = 512;
   const NODE_MAX_HEIGHT = 1024;
+  const GRID_SIZE = 14;
+  const WIRE_ACTIVE_MS = 750;
+  let zoomRefreshRaf = 0;
+  let uiAudioCtx = null;
+
+  const currentScale = () => {
+    const s = Number(WS.view?.scale);
+    return Number.isFinite(s) && s > 0 ? s : 1;
+  };
+
+  const ensureAudioCtx = () => {
+    if (typeof window === 'undefined') return null;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!uiAudioCtx) {
+      try {
+        uiAudioCtx = new AudioCtx();
+      } catch (err) {
+        uiAudioCtx = null;
+      }
+    }
+    if (uiAudioCtx && uiAudioCtx.state === 'suspended') {
+      uiAudioCtx.resume().catch(() => {});
+    }
+    return uiAudioCtx;
+  };
+
+  const playBlip = (frequency, durationMs, gainValue) => {
+    try {
+      const ctx = ensureAudioCtx();
+      if (!ctx) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = frequency;
+      const now = ctx.currentTime;
+      const durationSec = Math.max(durationMs || 0, 1) / 1000;
+      const volume = Math.max(0.0001, gainValue ?? 0.04);
+      gain.gain.setValueAtTime(volume, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + durationSec);
+    } catch (err) {
+      // ignore audio errors (likely autoplay restrictions)
+    }
+  };
+
+  const playMoveBlip = () => playBlip(12000, 50, 0.03);
+  const playResizeBlip = () => playBlip(200, 100, 0.05);
 
   const clampSize = (value, min, max) => {
     const numeric = Number.isFinite(value) ? value : min;
@@ -68,11 +118,20 @@ function createGraph({
     });
   }
 
+  function scheduleZoomRefresh() {
+    if (zoomRefreshRaf) return;
+    zoomRefreshRaf = requestAnimationFrame(() => {
+      zoomRefreshRaf = 0;
+      refreshNodeResolution();
+    });
+  }
+
   function applyViewTransform() {
     const t = `translate(${WS.view.x}px, ${WS.view.y}px) scale(${WS.view.scale})`;
     if (WS.canvas) WS.canvas.style.transform = t;
     if (WS.svgLayer) WS.svgLayer.setAttribute('transform', `translate(${WS.view.x},${WS.view.y}) scale(${WS.view.scale})`);
     syncWorkspaceBackground();
+    scheduleZoomRefresh();
   }
 
   function syncWorkspaceBackground() {
@@ -80,6 +139,14 @@ function createGraph({
     WS.el.style.setProperty('--grid-scale', WS.view.scale.toFixed(4));
     WS.el.style.setProperty('--grid-offset-x', `${WS.view.x}px`);
     WS.el.style.setProperty('--grid-offset-y', `${WS.view.y}px`);
+  }
+
+  function refreshNodeResolution() {
+    WS.nodes.forEach((node) => {
+      node.refreshDimensions?.(false);
+      node.el?.getBoundingClientRect();
+    });
+    requestRedraw();
   }
 
   function clientToWorkspace(cx, cy) {
@@ -930,16 +997,32 @@ function createGraph({
 
     const computeMinDimensions = () => {
       ensureNodeRefs();
-      const headHeight = headEl ? headEl.offsetHeight : 0;
-      const bodyHeight = bodyEl ? bodyEl.scrollHeight : 0;
+      const scale = currentScale();
+      const invScale = scale ? 1 / scale : 1;
+      const headHeight = headEl ? headEl.offsetHeight * invScale : 0;
+      const bodyHeight = bodyEl ? bodyEl.scrollHeight * invScale : 0;
       const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
-      const headWidth = headEl ? headEl.scrollWidth : 0;
-      const bodyWidth = bodyEl ? bodyEl.scrollWidth : 0;
+      const headWidth = headEl ? headEl.scrollWidth * invScale : 0;
+      const bodyWidth = bodyEl ? bodyEl.scrollWidth * invScale : 0;
       const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
       return {
         minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
         minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
       };
+    };
+
+    const getMeasuredWidth = () => {
+      const direct = Number.parseFloat(el.style.width);
+      if (Number.isFinite(direct)) return direct;
+      const rect = el.getBoundingClientRect();
+      return rect.width / currentScale();
+    };
+
+    const getMeasuredHeight = () => {
+      const direct = Number.parseFloat(el.style.height);
+      if (Number.isFinite(direct)) return direct;
+      const rect = el.getBoundingClientRect();
+      return rect.height / currentScale();
     };
 
     const applyMinDimensions = ({ save = false } = {}) => {
@@ -950,8 +1033,8 @@ function createGraph({
       el.style.minWidth = `${NODE_MIN_WIDTH}px`;
       el.style.minHeight = 'min-content';
       updateBodyOverflow();
-      const currentW = Number.parseFloat(el.style.width) || el.offsetWidth;
-      const currentH = Number.parseFloat(el.style.height) || el.offsetHeight;
+      const currentW = getMeasuredWidth();
+      const currentH = getMeasuredHeight();
       let widthTarget;
       let heightTarget;
       if (locked) {
@@ -981,6 +1064,8 @@ function createGraph({
       return { minWidth: dims.minWidth, minHeight: dims.minHeight };
     };
 
+    node.refreshDimensions = (save = false) => applyMinDimensions({ save });
+
     const scheduleAutoGrow = (() => {
       let raf = 0;
       let pendingSave = false;
@@ -992,6 +1077,7 @@ function createGraph({
           const save = pendingSave && !node.sizeLocked;
           pendingSave = false;
           if (!node._resizing) applyMinDimensions({ save });
+          requestRedraw();
         });
       };
     })();
@@ -1019,6 +1105,7 @@ function createGraph({
     const resizeHandle = document.createElement('div');
     resizeHandle.setAttribute('data-resize', '');
     resizeHandle.title = 'Resize';
+    resizeHandle.className = 'resizeHandle';
     resizeHandle.style.cssText = [
       'position:absolute',
       'right:4px',
@@ -1038,18 +1125,19 @@ function createGraph({
     resizeHandle.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
       ensureNodeRefs();
-      const bounds = el.getBoundingClientRect();
       node._resizing = true;
+      const scale = currentScale();
       resizeState = {
         id: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
-        startW: clampSize(bounds.width, NODE_MIN_WIDTH, NODE_MAX_WIDTH),
-        startH: clampSize(bounds.height, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT),
+        startW: clampSize(getMeasuredWidth(), NODE_MIN_WIDTH, NODE_MAX_WIDTH),
+        startH: clampSize(getMeasuredHeight(), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT),
         minW: NODE_MIN_WIDTH,
         minH: NODE_MIN_HEIGHT,
         maxW: NODE_MAX_WIDTH,
-        maxH: NODE_MAX_HEIGHT
+        maxH: NODE_MAX_HEIGHT,
+        scale
       };
       resizeHandle.setPointerCapture(e.pointerId);
       document.body.style.cursor = 'se-resize';
@@ -1061,25 +1149,35 @@ function createGraph({
       const dy = e.clientY - resizeState.startY;
       const minW = resizeState.minW;
       const minH = resizeState.minH;
-      const w = clampSize(Math.round(resizeState.startW + dx), minW, resizeState.maxW);
-      const h = clampSize(Math.round(resizeState.startH + dy), minH, resizeState.maxH);
-      el.style.width = `${w}px`;
-      el.style.height = `${h}px`;
-      node.w = w;
-      node.h = h;
-      requestRedraw();
+      const scale = resizeState.scale || currentScale();
+      const rawW = resizeState.startW + dx / scale;
+      const rawH = resizeState.startH + dy / scale;
+      const snappedW = clampSize(Math.round(rawW / GRID_SIZE) * GRID_SIZE, minW, resizeState.maxW);
+      const snappedH = clampSize(Math.round(rawH / GRID_SIZE) * GRID_SIZE, minH, resizeState.maxH);
+      const prevW = node.w ?? getMeasuredWidth();
+      const prevH = node.h ?? getMeasuredHeight();
+      if (snappedW !== prevW || snappedH !== prevH) {
+        el.style.width = `${snappedW}px`;
+        el.style.height = `${snappedH}px`;
+        node.w = snappedW;
+        node.h = snappedH;
+        playResizeBlip();
+        requestRedraw();
+      }
     });
 
     const endResize = () => {
       if (!resizeState) return;
       resizeState = null;
       document.body.style.cursor = '';
-      const widthNow = Number.parseFloat(el.style.width) || el.offsetWidth;
-      const heightNow = Number.parseFloat(el.style.height) || el.offsetHeight;
-      node.w = clampSize(widthNow, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-      node.h = clampSize(heightNow, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
-      el.style.width = `${node.w}px`;
-      el.style.height = `${node.h}px`;
+      const widthNow = getMeasuredWidth();
+      const heightNow = getMeasuredHeight();
+      const snappedW = clampSize(Math.round(widthNow / GRID_SIZE) * GRID_SIZE, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+      const snappedH = clampSize(Math.round(heightNow / GRID_SIZE) * GRID_SIZE, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      node.w = snappedW;
+      node.h = snappedH;
+      el.style.width = `${snappedW}px`;
+      el.style.height = `${snappedH}px`;
       setSizeLock(true);
       node._resizing = false;
       applyMinDimensions({ save: false });
@@ -1222,13 +1320,18 @@ function createGraph({
     head.addEventListener('pointermove', (e) => {
       if (!drag) return;
       const p = clientToWorkspace(e.clientX, e.clientY);
-      const gx = Math.round((p.x - drag.dx) / 14) * 14;
-      const gy = Math.round((p.y - drag.dy) / 14) * 14;
-      el.style.left = `${gx}px`;
-      el.style.top = `${gy}px`;
-      node.x = gx;
-      node.y = gy;
-      requestRedraw();
+      const prevX = node.x || 0;
+      const prevY = node.y || 0;
+      const gx = Math.round((p.x - drag.dx) / GRID_SIZE) * GRID_SIZE;
+      const gy = Math.round((p.y - drag.dy) / GRID_SIZE) * GRID_SIZE;
+      if (gx !== prevX || gy !== prevY) {
+        el.style.left = `${gx}px`;
+        el.style.top = `${gy}px`;
+        node.x = gx;
+        node.y = gy;
+        playMoveBlip();
+        requestRedraw();
+      }
     });
     head.addEventListener('pointerup', () => {
       drag = null;
@@ -1296,6 +1399,7 @@ function createGraph({
     if ('ResizeObserver' in window) {
       const ro = new ResizeObserver(() => {
         scheduleAutoGrow(false);
+        requestRedraw();
       });
       ro.observe(el);
       node._ro = ro;
@@ -1360,6 +1464,7 @@ function createGraph({
     path.setAttribute('opacity', '0.95');
     path.setAttribute('vector-effect', 'non-scaling-stroke');
     path.dataset.id = w.id;
+    path.classList.add('wire');
     const kill = (e) => {
       removeWireById(w.id);
       e.stopPropagation();
@@ -1558,6 +1663,43 @@ function createGraph({
     w.path.setAttribute('d', d);
   }
 
+  function parseWireKey(key) {
+    if (!key || typeof key !== 'string') return null;
+    const parts = key.split(':');
+    if (parts.length < 3) return null;
+    return {
+      node: parts[0],
+      dir: parts[1],
+      port: parts.slice(2).join(':')
+    };
+  }
+
+  function setWireActiveState(wire) {
+    if (!wire?.path) return;
+    wire.path.classList.add('wire-active');
+    if (wire._activeTimer) clearTimeout(wire._activeTimer);
+    wire._activeTimer = setTimeout(() => {
+      if (wire._activeTimer) {
+        clearTimeout(wire._activeTimer);
+        wire._activeTimer = null;
+      }
+      wire.path?.classList.remove('wire-active');
+    }, WIRE_ACTIVE_MS);
+  }
+
+  function markWireActive(fromKey, toKey) {
+    const from = parseWireKey(fromKey);
+    const to = parseWireKey(toKey);
+    if (!from || !to) return;
+    for (const wire of WS.wires) {
+      if (wire.from.node === from.node && wire.from.port === from.port && wire.to.node === to.node && wire.to.port === to.port) {
+        setWireActiveState(wire);
+      }
+    }
+  }
+
+  Router.onSend = (from, to) => markWireActive(from, to);
+
   function drawAllLinks() {
     for (const w of WS.wires) drawLink(w);
   }
@@ -1565,6 +1707,10 @@ function createGraph({
   function removeWireById(id) {
     const w = WS.wires.find((x) => x.id === id);
     if (!w) return;
+    if (w._activeTimer) {
+      clearTimeout(w._activeTimer);
+      w._activeTimer = null;
+    }
     w.path?.remove();
     WS.wires = WS.wires.filter((x) => x !== w);
     syncRouterFromWS();
@@ -1578,7 +1724,13 @@ function createGraph({
       (side === 'out' && w.from.node === nodeId && w.from.port === portName) ||
       (side === 'in' && w.to.node === nodeId && w.to.port === portName)
     );
-    rm.forEach((w) => w.path?.remove());
+    rm.forEach((w) => {
+      if (w._activeTimer) {
+        clearTimeout(w._activeTimer);
+        w._activeTimer = null;
+      }
+      w.path?.remove();
+    });
     WS.wires = WS.wires.filter((w) => !rm.includes(w));
     syncRouterFromWS();
     saveGraph();

@@ -2,7 +2,7 @@
   --bg: #000000;
   --panel: rgba(255, 255, 255, .07);
   --panel2: rgba(255, 255, 255, .05);
-  --accent: #66e0ff;
+  --accent: #00ff00;
   --accent2: #a8ff60;
   --text: #e8f1f8;
   --muted: #a9b6c3;
@@ -447,8 +447,8 @@ textarea {
   background: var(--panel2);
   color: var(--text);
   border: 1px solid rgba(255, 255, 255, .15);
-  border-radius: 8px;
-  padding: 9px 11px;
+  border-radius: 6px;
+  padding: 8px;
   outline: none
 }
 
@@ -499,7 +499,7 @@ textarea {
 
 .model-picker-button.selected {
   background: var(--accent);
-  border-color: rgba(255, 255, 255, 0.4);
+  border-color: rgba(0, 0, 0, 0.1);
   color: black;
 }
 
@@ -516,6 +516,7 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
   padding: 8px;
+  margin:0px 0px;
   font-size: 12px;
   white-space: pre-wrap;
 }
@@ -538,8 +539,8 @@ textarea {
 .model-cap-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.18);
   color: var(--text);
@@ -662,7 +663,7 @@ button {
   background: white;
   color: #000000;
   border: 0;
-  border-radius: 8px;
+  border-radius: 4px;
   line-height: 1;
   display: flex;
   padding: 8px 8px;
@@ -730,6 +731,7 @@ button.danger {
   border-radius: 4px;
   padding: 10px;
   white-space: pre-wrap;
+  margin-top: 6px;
   max-height: 260px;
   overflow: auto
 }
@@ -739,7 +741,8 @@ button.danger {
   max-height: 360px;
   overflow: auto;
   border: 1px solid rgba(255, 255, 255, .12);
-  padding: 10px;
+  padding: 5px;
+  margin-top: 6px;
   border-radius: 4px
 }
 
@@ -857,8 +860,26 @@ button.danger {
 #linksSvg {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 0;
   pointer-events: none;
+}
+
+#linksSvg path.wire {
+  transition: stroke 0.2s ease, opacity 0.2s ease;
+  stroke-dasharray: 0;
+  stroke-dashoffset: 0;
+}
+
+#linksSvg path.wire-active {
+  stroke: rgba(125, 255, 176, 0.95);
+  stroke-dasharray: 12 6;
+  animation: wire-dash 0.6s linear infinite;
+}
+
+@keyframes wire-dash {
+  to {
+    stroke-dashoffset: -18;
+  }
 }
 
 /* Node */
@@ -873,6 +894,13 @@ button.danger {
   user-select: none;
   container-type: inline-size;
   container-name: node;
+  z-index: 2;
+}
+.node:active{
+z-index: 3;
+}
+.node:hover{
+z-index: 3;
 }
 
 .node input,
@@ -918,13 +946,25 @@ button.danger {
 
 }
 
+.node .resizeHandle{
+  border-color:#ffffff55;
+  transition:all 0.5s ease;
+}
+.node .resizeHandle:hover{
+  border-color:#00ff00!important;
+
+    width: 4rem!important;
+    height: 4rem!important;
+
+}
+
 .node .head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   position: relative;
-  padding: 8px 10px;
+  padding: 0.5rem;
   cursor: grab;
   border-top-left-radius: 14px;
   border-top-right-radius: 14px;
@@ -937,7 +977,7 @@ button.danger {
   background-size: contain;
   background-position: top left;
   background-repeat: no-repeat;
-  transform: scale(1.03);
+  transform: scale(1.027);
   background-image: url('/img/left.svg');
   height: 39px;
   position: absolute;
@@ -950,7 +990,7 @@ button.danger {
   content: '';
   background-repeat: no-repeat;
   width: 80px;
-  transform: scale(1.03);
+  transform: scale(1.027);
   background-image: url('/img/right.svg');
   background-size: contain;
   background-position: top right;
@@ -960,6 +1000,9 @@ button.danger {
   top: -0.5px;
 }
 
+.node .head>.row {
+  margin-bottom: auto;
+}
 
 .node .head>.row::before {
   pointer-events: none !important;
@@ -996,7 +1039,7 @@ button.danger {
   height: 1px;
   position: absolute;
   left: 8.5rem;
-  top: calc(100% - 3.5px);
+  top: 37px;
   border-top-right-radius: 14px;
 }
 
@@ -1006,6 +1049,7 @@ button.danger {
   align-items: center;
   gap: 8px;
   flex: 1 1 auto;
+  max-width: 4rem;
 }
 
 .node .node-transport {
@@ -1013,13 +1057,14 @@ button.danger {
   align-items: center;
   gap: 6px;
   padding: 4px 4px;
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, .25);
   background: transparent;
   color: var(--text);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  margin-top: auto;
   transition: background .2s ease, color .2s ease, border .2s ease, box-shadow .2s ease;
 }
 
@@ -1047,14 +1092,14 @@ button.danger {
 .node .gear {
   width: 24px;
   height: 24px;
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 0;
   line-height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, .25);
+  border: 1px solid rgba(255, 255, 255, .5);
   color: var(--text)
 }
 
@@ -1074,12 +1119,13 @@ button.danger {
   content: '';
   bottom: 1px;
   left: 1px;
-  mask: linear-gradient(to top, black, transparent);
+  mask: linear-gradient(to top, black, #000e, #000a, transparent);
   backdrop-filter: blur(20px);
   border-radius: 14px;
   position: absolute;
   width: calc(100% - 2px);
-  height: 100%;z-index: -1;
+  height: 100%;
+  z-index: -1;
 }
 
 .tts-volume input[type="range"] {

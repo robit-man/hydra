@@ -5,6 +5,7 @@ const Router = {
   ports: new Map(),
   wires: CFG.wires.slice(),
   sel: null,
+  onSend: null,
 
   register(key, el, onrecv) {
     this.ports.set(key, { el, onrecv });
@@ -49,6 +50,11 @@ const Router = {
   send(from, payload) {
     for (const w of this.wires) {
       if (w.from === from) {
+        try {
+          this.onSend?.(from, w.to, payload);
+        } catch (err) {
+          log(`wire hook error ${w.from}→${w.to}: ${err.message}`);
+        }
         const port = this.ports.get(w.to);
         try {
           port && port.onrecv && port.onrecv(payload, from, w.to);
