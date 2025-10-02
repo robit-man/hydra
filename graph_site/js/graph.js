@@ -888,31 +888,71 @@ function refreshNodeResolution(force = false) {
     el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
     el.style.left = `${node.x || 60}px`;
     el.style.top = `${node.y || 60}px`;
-    if (node.w) {
-      const initialW = Math.min(node.w, NODE_MAX_WIDTH);
-      node.w = initialW;
-      el.style.width = `${initialW}px`;
-    }
-    if (node.h) {
-      const initialH = Math.min(node.h, NODE_MAX_HEIGHT);
-      node.h = initialH;
-      el.style.height = `${initialH}px`;
-    }
+    const initialWidth = Number.isFinite(node.w)
+      ? clampSize(node.w, NODE_MIN_WIDTH, NODE_MAX_WIDTH)
+      : null;
+    const initialHeight = Number.isFinite(node.h)
+      ? clampSize(node.h, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT)
+      : null;
+    if (initialWidth !== null) node.w = initialWidth;
+    if (initialHeight !== null) node.h = initialHeight;
     el.dataset.id = node.id;
 
     node.sizeLocked = Boolean(node.sizeLocked);
     let headEl = null;
     let bodyEl = null;
+    let frameEl = null;
 
     const ensureNodeRefs = () => {
+      if (!frameEl) frameEl = el.querySelector('.node__frame');
       if (!headEl) headEl = el.querySelector('.head');
       if (!bodyEl) bodyEl = el.querySelector('.body');
+    };
+
+    const syncFrameConstraints = () => {
+      ensureNodeRefs();
+      if (!frameEl) return;
+      frameEl.style.maxWidth = `${NODE_MAX_WIDTH}px`;
+      frameEl.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
+      frameEl.style.minWidth = `${NODE_MIN_WIDTH}px`;
+      frameEl.style.minHeight = 'min-content';
+    };
+
+    const syncFrameDimensions = () => {
+      ensureNodeRefs();
+      if (!frameEl) return;
+      if (el.style.width) frameEl.style.width = el.style.width;
+      else frameEl.style.removeProperty('width');
+      if (el.style.height) frameEl.style.height = el.style.height;
+      else frameEl.style.removeProperty('height');
+    };
+
+    const applyNodeWidth = (widthPx) => {
+      if (!Number.isFinite(widthPx)) return node.w;
+      const clamped = clampSize(widthPx, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+      const widthStyle = `${clamped}px`;
+      if (el.style.width !== widthStyle) el.style.width = widthStyle;
+      ensureNodeRefs();
+      if (frameEl && frameEl.style.width !== widthStyle) frameEl.style.width = widthStyle;
+      node.w = clamped;
+      return clamped;
+    };
+
+    const applyNodeHeight = (heightPx) => {
+      if (!Number.isFinite(heightPx)) return node.h;
+      const clamped = clampSize(heightPx, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      const heightStyle = `${clamped}px`;
+      if (el.style.height !== heightStyle) el.style.height = heightStyle;
+      ensureNodeRefs();
+      if (frameEl && frameEl.style.height !== heightStyle) frameEl.style.height = heightStyle;
+      node.h = clamped;
+      return clamped;
     };
 
     const updateBodyOverflow = () => {
       ensureNodeRefs();
       if (!bodyEl) return;
-      bodyEl.style.overflow = node.sizeLocked ? 'auto' : '';
+      bodyEl.style.overflow = (node.sizeLocked || node._resizing) ? 'auto' : '';
     };
 
     const setSizeLock = (locked) => {
@@ -1047,24 +1087,27 @@ function refreshNodeResolution(force = false) {
 
     ensureNodeRefs();
     setSizeLock(node.sizeLocked);
+    syncFrameConstraints();
+    if (initialWidth !== null) applyNodeWidth(initialWidth);
+    if (initialHeight !== null) applyNodeHeight(initialHeight);
+    syncFrameDimensions();
 
     const computeMinDimensions = () => {
-  ensureNodeRefs();
-  // IMPORTANT: layout metrics are already in CSS pixels, do NOT scale by view
-  const headHeight = headEl ? headEl.offsetHeight : 0;
-  const bodyHeight = bodyEl ? bodyEl.scrollHeight : 0;
-  const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
+      ensureNodeRefs();
+      // IMPORTANT: layout metrics are already in CSS pixels, do NOT scale by view
+      const headHeight = headEl ? headEl.offsetHeight : 0;
+      const bodyHeight = bodyEl ? bodyEl.scrollHeight : 0;
+      const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
 
-  const headWidth = headEl ? headEl.scrollWidth : 0;
-  const bodyWidth = bodyEl ? bodyEl.scrollWidth : 0;
-  const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
+      const headWidth = headEl ? headEl.scrollWidth : 0;
+      const bodyWidth = bodyEl ? bodyEl.scrollWidth : 0;
+      const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
 
-  return {
-    minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
-    minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
-  };
-};
-
+      return {
+        minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
+        minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
+      };
+    };
 
     const getMeasuredWidth = () => {
       const direct = Number.parseFloat(el.style.width);
@@ -1080,50 +1123,51 @@ function refreshNodeResolution(force = false) {
       return rect.height / currentScale();
     };
     const applyMinDimensions = ({ save = false, reason = 'auto' } = {}) => {
-  const dims = computeMinDimensions();
-  const locked = Boolean(node.sizeLocked);
+      const dims = computeMinDimensions();
+      const locked = Boolean(node.sizeLocked);
 
-  el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
-  el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
-  el.style.minWidth = `${NODE_MIN_WIDTH}px`;
-  el.style.minHeight = 'min-content';
-  updateBodyOverflow();
+      el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
+      el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
+      el.style.minWidth = `${NODE_MIN_WIDTH}px`;
+      el.style.minHeight = 'min-content';
+      syncFrameConstraints();
+      updateBodyOverflow();
 
-  const currentW = getMeasuredWidth();
-  const currentH = getMeasuredHeight();
+      const currentW = getMeasuredWidth();
+      const currentH = getMeasuredHeight();
 
-  // Do NOT enforce mins on zoom; only when unlocked or non-zoom reasons
-  const allowEnforceMins = !locked && reason !== 'zoom';
+      // Do NOT enforce mins on zoom; only when unlocked or non-zoom reasons
+      const allowEnforceMins = !locked && reason !== 'zoom';
 
-  const targetW = allowEnforceMins
-    ? clampSize(Math.max(currentW, dims.minWidth), NODE_MIN_WIDTH, NODE_MAX_WIDTH)
-    : clampSize(currentW, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+      const targetW = allowEnforceMins
+        ? clampSize(Math.max(currentW, dims.minWidth), NODE_MIN_WIDTH, NODE_MAX_WIDTH)
+        : clampSize(currentW, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
 
-  const targetH = allowEnforceMins
-    ? clampSize(Math.max(currentH, dims.minHeight), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT)
-    : clampSize(currentH, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      const targetH = allowEnforceMins
+        ? clampSize(Math.max(currentH, dims.minHeight), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT)
+        : clampSize(currentH, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
 
-  let adjusted = false;
-  if (targetW !== currentW) {
-    el.style.width = `${targetW}px`;
-    node.w = targetW;
-    adjusted = true;
-  }
-  if (targetH !== currentH) {
-    el.style.height = `${targetH}px`;
-    node.h = targetH;
-    adjusted = true;
-  }
-  if (!adjusted) {
-    node.w = targetW;
-    node.h = targetH;
-  }
+      let adjusted = false;
+      if (targetW !== currentW) {
+        applyNodeWidth(targetW);
+        adjusted = true;
+      } else {
+        node.w = targetW;
+      }
+      if (targetH !== currentH) {
+        applyNodeHeight(targetH);
+        adjusted = true;
+      } else {
+        node.h = targetH;
+      }
 
-  if (adjusted) requestRedraw();
-  if (save && (!locked || adjusted)) saveGraph();
+      syncFrameDimensions();
 
-  return { minWidth: dims.minWidth, minHeight: dims.minHeight };
-};
+      if (adjusted) requestRedraw();
+      if (save && (!locked || adjusted)) saveGraph();
+
+      return { minWidth: dims.minWidth, minHeight: dims.minHeight };
+    };
 
 
     node.refreshDimensions = (save = false, reason = 'auto') => applyMinDimensions({ save, reason });
@@ -1204,6 +1248,7 @@ function refreshNodeResolution(force = false) {
       };
       resizeHandle.setPointerCapture(e.pointerId);
       document.body.style.cursor = 'se-resize';
+      updateBodyOverflow();
     });
 
     resizeHandle.addEventListener('pointermove', (e) => {
@@ -1219,11 +1264,16 @@ function refreshNodeResolution(force = false) {
       const snappedH = clampSize(Math.round(rawH / GRID_SIZE) * GRID_SIZE, minH, resizeState.maxH);
       const prevW = node.w ?? getMeasuredWidth();
       const prevH = node.h ?? getMeasuredHeight();
-      if (snappedW !== prevW || snappedH !== prevH) {
-        el.style.width = `${snappedW}px`;
-        el.style.height = `${snappedH}px`;
-        node.w = snappedW;
-        node.h = snappedH;
+      let changed = false;
+      if (snappedW !== prevW) {
+        applyNodeWidth(snappedW);
+        changed = true;
+      }
+      if (snappedH !== prevH) {
+        applyNodeHeight(snappedH);
+        changed = true;
+      }
+      if (changed) {
         playResizeBlip();
         requestRedraw();
       }
@@ -1237,10 +1287,8 @@ function refreshNodeResolution(force = false) {
       const heightNow = getMeasuredHeight();
       const snappedW = clampSize(Math.round(widthNow / GRID_SIZE) * GRID_SIZE, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
       const snappedH = clampSize(Math.round(heightNow / GRID_SIZE) * GRID_SIZE, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
-      node.w = snappedW;
-      node.h = snappedH;
-      el.style.width = `${snappedW}px`;
-      el.style.height = `${snappedH}px`;
+      applyNodeWidth(snappedW);
+      applyNodeHeight(snappedH);
       setSizeLock(true);
       node._resizing = false;
       applyMinDimensions({ save: false });

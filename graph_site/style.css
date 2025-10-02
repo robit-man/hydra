@@ -315,9 +315,9 @@ header {
     background-size: contain;
     background-position: top left;
     background-repeat: no-repeat;
-    transform: scale(103%)translatey(-1.5%) !important;
+    transform: scale(100%)translatey(-1.5%) !important;
     background-image: url('/img/left.svg');
-    height: 39px;
+    height: 40px;
     position: absolute;
     left: 4rem;
   }
@@ -327,11 +327,11 @@ header {
     content: '';
     background-repeat: no-repeat;
     width: 80px;
-    transform: scale(103%)translatey(-1.5%) !important;
+    transform: scale(100%)translatey(-1.5%) !important;
     background-image: url('/img/right.svg');
     background-size: contain;
     background-position: top right;
-    height: 39px;
+    height: 40px;
     position: absolute;
     right: 5rem;
   }
@@ -991,6 +991,19 @@ button.danger {
   box-sizing: border-box;
   backdrop-filter: blur(10px);
   clip-path: polygon(8.6rem 38px, calc(100% - 8.6rem) 38px, calc(100% - 6.2rem) 0, 100% 0, 100% 100%, 0 100%, 0 0, 6.2rem 0);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.node__frame > .head {
+  flex: 0 0 auto;
+}
+
+.node__frame > .body {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* hide ::after when .node < 260px wide */
@@ -1064,10 +1077,11 @@ button.danger {
   background-size: contain;
   background-position: top left;
   background-repeat: no-repeat;
-  transform: scale(103%)translatey(-2.4%);
+  transform-origin: top left;
+top:0px;
+  transform: scale(100%)translatey(-1.25%);
   background-image: url('/img/left.svg');
-  height: 39px;
-  top: 1px;
+  height: 40px;
   position: absolute;
   left: 4.8rem;
 }
@@ -1077,12 +1091,13 @@ button.danger {
   content: '';
   background-repeat: no-repeat;
   width: 80px;
-  transform: scale(103%)translatey(-2.4%);
+  transform-origin: top right;
+top:0px;
+  transform: scale(100%)translatey(-1.25%);
   background-image: url('/img/right.svg');
   background-size: contain;
   background-position: top right;
-  height: 39px;
-  top: 1px;
+  height: 40px;
   position: absolute;
   right: 4.8rem;
 }
