@@ -14,13 +14,15 @@ function createWorkspaceSync({
     incomingOffer: null,
     listenerAttached: false,
     lastShareParam: null,
-    qrInitialized: false
+    qrInitialized: false,
+    allowRequest: false
   };
 
   const els = {
     shareModal: null,
     shareMessage: null,
     shareYes: null,
+    shareRequest: null,
     shareNo: null,
     shareClose: null,
     shareBackdrop: null,
@@ -45,9 +47,14 @@ function createWorkspaceSync({
     els.shareModal = qs('#syncShareModal');
     els.shareMessage = qs('#syncShareMessage');
     els.shareYes = qs('#syncShareYes');
+    els.shareRequest = qs('#syncShareRequest');
     els.shareNo = qs('#syncShareNo');
     els.shareClose = qs('#syncShareClose');
     els.shareBackdrop = qs('#syncShareBackdrop');
+    if (els.shareRequest) {
+      els.shareRequest.classList.add('hidden');
+      els.shareRequest.disabled = true;
+    }
 
     els.receiveModal = qs('#syncReceiveModal');
     els.receiveMessage = qs('#syncReceiveMessage');
@@ -247,6 +254,12 @@ function createWorkspaceSync({
     const action = msg.action || (msg.event === 'workspace.sync.offer' ? 'offer' : undefined);
     const from = stripGraphPrefix(msg.from || msg.sender || (a && a.src) || '');
 
+    if (action === 'request') {
+      if (!from) return;
+      promptShare(from, { incoming: true });
+      return;
+    }
+
     if (action !== 'offer') return;
 
     const workspace = msg.workspace || (msg.payload && msg.payload.workspace);
@@ -306,6 +319,11 @@ function createWorkspaceSync({
   function closeShareModal() {
     hideModal(els.shareModal);
     state.shareTarget = null;
+    state.allowRequest = false;
+    if (els.shareRequest) {
+      els.shareRequest.classList.remove('hidden');
+      els.shareRequest.disabled = false;
+    }
   }
 
   function closeReceiveModal() {
@@ -321,10 +339,20 @@ function createWorkspaceSync({
       return;
     }
     state.shareTarget = normalized;
+    state.allowRequest = !incoming;
     if (els.shareMessage) {
       els.shareMessage.textContent = incoming
         ? `${formatAddress(normalized)} requested your workspace. Share now?`
-        : `Do you want to share your workspace with ${formatAddress(normalized)}?`;
+        : `How would you like to sync with ${formatAddress(normalized)}?`;
+    }
+    if (els.shareRequest) {
+      if (state.allowRequest) {
+        els.shareRequest.classList.remove('hidden');
+        els.shareRequest.disabled = false;
+      } else {
+        els.shareRequest.classList.add('hidden');
+        els.shareRequest.disabled = true;
+      }
     }
     showModal(els.shareModal);
   }
@@ -360,6 +388,35 @@ function createWorkspaceSync({
     } catch (err) {
       setBadge(`Share failed: ${err?.message || err}`, false);
       log(`[sync] share error: ${err?.stack || err}`);
+    } finally {
+      closeShareModal();
+    }
+  }
+
+  async function requestWorkspaceFromTarget() {
+    const targetRaw = stripGraphPrefix(state.shareTarget);
+    if (!targetRaw) {
+      setBadge('No sync target', false);
+      closeShareModal();
+      return;
+    }
+    try {
+      const client = await ensureNknReady();
+      const from = stripGraphPrefix(Net.nkn.addr || client.addr || '');
+      const targetFull = ensureGraphPrefix(targetRaw);
+      if (!targetFull) throw new Error('Invalid target address');
+      const payload = {
+        type: 'workspace-sync',
+        action: 'request',
+        from,
+        graphId: CFG.graphId || null,
+        ts: Date.now()
+      };
+      await client.send(targetFull, JSON.stringify(payload), { noReply: true, maxHoldingSeconds: 120 });
+      setBadge(`Requested workspace from ${formatAddress(targetRaw)}`);
+    } catch (err) {
+      setBadge(`Request failed: ${err?.message || err}`, false);
+      log(`[sync] request error: ${err?.stack || err}`);
     } finally {
       closeShareModal();
     }
@@ -412,6 +469,13 @@ function createWorkspaceSync({
         sendWorkspaceToTarget();
       });
       els.shareYes._syncBound = true;
+    }
+    if (els.shareRequest && !els.shareRequest._syncBound) {
+      els.shareRequest.addEventListener('click', (e) => {
+        e.preventDefault();
+        requestWorkspaceFromTarget();
+      });
+      els.shareRequest._syncBound = true;
     }
     [
       [els.shareNo, () => {

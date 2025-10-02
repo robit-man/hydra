@@ -1556,15 +1556,23 @@ function refreshNodeResolution(force = false) {
     }
 
     const head = el.querySelector('.head');
+    const body = el.querySelector('.body');
     let drag = null;
-    head.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('button')) return;
+
+    const startNodeDrag = (sourceEl, e) => {
+      if (e.button !== undefined && e.button !== 0) return;
       const start = clientToWorkspace(e.clientX, e.clientY);
-      drag = { dx: start.x - (node.x || 0), dy: start.y - (node.y || 0) };
-      head.setPointerCapture(e.pointerId);
-    });
-    head.addEventListener('pointermove', (e) => {
-      if (!drag) return;
+      drag = {
+        pointerId: e.pointerId,
+        dx: start.x - (node.x || 0),
+        dy: start.y - (node.y || 0)
+      };
+      setSelectedNode(node.id);
+      sourceEl.setPointerCapture?.(e.pointerId);
+    };
+
+    const handlePointerMove = (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
       const p = clientToWorkspace(e.clientX, e.clientY);
       const prevX = node.x || 0;
       const prevY = node.y || 0;
@@ -1578,11 +1586,27 @@ function refreshNodeResolution(force = false) {
         playMoveBlip();
         requestRedraw();
       }
-    });
-    head.addEventListener('pointerup', () => {
+    };
+
+    const handlePointerUp = (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
       drag = null;
       saveGraph();
-    });
+    };
+
+    const bindDragSurface = (surfaceEl, guard) => {
+      if (!surfaceEl) return;
+      surfaceEl.addEventListener('pointerdown', (e) => {
+        if (guard && guard(e) === false) return;
+        startNodeDrag(surfaceEl, e);
+      });
+      surfaceEl.addEventListener('pointermove', handlePointerMove);
+      surfaceEl.addEventListener('pointerup', handlePointerUp);
+      surfaceEl.addEventListener('pointercancel', handlePointerUp);
+    };
+
+    bindDragSurface(head, (e) => !e.target.closest('button'));
+    bindDragSurface(body, (e) => e.target === body);
 
     const gearButtons = el.querySelectorAll('.gear');
     const btnGear = gearButtons[0];

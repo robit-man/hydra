@@ -351,18 +351,25 @@ function bindGlobalDrop() {
     if (graphDragDepth === 0) clearGraphDropHighlight();
   });
 
-  window.addEventListener('dragover', (e) => {
+  const handleDragOver = (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    e.stopPropagation();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-  });
+  };
 
-  window.addEventListener('drop', (e) => {
+  const handleDrop = (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    e.stopPropagation();
     clearGraphDropHighlight();
     handleGraphFileDrop(e.dataTransfer?.files);
-  });
+  };
+
+  window.addEventListener('dragover', handleDragOver);
+  window.addEventListener('drop', handleDrop);
+  document.addEventListener('dragover', handleDragOver, true);
+  document.addEventListener('drop', handleDrop, true);
 }
 
 function init() {
