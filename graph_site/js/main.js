@@ -48,7 +48,8 @@ const TTS = createTTS({
   CFG,
   log,
   b64ToBytes,
-  setRelayState
+  setRelayState,
+  Router
 });
 
 const ASR = createASR({

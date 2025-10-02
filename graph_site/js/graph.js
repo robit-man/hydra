@@ -33,6 +33,16 @@ function createGraph({
     _redrawReq: false
   };
 
+  const NODE_MIN_WIDTH = 230;
+  const NODE_MIN_HEIGHT = 120;
+  const NODE_MAX_WIDTH = 512;
+  const NODE_MAX_HEIGHT = 1024;
+
+  const clampSize = (value, min, max) => {
+    const numeric = Number.isFinite(value) ? value : min;
+    return Math.min(Math.max(numeric, min), max);
+  };
+
   const convertBooleanSelectsIn = (container) => {
     if (!container) return;
     container.querySelectorAll('select').forEach((sel) => convertBooleanSelect(sel));
@@ -359,8 +369,13 @@ function createGraph({
       if (portName === 'tools') return LLM.onTools?.(node.id, payload);
       return;
     }
+    if (node.type === 'ASR') {
+      if (portName === 'mute') return ASR.onMute?.(node.id, payload);
+      return;
+    }
     if (node.type === 'TTS') {
       if (portName === 'text') return TTS.onText(node.id, payload);
+      if (portName === 'mute') return TTS.onMute?.(node.id, payload);
       return;
     }
     if (node.type === 'NknDM') {
@@ -751,62 +766,43 @@ function createGraph({
     const t = TYPES[node.type];
     const el = document.createElement('div');
     el.className = 'node';
+    el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
+    el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
     el.style.left = `${node.x || 60}px`;
     el.style.top = `${node.y || 60}px`;
-    if (node.w) el.style.width = `${node.w}px`;
-    if (node.h) el.style.height = `${node.h}px`;
+    if (node.w) {
+      const initialW = Math.min(node.w, NODE_MAX_WIDTH);
+      node.w = initialW;
+      el.style.width = `${initialW}px`;
+    }
+    if (node.h) {
+      const initialH = Math.min(node.h, NODE_MAX_HEIGHT);
+      node.h = initialH;
+      el.style.height = `${initialH}px`;
+    }
     el.dataset.id = node.id;
 
-    const computeMinDimensions = () => {
-      const head = el.querySelector('.head');
-      const body = el.querySelector('.body');
-      const headHeight = head ? head.offsetHeight : 0;
-      const bodyHeight = body ? body.scrollHeight : 0;
-      const baseMinHeight = Math.max(120, Math.ceil(headHeight + bodyHeight));
-      const headWidth = head ? head.scrollWidth : 0;
-      const bodyWidth = body ? body.scrollWidth : 0;
-      const baseMinWidth = Math.max(230, Math.ceil(Math.max(headWidth, bodyWidth)));
-      return { minHeight: baseMinHeight, minWidth: baseMinWidth };
+    node.sizeLocked = Boolean(node.sizeLocked);
+    let headEl = null;
+    let bodyEl = null;
+
+    const ensureNodeRefs = () => {
+      if (!headEl) headEl = el.querySelector('.head');
+      if (!bodyEl) bodyEl = el.querySelector('.body');
     };
 
-    const applyMinDimensions = ({ save = false } = {}) => {
-      const dims = computeMinDimensions();
-      el.style.minWidth = `${dims.minWidth}px`;
-      el.style.minHeight = `${dims.minHeight}px`;
-      let adjusted = false;
-      const currentW = Number.parseFloat(el.style.width) || el.offsetWidth;
-      const currentH = Number.parseFloat(el.style.height) || el.offsetHeight;
-      if (currentW < dims.minWidth) {
-        el.style.width = `${dims.minWidth}px`;
-        node.w = dims.minWidth;
-        adjusted = true;
-      }
-      if (currentH < dims.minHeight) {
-        el.style.height = `${dims.minHeight}px`;
-        node.h = dims.minHeight;
-        adjusted = true;
-      }
-      if (adjusted) {
-        requestRedraw();
-        if (save) saveGraph();
-      }
-      return { minWidth: dims.minWidth, minHeight: dims.minHeight };
+    const updateBodyOverflow = () => {
+      ensureNodeRefs();
+      if (!bodyEl) return;
+      bodyEl.style.overflow = node.sizeLocked ? 'auto' : '';
     };
 
-    const scheduleAutoGrow = (() => {
-      let raf = 0;
-      let pendingSave = false;
-      return (shouldSave = false) => {
-        pendingSave = pendingSave || shouldSave;
-        if (raf) return;
-        raf = requestAnimationFrame(() => {
-          raf = 0;
-          const save = pendingSave;
-          pendingSave = false;
-          if (!node._resizing) applyMinDimensions({ save });
-        });
-      };
-    })();
+    const setSizeLock = (locked) => {
+      node.sizeLocked = Boolean(locked);
+      if (node.sizeLocked) el.dataset.sizeLock = 'manual';
+      else delete el.dataset.sizeLock;
+      updateBodyOverflow();
+    };
 
     const transportMarkup = t.supportsNkn
       ? '<button type="button" class="node-transport" title="Toggle NKN relay">NKN</button>'
@@ -929,6 +925,77 @@ function createGraph({
       </div>
     `;
 
+    ensureNodeRefs();
+    setSizeLock(node.sizeLocked);
+
+    const computeMinDimensions = () => {
+      ensureNodeRefs();
+      const headHeight = headEl ? headEl.offsetHeight : 0;
+      const bodyHeight = bodyEl ? bodyEl.scrollHeight : 0;
+      const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
+      const headWidth = headEl ? headEl.scrollWidth : 0;
+      const bodyWidth = bodyEl ? bodyEl.scrollWidth : 0;
+      const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
+      return {
+        minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
+        minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
+      };
+    };
+
+    const applyMinDimensions = ({ save = false } = {}) => {
+      const dims = computeMinDimensions();
+      const locked = Boolean(node.sizeLocked);
+      el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
+      el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
+      el.style.minWidth = `${NODE_MIN_WIDTH}px`;
+      el.style.minHeight = 'min-content';
+      updateBodyOverflow();
+      const currentW = Number.parseFloat(el.style.width) || el.offsetWidth;
+      const currentH = Number.parseFloat(el.style.height) || el.offsetHeight;
+      let widthTarget;
+      let heightTarget;
+      if (locked) {
+        widthTarget = clampSize(currentW, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+        heightTarget = clampSize(currentH, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      } else {
+        widthTarget = clampSize(Math.max(currentW, dims.minWidth), NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+        heightTarget = clampSize(Math.max(currentH, dims.minHeight), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      }
+      let adjusted = false;
+      if (widthTarget !== currentW) {
+        el.style.width = `${widthTarget}px`;
+        node.w = widthTarget;
+        adjusted = true;
+      }
+      if (heightTarget !== currentH) {
+        el.style.height = `${heightTarget}px`;
+        node.h = heightTarget;
+        adjusted = true;
+      }
+      if (!adjusted) {
+        node.w = widthTarget;
+        node.h = heightTarget;
+      }
+      if (adjusted) requestRedraw();
+      if (save && (!locked || adjusted)) saveGraph();
+      return { minWidth: dims.minWidth, minHeight: dims.minHeight };
+    };
+
+    const scheduleAutoGrow = (() => {
+      let raf = 0;
+      let pendingSave = false;
+      return (shouldSave = false) => {
+        pendingSave = pendingSave || shouldSave;
+        if (raf) return;
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const save = pendingSave && !node.sizeLocked;
+          pendingSave = false;
+          if (!node._resizing) applyMinDimensions({ save });
+        });
+      };
+    })();
+
     const transportBtn = el.querySelector('.node-transport');
     if (transportBtn && t.supportsNkn) {
       transportBtn.addEventListener('click', (ev) => {
@@ -970,17 +1037,19 @@ function createGraph({
     let resizeState = null;
     resizeHandle.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
+      ensureNodeRefs();
       const bounds = el.getBoundingClientRect();
-      const minDims = computeMinDimensions();
       node._resizing = true;
       resizeState = {
         id: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
-        startW: bounds.width,
-        startH: bounds.height,
-        minW: minDims.minWidth,
-        minH: minDims.minHeight
+        startW: clampSize(bounds.width, NODE_MIN_WIDTH, NODE_MAX_WIDTH),
+        startH: clampSize(bounds.height, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT),
+        minW: NODE_MIN_WIDTH,
+        minH: NODE_MIN_HEIGHT,
+        maxW: NODE_MAX_WIDTH,
+        maxH: NODE_MAX_HEIGHT
       };
       resizeHandle.setPointerCapture(e.pointerId);
       document.body.style.cursor = 'se-resize';
@@ -992,8 +1061,8 @@ function createGraph({
       const dy = e.clientY - resizeState.startY;
       const minW = resizeState.minW;
       const minH = resizeState.minH;
-      const w = Math.max(minW, Math.round(resizeState.startW + dx));
-      const h = Math.max(minH, Math.round(resizeState.startH + dy));
+      const w = clampSize(Math.round(resizeState.startW + dx), minW, resizeState.maxW);
+      const h = clampSize(Math.round(resizeState.startH + dy), minH, resizeState.maxH);
       el.style.width = `${w}px`;
       el.style.height = `${h}px`;
       node.w = w;
@@ -1007,10 +1076,15 @@ function createGraph({
       document.body.style.cursor = '';
       const widthNow = Number.parseFloat(el.style.width) || el.offsetWidth;
       const heightNow = Number.parseFloat(el.style.height) || el.offsetHeight;
-      node.w = widthNow;
-      node.h = heightNow;
+      node.w = clampSize(widthNow, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+      node.h = clampSize(heightNow, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+      el.style.width = `${node.w}px`;
+      el.style.height = `${node.h}px`;
+      setSizeLock(true);
       node._resizing = false;
-      applyMinDimensions({ save: true });
+      applyMinDimensions({ save: false });
+      saveGraph();
+      requestRedraw();
     };
     resizeHandle.addEventListener('pointerup', endResize);
     resizeHandle.addEventListener('pointercancel', endResize);
@@ -1521,14 +1595,21 @@ function createGraph({
 
   function saveGraph() {
     const data = {
-      nodes: Array.from(WS.nodes.values()).map((n) => ({
-        id: n.id,
-        type: n.type,
-        x: n.x,
-        y: n.y,
-        w: Math.round(n.el?.offsetWidth || n.w || 0),
-        h: Math.round(n.el?.offsetHeight || n.h || 0)
-      })),
+      nodes: Array.from(WS.nodes.values()).map((n) => {
+        const width = Math.round(n.el?.offsetWidth || n.w || 0);
+        const height = Math.round(n.el?.offsetHeight || n.h || 0);
+        n.w = width;
+        n.h = height;
+        return {
+          id: n.id,
+          type: n.type,
+          x: n.x,
+          y: n.y,
+          w: width,
+          h: height,
+          sizeLocked: Boolean(n.sizeLocked)
+        };
+      }),
       links: WS.wires.map((w) => ({ from: w.from, to: w.to })),
       nodeConfigs: {},
       viewport: {
@@ -1591,7 +1672,15 @@ function createGraph({
     }
 
     for (const n of (data.nodes || [])) {
-      const node = { id: n.id, type: n.type, x: n.x, y: n.y, w: n.w, h: n.h };
+      const node = {
+        id: n.id,
+        type: n.type,
+        x: n.x,
+        y: n.y,
+        w: n.w,
+        h: n.h,
+        sizeLocked: Boolean(n.sizeLocked)
+      };
       NodeStore.ensure(node.id, node.type);
       node.el = makeNodeEl(node);
       WS.canvas.appendChild(node.el);
@@ -1723,8 +1812,8 @@ function createGraph({
       title: 'ASR',
       supportsNkn: true,
       relayKey: 'relay',
-      inputs: [],
-      outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }],
+      inputs: [{ name: 'mute', label: 'Mute' }],
+      outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }, { name: 'active', label: 'Active' }],
       schema: [
         { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8126' },
         { key: 'relay', label: 'NKN Relay', type: 'text' },
@@ -1744,7 +1833,9 @@ function createGraph({
         { key: 'prevWin', label: 'Preview Window (s)', type: 'text', placeholder: '(server default)' },
         { key: 'prevStep', label: 'Preview Step (s)', type: 'text', placeholder: '(server default)' },
         { key: 'prevModel', label: 'Preview Model', type: 'select', options: [] },
-        { key: 'prompt', label: 'Prompt', type: 'textarea', placeholder: 'Bias decoding, names, spellings…' }
+        { key: 'prompt', label: 'Prompt', type: 'textarea', placeholder: 'Bias decoding, names, spellings…' },
+        { key: 'muteSignalMode', label: 'Mute Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' },
+        { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
       ]
     },
     LLM: {
@@ -1770,14 +1861,16 @@ function createGraph({
       title: 'TTS',
       supportsNkn: true,
       relayKey: 'relay',
-      inputs: [{ name: 'text' }],
-      outputs: [],
+      inputs: [{ name: 'text' }, { name: 'mute', label: 'Mute' }],
+      outputs: [{ name: 'active', label: 'Active' }],
       schema: [
         { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8123' },
         { key: 'relay', label: 'NKN Relay', type: 'text' },
         { key: 'api', label: 'API Key', type: 'text' },
         { key: 'model', label: 'Voice/Model', type: 'select', options: [] },
-        { key: 'mode', label: 'Mode', type: 'select', options: ['stream', 'file'], def: 'stream' }
+        { key: 'mode', label: 'Mode', type: 'select', options: ['stream', 'file'], def: 'stream' },
+        { key: 'muteSignalMode', label: 'Mute Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' },
+        { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
       ]
     },
     ImageInput: {
@@ -2851,8 +2944,12 @@ function createGraph({
         if (typeInfo.relayKey === 'relay') updateTransportButton();
         refreshNodeTransport(nodeId);
       }
+      if (node.type === 'ASR') {
+        ASR.refreshConfig?.(node.id);
+      }
       if (node.type === 'TTS') {
         TTS.refreshUI(node.id);
+        TTS.refreshConfig?.(node.id);
       }
       if (node.type === 'TextInput') {
         initTextInputNode(node);
@@ -2885,7 +2982,7 @@ function createGraph({
 
   function addNode(type, x = 70, y = 70) {
     const id = uid();
-    const node = { id, type, x, y };
+    const node = { id, type, x, y, sizeLocked: false };
     NodeStore.ensure(id, type);
     node.el = makeNodeEl(node);
     WS.canvas.appendChild(node.el);

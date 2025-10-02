@@ -22,7 +22,9 @@ const NodeStore = {
       prompt: ASR_DEFAULT_PROMPT,
       prevWin: '',
       prevStep: '',
-      prevModel: ''
+      prevModel: '',
+      muteSignalMode: 'true/false',
+      activeSignalMode: 'true/false'
     },
     LLM: {
       base: 'http://127.0.0.1:11434',
@@ -46,7 +48,9 @@ const NodeStore = {
       api: '',
       model: '',
       mode: 'stream',
-      volume: 1
+      volume: 1,
+      muteSignalMode: 'true/false',
+      activeSignalMode: 'true/false'
     },
     ImageInput: {
       image: '',

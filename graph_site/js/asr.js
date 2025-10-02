@@ -12,6 +12,66 @@ function createASR({
 }) {
   const MODEL_PROMISE = new Map();
   const MODEL_METADATA = new Map();
+  const SIGNAL_TRUE_FALSE = 'true/false';
+  const SIGNAL_TRUE_EMPTY = 'true/empty';
+  const muteRequests = new Map();
+  const lastActiveByNode = new Map();
+
+  const coerceFromPayload = (raw) => {
+    if (raw == null) return null;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') return raw !== 0;
+    if (typeof raw === 'string') {
+      const text = raw.trim().toLowerCase();
+      if (!text) return false;
+      if (['true', '1', 'yes', 'on', 'start', 'active'].includes(text)) return true;
+      if (['false', '0', 'no', 'off', 'stop', 'inactive'].includes(text)) return false;
+      return true;
+    }
+    if (typeof raw === 'object') {
+      if ('value' in raw) return coerceFromPayload(raw.value);
+      if ('text' in raw) return coerceFromPayload(raw.text);
+      if ('data' in raw) return coerceFromPayload(raw.data);
+      if ('state' in raw) return coerceFromPayload(raw.state);
+    }
+    return Boolean(raw);
+  };
+
+  const interpretSignalInput = (payload, mode = SIGNAL_TRUE_FALSE) => {
+    if (payload == null) return false;
+    const coerced = coerceFromPayload(payload);
+    if (coerced === null) return false;
+    return Boolean(coerced);
+  };
+
+  const getSignalMode = (nodeId, key, fallback = SIGNAL_TRUE_FALSE) => {
+    try {
+      const rec = NodeStore.ensure(nodeId, 'ASR');
+      const cfg = rec?.config || {};
+      const raw = cfg[key];
+      if (typeof raw === 'string' && raw) return raw;
+    } catch (err) {
+      // ignore lookup issues
+    }
+    return fallback;
+  };
+
+  const getActiveMode = (nodeId) => getSignalMode(nodeId, 'activeSignalMode');
+  const getMuteMode = (nodeId) => getSignalMode(nodeId, 'muteSignalMode');
+
+  const emitActive = (nodeId, isActive) => {
+    if (!nodeId) return;
+    const prev = lastActiveByNode.get(nodeId);
+    if (prev === isActive) return;
+    lastActiveByNode.set(nodeId, isActive);
+    if (isActive) {
+      Router.sendFrom(nodeId, 'active', true);
+      return;
+    }
+    if (getActiveMode(nodeId) === SIGNAL_TRUE_FALSE) {
+      Router.sendFrom(nodeId, 'active', false);
+    }
+  };
 
   function normalizeModelEntry(raw) {
     if (raw == null) return null;
@@ -148,6 +208,7 @@ function createASR({
     _forceQuietMaxMs: 2800,
     _rmsTh: 0.2,
     _lastPartialSeq: -1,
+    _muted: false,
 
     _nodeEl() {
       return this.ownerId ? getNode(this.ownerId)?.el : null;
@@ -193,6 +254,31 @@ function createASR({
       if (!el) return;
       el.textContent = (el.textContent ? `${el.textContent}\n` : '') + text;
       el.scrollTop = el.scrollHeight;
+    },
+
+    _updateActiveState(now = performance.now()) {
+      if (!this.ownerId) return;
+      const gate = !this._muted && (this.vad?.state === 'voice' || (this._uplinkOn && now <= this._tailDeadline));
+      emitActive(this.ownerId, !!gate);
+    },
+
+    _applyMute(next) {
+      const desired = !!next;
+      if (this._muted === desired) {
+        this._updateActiveState();
+        return;
+      }
+      this._muted = desired;
+      if (desired) {
+        this.vad.state = 'silence';
+        this._silenceSince = performance.now();
+        this._setVU(0);
+        this._setRms(0, 0, this.ownerId);
+        if (this._uplinkOn) this._closeUplinkAndMaybeFinalize();
+      } else {
+        this._silenceSince = performance.now();
+      }
+      this._updateActiveState();
     },
 
     _prependF32(chunk) {
@@ -578,6 +664,8 @@ function createASR({
       this._rmsTh = parseFloat(cfg.rms) || 0.2;
       this._setRms(0, 0, nodeId);
       this._lastPartialSeq = -1;
+      emitActive(nodeId, false);
+      this._applyMute(muteRequests.get(nodeId) === true);
 
       try {
         this.ac = new (window.AudioContext || window.webkitAudioContext)();
@@ -610,6 +698,18 @@ function createASR({
         this._silenceSince = performance.now();
 
         this.node.onaudioprocess = (ev) => {
+          const now = performance.now();
+          if (this._muted) {
+            this.vad.ema = (1 - alpha) * this.vad.ema;
+            this.vad.state = 'silence';
+            batchQuietSince = now;
+            this._setVU(0);
+            this._setRms(0, 0);
+            if (this._uplinkOn) this._closeUplinkAndMaybeFinalize();
+            this._updateActiveState(now);
+            return;
+          }
+
           const ch = ev.inputBuffer.getChannelData(0);
           let sum = 0;
           for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
@@ -618,7 +718,6 @@ function createASR({
           const ema = this.vad.ema;
           const onTh = rmsTh;
           const offTh = rmsTh * 0.7;
-          const now = performance.now();
           const tailMs = tailBaseMs;
           const f32 = (from === this._rate) ? ch.slice(0) : this.resample(ch, from, this._rate);
           this._prePush(f32);
@@ -676,6 +775,8 @@ function createASR({
               batchQuietSince = null;
             }
           }
+
+          this._updateActiveState(now);
         };
 
         this.source.connect(this.node);
@@ -765,6 +866,8 @@ function createASR({
       this._setPartial('');
       this._setPartialStatus('idle');
       this._relayStatus('warn', 'Idle');
+      if (visId) emitActive(visId, false);
+      this._muted = false;
       this.ownerId = null;
 
       if (!endSid) return;
@@ -982,6 +1085,32 @@ function createASR({
         }
         await new Promise((resolve) => setTimeout(resolve, Math.max(10, chunk / 2)));
       }
+    }
+  };
+
+  ASR.onMute = (nodeId, payload) => {
+    if (!nodeId) return;
+    const mode = getMuteMode(nodeId);
+    const shouldMute = interpretSignalInput(payload, mode);
+    muteRequests.set(nodeId, shouldMute);
+    if (ASR.ownerId === nodeId) {
+      ASR._applyMute(shouldMute);
+    } else if (shouldMute) {
+      emitActive(nodeId, false);
+    }
+    if (!shouldMute && ASR.ownerId !== nodeId) {
+      const current = lastActiveByNode.get(nodeId) === true;
+      if (!current) emitActive(nodeId, false);
+    }
+  };
+
+  ASR.refreshConfig = (nodeId) => {
+    if (!nodeId) return;
+    const current = lastActiveByNode.get(nodeId) === true;
+    lastActiveByNode.delete(nodeId);
+    emitActive(nodeId, current);
+    if (ASR.ownerId === nodeId) {
+      ASR._applyMute(muteRequests.get(nodeId) === true);
     }
   };
 

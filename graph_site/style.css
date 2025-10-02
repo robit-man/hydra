@@ -53,13 +53,13 @@ main {
 
 
 .slider {
-  padding:unset!important;
+  padding: unset !important;
   -webkit-appearance: none;
   width: 100%;
-  height:1px;
+  height: 1px;
   background: #ffffff;
   outline: none;
-  border-radius:1rem;
+  border-radius: 1rem;
   opacity: 1;
   -webkit-transition: .2s;
   transition: opacity .2s;
@@ -74,8 +74,8 @@ main {
   appearance: none;
   width: 10px;
   height: 10px;
-  border-radius:1rem;
-  border:2px solid #ffffff;
+  border-radius: 1rem;
+  border: 2px solid #ffffff;
   background: #000000;
   cursor: pointer;
 }
@@ -97,7 +97,12 @@ main {
 }
 
 
-.model-picker-buttons{display:flex;flex-flow:wrap;gap:0.5rem;}
+.model-picker-buttons {
+  display: flex;
+  flex-flow: wrap;
+  gap: 0.5rem;
+}
+
 .icon {
   line-height: 1;
   height: 1.5rem;
@@ -862,12 +867,12 @@ button.danger {
   min-width: 230px;
   min-height: 230px;
   min-height: min-content;
-  background: rgba(255, 255, 255, .02);
-  border: 1px solid rgba(255, 255, 255, .18);
+  max-height: fit-content !important;
   border-radius: 14px;
-  box-shadow: var(--shadow);
+  box-sizing: border-box;
   user-select: none;
-  backdrop-filter: blur(10px);
+  container-type: inline-size;
+  container-name: node;
 }
 
 .node input,
@@ -877,18 +882,124 @@ button.danger {
   touch-action: manipulation;
 }
 
+
+/* hide ::after when .node < 260px wide */
+@container node (max-width: 275px) {
+  .node .head::before {
+    display: none !important;
+  }
+
+  .node .head::after {
+    display: none !important;
+  }
+
+  .node .head {
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    border: 1px solid white;
+    border-bottom-width: 0px;
+  }
+
+  .node .head>.row::before {
+    display: none !important;
+
+  }
+
+  .node .head>.titleRow::after {
+    display: none !important;
+
+  }
+
+
+  .node .head>.titleRow::before {
+    display: none !important;
+
+  }
+
+}
+
 .node .head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  position: relative;
   padding: 8px 10px;
   cursor: grab;
-  background: rgba(0, 0, 0, .15);
-  border-bottom: 1px solid rgba(255, 255, 255, .12);
   border-top-left-radius: 14px;
-  border-top-right-radius: 14px
+  border-top-right-radius: 14px;
 }
+
+.node .head::before {
+  pointer-events: none !important;
+  content: '';
+  width: 80px;
+  background-size: contain;
+  background-position: top left;
+  background-repeat: no-repeat;
+  transform: scale(1.03);
+  background-image: url('/img/left.svg');
+  height: 39px;
+  position: absolute;
+  left: 4rem;
+  top: -0.5px;
+}
+
+.node .head::after {
+  pointer-events: none !important;
+  content: '';
+  background-repeat: no-repeat;
+  width: 80px;
+  transform: scale(1.03);
+  background-image: url('/img/right.svg');
+  background-size: contain;
+  background-position: top right;
+  height: 39px;
+  position: absolute;
+  right: 5rem;
+  top: -0.5px;
+}
+
+
+.node .head>.row::before {
+  pointer-events: none !important;
+  content: '';
+  width: 4rem;
+  border-left: 1px solid rgba(255, 255, 255, 1);
+  border-top: 1px solid rgba(255, 255, 255, 1);
+  height: 100%;
+  position: absolute;
+  left: 0px;
+  top: 0px;
+  border-top-left-radius: 14px;
+}
+
+.node .head>.titleRow::after {
+  pointer-events: none !important;
+  content: '';
+  width: 5rem;
+  border-right: 1px solid rgba(255, 255, 255, 1);
+  border-top: 1px solid rgba(255, 255, 255, 1);
+  height: 100%;
+  position: absolute;
+  right: 0px;
+  top: 0px;
+  border-top-right-radius: 14px;
+}
+
+
+.node .head>.titleRow::before {
+  pointer-events: none !important;
+  content: '';
+  width: calc(100% - 8rem - 10rem);
+  border-bottom: 1px solid rgba(255, 255, 255, 1);
+  height: 1px;
+  position: absolute;
+  left: 8.5rem;
+  top: calc(100% - 3.5px);
+  border-top-right-radius: 14px;
+}
+
 
 .node .titleRow {
   display: flex;
@@ -952,7 +1063,23 @@ button.danger {
 }
 
 .node .body {
-  padding: 10px
+  border-bottom-right-radius: 14px;
+  border-bottom-left-radius: 14px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 1);
+  border-top-width: 0px !important;
+}
+
+.node .body::after {
+  content: '';
+  bottom: 1px;
+  left: 1px;
+  mask: linear-gradient(to top, black, transparent);
+  backdrop-filter: blur(20px);
+  border-radius: 14px;
+  position: absolute;
+  width: calc(100% - 2px);
+  height: 100%;z-index: -1;
 }
 
 .tts-volume input[type="range"] {

@@ -1,12 +1,99 @@
-function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayState = () => {} }) {
+function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayState = () => {}, Router }) {
   const state = new Map();
   const MODEL_PROMISE = new Map();
   const MODEL_METADATA = new Map();
+  const SIGNAL_TRUE_FALSE = 'true/false';
+  const SIGNAL_TRUE_EMPTY = 'true/empty';
+  const muteRequests = new Map();
+  const lastActiveByNode = new Map();
 
   const clampVolume = (value) => {
     const num = Number(value);
     if (!Number.isFinite(num)) return 1;
     return Math.max(0, Math.min(1, num));
+  };
+
+  const coerceFromPayload = (raw) => {
+    if (raw == null) return null;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') return raw !== 0;
+    if (typeof raw === 'string') {
+      const text = raw.trim().toLowerCase();
+      if (!text) return false;
+      if (['true', '1', 'yes', 'on', 'start', 'active'].includes(text)) return true;
+      if (['false', '0', 'no', 'off', 'stop', 'inactive'].includes(text)) return false;
+      return true;
+    }
+    if (typeof raw === 'object') {
+      if ('value' in raw) return coerceFromPayload(raw.value);
+      if ('text' in raw) return coerceFromPayload(raw.text);
+      if ('data' in raw) return coerceFromPayload(raw.data);
+      if ('state' in raw) return coerceFromPayload(raw.state);
+    }
+    return Boolean(raw);
+  };
+
+  const interpretSignalInput = (payload, mode = SIGNAL_TRUE_FALSE) => {
+    if (payload == null) return false;
+    const coerced = coerceFromPayload(payload);
+    if (coerced === null) return false;
+    return Boolean(coerced);
+  };
+
+  const getSignalMode = (nodeId, key, fallback = SIGNAL_TRUE_FALSE) => {
+    try {
+      const rec = NodeStore.ensure(nodeId, 'TTS');
+      const cfg = rec?.config || {};
+      const raw = cfg[key];
+      if (typeof raw === 'string' && raw) return raw;
+    } catch (err) {
+      // ignore lookup issues
+    }
+    return fallback;
+  };
+
+  const getActiveMode = (nodeId) => getSignalMode(nodeId, 'activeSignalMode');
+  const getMuteMode = (nodeId) => getSignalMode(nodeId, 'muteSignalMode');
+
+  const emitActive = (nodeId, isActive) => {
+    if (!nodeId) return;
+    const prev = lastActiveByNode.get(nodeId);
+    if (prev === isActive) return;
+    lastActiveByNode.set(nodeId, isActive);
+    if (isActive) {
+      Router?.sendFrom?.(nodeId, 'active', true);
+      return;
+    }
+    if (getActiveMode(nodeId) === SIGNAL_TRUE_FALSE) {
+      Router?.sendFrom?.(nodeId, 'active', false);
+    }
+  };
+
+  const setActiveState = (nodeId, st, active) => {
+    const final = !!(active && !st?.muted);
+    if (st && st.active === final) return;
+    if (st) st.active = final;
+    emitActive(nodeId, final);
+  };
+
+  const currentVolumeValue = (st) => {
+    if (!st) return 1;
+    const slider = st.volumeControl;
+    if (slider) return clampVolume(slider.value);
+    return clampVolume(st.volume);
+  };
+
+  const applyMuteState = (nodeId, st, muted) => {
+    if (!st) return;
+    const next = !!muted;
+    st.muted = next;
+    const value = currentVolumeValue(st);
+    if (st.gain) st.gain.gain.value = next ? 0 : value;
+    if (st.audioEl) {
+      st.audioEl.muted = next;
+      st.audioEl.volume = value;
+    }
+    if (next) setActiveState(nodeId, st, false);
   };
 
   function normalizeModelEntry(raw) {
@@ -138,32 +225,51 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       audioEl: null,
       volumeControl: null,
       volume: initialVolume,
-      chain: Promise.resolve()
+      chain: Promise.resolve(),
+      muted: muteRequests.get(nodeId) === true,
+      active: false,
+      lastProducedAt: 0
     };
 
     node.onaudioprocess = (evt) => {
       const out = evt.outputBuffer.getChannelData(0);
+      let produced = false;
       if (!st.q.length) {
         out.fill(0);
         st.underruns++;
-        return;
-      }
-      let need = out.length;
-      let offset = 0;
-      while (need > 0) {
-        if (!st.q.length) {
-          out.fill(0, offset);
-          st.underruns++;
-          break;
+      } else {
+        let need = out.length;
+        let offset = 0;
+        while (need > 0) {
+          if (!st.q.length) {
+            out.fill(0, offset);
+            st.underruns++;
+            break;
+          }
+          const head = st.q[0];
+          const take = Math.min(need, head.length);
+          if (take > 0) {
+            out.set(head.subarray(0, take), offset);
+            produced = produced || take > 0;
+          }
+          if (take === head.length) st.q.shift();
+          else st.q[0] = head.subarray(take);
+          st.queued -= take;
+          offset += take;
+          need -= take;
         }
-        const head = st.q[0];
-        const take = Math.min(need, head.length);
-        out.set(head.subarray(0, take), offset);
-        if (take === head.length) st.q.shift();
-        else st.q[0] = head.subarray(take);
-        st.queued -= take;
-        offset += take;
-        need -= take;
+      }
+      const now = performance.now();
+      if (produced && !st.muted) {
+        st.lastProducedAt = now;
+        setActiveState(nodeId, st, true);
+      } else {
+        const elapsed = now - (st.lastProducedAt || 0);
+        if (st.muted) {
+          setActiveState(nodeId, st, false);
+        } else if (st.active && elapsed > 250 && (!st.q.length || st.queued <= 0)) {
+          setActiveState(nodeId, st, false);
+        }
       }
     };
 
@@ -196,6 +302,14 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
         st.audioEl = el;
       }
 
+      if (st.audioEl && !st.audioEl._ttsActiveBound) {
+        st.audioEl.addEventListener('play', () => setActiveState(nodeId, st, !st.muted));
+        st.audioEl.addEventListener('playing', () => setActiveState(nodeId, st, !st.muted));
+        st.audioEl.addEventListener('pause', () => setActiveState(nodeId, st, false));
+        st.audioEl.addEventListener('ended', () => setActiveState(nodeId, st, false));
+        st.audioEl._ttsActiveBound = true;
+      }
+
       const vol = body.querySelector('[data-tts-volume]');
       if (vol) {
         st.volumeControl = vol;
@@ -205,19 +319,26 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
             const value = clampVolume(vol.value);
             vol.value = String(value);
             st.volume = value;
-            if (st.audioEl) st.audioEl.volume = value;
-            if (st.gain) st.gain.gain.value = value;
+            if (st.audioEl) {
+              st.audioEl.volume = value;
+              st.audioEl.muted = st.muted;
+            }
+            if (st.gain) st.gain.gain.value = st.muted ? 0 : value;
             NodeStore.update(nodeId, { type: 'TTS', volume: value });
           });
           vol._ttsBound = true;
         }
-        if (st.audioEl) st.audioEl.volume = initialVolume;
-        if (st.gain) st.gain.gain.value = initialVolume;
+        if (st.audioEl) {
+          st.audioEl.volume = initialVolume;
+          st.audioEl.muted = st.muted;
+        }
+        if (st.gain) st.gain.gain.value = st.muted ? 0 : initialVolume;
       }
     }
 
     if (st.audioEl) st.audioEl.volume = initialVolume;
-    if (st.gain) st.gain.gain.value = initialVolume;
+    if (st.audioEl) st.audioEl.muted = st.muted;
+    if (st.gain) st.gain.gain.value = st.muted ? 0 : initialVolume;
 
     try {
       const cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
@@ -226,6 +347,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     } catch (err) {
       // ignore init issues
     }
+
+    applyMuteState(nodeId, st, st.muted);
+    emitActive(nodeId, false);
 
     state.set(nodeId, st);
     return st;
@@ -299,7 +423,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       st.canvas.style.display = 'block';
       startVis(st);
       const value = st.volumeControl ? clampVolume(st.volumeControl.value) : clampVolume(st.volume);
-      if (st.gain) st.gain.gain.value = value;
+      if (st.gain) st.gain.gain.value = st.muted ? 0 : value;
     }
   }
 
@@ -310,6 +434,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       st.audioEl.style.display = 'block';
       const value = st.volumeControl ? clampVolume(st.volumeControl.value) : clampVolume(st.volume);
       st.audioEl.volume = value;
+      st.audioEl.muted = st.muted;
     }
   }
 
@@ -362,6 +487,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
     if ((cfg.mode || 'stream') === 'stream') showStreamUI(st);
     else showFileUI(st);
+    const shouldMute = muteRequests.get(nodeId) === true;
+    applyMuteState(nodeId, st, shouldMute);
   }
 
   async function onText(nodeId, payload) {
@@ -554,6 +681,31 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     }
   }
 
+  function onMute(nodeId, payload) {
+    if (!nodeId) return;
+    const mode = getMuteMode(nodeId);
+    const shouldMute = interpretSignalInput(payload, mode);
+    muteRequests.set(nodeId, shouldMute);
+    const st = state.get(nodeId);
+    if (st) {
+      applyMuteState(nodeId, st, shouldMute);
+      if (shouldMute) setActiveState(nodeId, st, false);
+    } else if (shouldMute) {
+      emitActive(nodeId, false);
+    }
+  }
+
+  function refreshConfig(nodeId) {
+    if (!nodeId) return;
+    const st = state.get(nodeId);
+    const shouldMute = muteRequests.get(nodeId) === true;
+    const previousActive = lastActiveByNode.get(nodeId) === true;
+    if (st) applyMuteState(nodeId, st, shouldMute);
+    lastActiveByNode.delete(nodeId);
+    const finalActive = st ? st.active : (shouldMute ? false : previousActive);
+    emitActive(nodeId, !!finalActive);
+  }
+
   return {
     ensure,
     refreshUI,
@@ -561,7 +713,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     ensureDefaults,
     ensureModels,
     listModels,
-    getModelInfo
+    getModelInfo,
+    onMute,
+    refreshConfig
   };
 }
 
