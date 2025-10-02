@@ -268,10 +268,45 @@ header {
   box-shadow: 0 0 18px rgba(255, 255, 255, 0.25);
 }
 
+
+@media screen and (max-width:740px) {
+
+
+  .node .head::before {
+    pointer-events: none !important;
+    content: '';
+    width: 80px;
+    background-size: contain;
+    background-position: top left;
+    background-repeat: no-repeat;
+    transform: scale(105%)translatey(-2%)!important;
+    background-image: url('/img/left.svg');
+    height: 39px;
+    position: absolute;
+    left: 4rem;
+  }
+
+  .node .head::after {
+    pointer-events: none !important;
+    content: '';
+    background-repeat: no-repeat;
+    width: 80px;
+    transform: scale(105%)translatey(-2%)!important;
+    background-image: url('/img/right.svg');
+    background-size: contain;
+    background-position: top right;
+    height: 39px;
+    position: absolute;
+    right: 5rem;
+  }
+
+}
+
 @media(max-width: 640px) {
   .brand-text {
     display: none;
   }
+
 
   .router-download {
     display: none;
@@ -516,7 +551,7 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
   padding: 8px;
-  margin:0px 0px;
+  margin: 0px 0px;
   font-size: 12px;
   white-space: pre-wrap;
 }
@@ -896,11 +931,13 @@ button.danger {
   container-name: node;
   z-index: 2;
 }
-.node:active{
-z-index: 3;
+
+.node:active {
+  z-index: 3;
 }
-.node:hover{
-z-index: 3;
+
+.node:hover {
+  z-index: 3;
 }
 
 .node input,
@@ -946,15 +983,16 @@ z-index: 3;
 
 }
 
-.node .resizeHandle{
-  border-color:#ffffff55;
-  transition:all 0.5s ease;
+.node .resizeHandle {
+  border-color: #ffffff55;
+  transition: all 0.5s ease;
 }
-.node .resizeHandle:hover{
-  border-color:#00ff00!important;
 
-    width: 4rem!important;
-    height: 4rem!important;
+.node .resizeHandle:hover {
+  border-color: #00ff00 !important;
+
+  width: 4rem !important;
+  height: 4rem !important;
 
 }
 
@@ -977,12 +1015,11 @@ z-index: 3;
   background-size: contain;
   background-position: top left;
   background-repeat: no-repeat;
-  transform: scale(1.027);
+  transform: scale(103%)translatey(-2.4%);
   background-image: url('/img/left.svg');
   height: 39px;
   position: absolute;
   left: 4rem;
-  top: -0.5px;
 }
 
 .node .head::after {
@@ -990,14 +1027,13 @@ z-index: 3;
   content: '';
   background-repeat: no-repeat;
   width: 80px;
-  transform: scale(1.027);
+  transform: scale(103%)translatey(-2.4%);
   background-image: url('/img/right.svg');
   background-size: contain;
   background-position: top right;
   height: 39px;
   position: absolute;
   right: 5rem;
-  top: -0.5px;
 }
 
 .node .head>.row {
