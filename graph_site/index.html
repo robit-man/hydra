@@ -160,6 +160,24 @@
         </div>
     </div>
 
+    <div id="graphDropModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="graphDropBackdrop"></div>
+        <div class="modal-panel" style="max-width:360px;">
+            <div class="modal-head">
+                <div class="modal-title">Graph Detected</div>
+                <button class="ghost" id="graphDropClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="help" id="graphDropMessage">Graph detected, load into editor?</div>
+                <div class="row" style="margin-top:16px;gap:8px;flex-wrap:wrap;">
+                    <button id="graphDropLoad" class="secondary">Yes</button>
+                    <button id="graphDropNo" class="ghost">No</button>
+                    <button id="graphDropSave" class="ghost">Save to node list</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script type="module">
         import QRCode from "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm";
         window.QRCode = QRCode;

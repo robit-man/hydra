@@ -592,7 +592,13 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
 
   return {
     open: openModal,
-    list: () => flows.slice()
+    list: () => flows.slice(),
+    saveSnapshot: (name, snapshot) => {
+      if (!snapshot || typeof snapshot !== 'object') return null;
+      flows = loadFlows();
+      const baseName = typeof name === 'string' && name.trim() ? name.trim() : `Imported Flow ${new Date().toLocaleString()}`;
+      return persistNewFlow(baseName, cloneSnapshot(snapshot));
+    }
   };
 }
 

@@ -69,6 +69,22 @@ const NodeStore = {
       template: 'Hello {name}',
       variables: {}
     },
+    LogicGate: {
+      rules: [
+        {
+          id: '',
+          label: 'Trigger',
+          input: 'trigger',
+          path: '',
+          operator: 'truthy',
+          compareValue: '',
+          outputTrue: 'true',
+          outputFalse: 'false',
+          trueMode: 'message',
+          falseMode: 'message'
+        }
+      ]
+    },
     TextDisplay: {
       text: ''
     },

@@ -145,6 +145,19 @@ const WorkspaceSync = createWorkspaceSync({
   updateTransportButton
 });
 
+const graphDropEls = {
+  modal: qs('#graphDropModal'),
+  backdrop: qs('#graphDropBackdrop'),
+  close: qs('#graphDropClose'),
+  load: qs('#graphDropLoad'),
+  save: qs('#graphDropSave'),
+  no: qs('#graphDropNo'),
+  message: qs('#graphDropMessage')
+};
+
+const graphDropState = { snapshot: null, name: '', source: '' };
+let graphDragDepth = 0;
+
 function bindUI() {
   const toggle = qs('#transportToggle');
   if (toggle) {
@@ -174,6 +187,184 @@ function bindUI() {
   updateTransportButton();
 }
 
+const cloneGraphSnapshot = (snapshot) => {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  const base = {
+    nodes: Array.isArray(snapshot.nodes) ? snapshot.nodes : [],
+    links: Array.isArray(snapshot.links) ? snapshot.links : [],
+    nodeConfigs: snapshot.nodeConfigs && typeof snapshot.nodeConfigs === 'object' ? snapshot.nodeConfigs : {}
+  };
+  if (snapshot.viewport && typeof snapshot.viewport === 'object') base.viewport = snapshot.viewport;
+  if (snapshot.transport) base.transport = snapshot.transport;
+  if (snapshot.meta && typeof snapshot.meta === 'object') base.meta = snapshot.meta;
+  if (snapshot.nodeStates && typeof snapshot.nodeStates === 'object') base.nodeStates = snapshot.nodeStates;
+  try {
+    return JSON.parse(JSON.stringify(base));
+  } catch (err) {
+    return base;
+  }
+};
+
+function normalizeDroppedGraph(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (Array.isArray(parsed.nodes)) {
+    return {
+      snapshot: cloneGraphSnapshot(parsed),
+      name: typeof parsed.name === 'string' ? parsed.name : ''
+    };
+  }
+  if (parsed.data && typeof parsed.data === 'object' && Array.isArray(parsed.data.nodes)) {
+    const inner = cloneGraphSnapshot(parsed.data);
+    return {
+      snapshot: inner,
+      name: typeof parsed.name === 'string' && parsed.name.trim()
+        ? parsed.name
+        : typeof parsed.data.name === 'string' ? parsed.data.name : ''
+    };
+  }
+  return null;
+}
+
+function resetGraphDropState() {
+  graphDropState.snapshot = null;
+  graphDropState.name = '';
+  graphDropState.source = '';
+}
+
+function closeGraphDropModal() {
+  if (graphDropEls.modal) {
+    graphDropEls.modal.classList.add('hidden');
+    graphDropEls.modal.setAttribute('aria-hidden', 'true');
+  }
+  resetGraphDropState();
+}
+
+function openGraphDropModal(label) {
+  if (!graphDropEls.modal) return;
+  graphDropEls.message.textContent = label
+    ? `Graph detected in "${label}". Load into editor?`
+    : 'Graph detected, load into editor?';
+  graphDropEls.modal.classList.remove('hidden');
+  graphDropEls.modal.setAttribute('aria-hidden', 'false');
+}
+
+function clearGraphDropHighlight() {
+  graphDragDepth = 0;
+  document.body.classList.remove('graph-drop-hover');
+}
+
+function handleGraphFileDrop(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) {
+    setBadge('Drop contained no files', false);
+    return;
+  }
+  const jsonFile = files.find((file) => {
+    if (!file) return false;
+    const name = String(file.name || '').toLowerCase();
+    return name.endsWith('.json') || file.type === 'application/json' || file.type === 'text/json';
+  });
+  if (!jsonFile) {
+    setBadge('No compatible JSON graph found in drop', false);
+    return;
+  }
+  jsonFile
+    .text()
+    .then((text) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        setBadge('Dropped file is not valid JSON', false);
+        return;
+      }
+      const normalized = normalizeDroppedGraph(parsed);
+      if (!normalized?.snapshot) {
+        setBadge('Dropped file is not a compatible graph', false);
+        return;
+      }
+      graphDropState.snapshot = normalized.snapshot;
+      graphDropState.name = typeof normalized.name === 'string' ? normalized.name.trim() : '';
+      graphDropState.source = jsonFile.name || graphDropState.name;
+      openGraphDropModal(graphDropState.source || graphDropState.name);
+    })
+    .catch((err) => setBadge(`Unable to read file: ${err?.message || err}`, false));
+}
+
+function bindGraphDropModal() {
+  graphDropEls.close?.addEventListener('click', closeGraphDropModal);
+  graphDropEls.backdrop?.addEventListener('click', closeGraphDropModal);
+  graphDropEls.no?.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeGraphDropModal();
+  });
+  graphDropEls.load?.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!graphDropState.snapshot) {
+      closeGraphDropModal();
+      return;
+    }
+    const loaded = Graph.importWorkspace(graphDropState.snapshot, { badgeText: 'Graph loaded from file drop' });
+    if (!loaded) {
+      setBadge('Unable to load dropped graph', false);
+    }
+    closeGraphDropModal();
+  });
+  graphDropEls.save?.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (!graphDropState.snapshot) {
+      closeGraphDropModal();
+      return;
+    }
+    const name = graphDropState.name || graphDropState.source || 'Dropped Flow';
+    const flow = Flows.saveSnapshot(name, graphDropState.snapshot);
+    if (flow) setBadge(`Saved as "${flow.name}"`);
+    else setBadge('Unable to save flow', false);
+    closeGraphDropModal();
+  });
+}
+
+function bindGlobalDrop() {
+  bindGraphDropModal();
+  const hasFiles = (event) => {
+    const dt = event?.dataTransfer;
+    if (!dt) return false;
+    if (dt.items) {
+      for (const item of dt.items) {
+        if (item.kind === 'file') return true;
+      }
+    }
+    if (dt.types) {
+      return Array.from(dt.types).includes('Files');
+    }
+    return false;
+  };
+
+  window.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    graphDragDepth += 1;
+    document.body.classList.add('graph-drop-hover');
+  });
+
+  window.addEventListener('dragleave', (e) => {
+    graphDragDepth = Math.max(0, graphDragDepth - 1);
+    if (graphDragDepth === 0) clearGraphDropHighlight();
+  });
+
+  window.addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+
+  window.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    clearGraphDropHighlight();
+    handleGraphFileDrop(e.dataTransfer?.files);
+  });
+}
+
 function init() {
   setupQrScanner();
   bindUI();
@@ -181,6 +372,7 @@ function init() {
   Router.render();
   if (CFG.transport === 'nkn') Net.ensureNkn();
   WorkspaceSync.init();
+  bindGlobalDrop();
   setBadge('Ready');
 }
 

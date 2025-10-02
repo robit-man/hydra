@@ -47,6 +47,23 @@ body::after {
   background: black;
 }
 
+body.graph-drop-hover::before {
+  content: 'Release file to load graph';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 12, 18, 0.78);
+  color: #eef6ff;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
 main {
   background-color: var(--bg);
 }
@@ -499,6 +516,78 @@ textarea {
   resize: vertical
 }
 
+.logic-rules-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.logic-rules-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.logic-rules-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0;
+}
+
+.logic-rules-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.logic-rules-controls {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.logic-rule-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.logic-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.logic-rule-title {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.logic-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.logic-field>span {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.logic-field.hidden {
+  display: none;
+}
+
+.logic-output-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
 .input-with-btn {
   display: flex;
   gap: 8px;
@@ -942,6 +1031,59 @@ button.danger {
   z-index: 2;
 }
 
+.body::after {
+  content: '';
+  pointer-events: none;
+  border-radius: 14px;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  bottom: 0px;
+  left: 0px;
+  mix-blend-mode: color-burn;
+  z-index: -1;
+  opacity: 0;
+  transition: all 0.5s ease;
+  background-image: radial-gradient(at bottom center, #0f21, transparent);
+}
+
+.node.selected .body::after {
+  content: '';
+  pointer-events: none;
+  border-radius: 14px;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  bottom: 0px;
+  left: 0px;
+  mix-blend-mode: color-burn;
+  z-index: -1;
+  opacity: 1;
+  animation: glow 2s ease infinite;
+  background-image: radial-gradient(at bottom center, #0fa1, transparent);
+}
+.node .body::after {
+  content: '';
+  pointer-events: none;
+  border-radius: 14px;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  bottom: 0px;
+  left: 0px;
+  mix-blend-mode: color-burn;
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  background-image: radial-gradient(at bottom center, #0fa1, transparent);
+}
+@keyframes glow {
+  0%{opacity: 1;}
+  50%{opacity: 0.5;}
+  100%{opacity: 1;}
+  
+}
+
 .node:active {
   z-index: 3;
 }
@@ -1228,6 +1370,87 @@ button.danger {
   width: calc(100% - 2px);
   height: 100%;
   z-index: -1;
+}
+
+.node .logic-gate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  max-height: 240px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.node .logic-gate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.node .logic-gate-row[data-state='true'] {
+  border-color: rgba(125, 255, 176, 0.45);
+  background: rgba(125, 255, 176, 0.12);
+}
+
+.node .logic-gate-row[data-state='false'] {
+  border-color: rgba(255, 160, 160, 0.45);
+  background: rgba(255, 160, 160, 0.12);
+}
+
+.node .logic-gate-name {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node .logic-gate-operator {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.node .logic-gate-path {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  justify-self: end;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node .logic-gate-value {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.node .logic-gate-empty {
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.node .wp-port.out[data-logic-variant='true'] .dot {
+  background: rgba(125, 255, 176, 0.9);
+}
+
+.node .wp-port.out[data-logic-variant='false'] .dot {
+  background: rgba(255, 140, 140, 0.9);
+}
+
+.node .wp-port.out[data-logic-variant='mixed'] .dot {
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .tts-volume input[type="range"] {

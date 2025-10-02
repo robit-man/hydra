@@ -30,8 +30,66 @@ function createGraph({
     portSel: null,
     drag: null,
     view: { x: 0, y: 0, scale: 1 },
-    _redrawReq: false
+    _redrawReq: false,
+    selectedNodeId: null,
+    clipboard: null,
+    lastPointer: null
   };
+
+  const deepClone = (value) => {
+    if (value == null) return value;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      if (Array.isArray(value)) return value.map((entry) => deepClone(entry));
+      if (typeof value === 'object') return { ...value };
+      return value;
+    }
+  };
+
+  const isEditableTarget = (target) => {
+    if (!(target instanceof Element)) return false;
+    const tag = target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (target.isContentEditable) return true;
+    return Boolean(target.closest('[contenteditable="true"]'));
+  };
+
+  function setSelectedNode(nodeId, { focus = false } = {}) {
+    if (WS.selectedNodeId === nodeId) {
+      if (focus && nodeId) WS.nodes.get(nodeId)?.el?.focus?.({ preventScroll: true });
+      return;
+    }
+    if (WS.selectedNodeId) {
+      const prev = WS.nodes.get(WS.selectedNodeId);
+      prev?.el?.classList.remove('selected');
+    }
+    WS.selectedNodeId = nodeId || null;
+    if (!nodeId) return;
+    const node = WS.nodes.get(nodeId);
+    if (!node?.el) return;
+    node.el.classList.add('selected');
+    if (focus) node.el.focus?.({ preventScroll: true });
+  }
+
+  function clearSelectedNode() {
+    if (!WS.selectedNodeId) return;
+    const node = WS.nodes.get(WS.selectedNodeId);
+    node?.el?.classList.remove('selected');
+    WS.selectedNodeId = null;
+  }
+
+  function updatePointerLocation(e) {
+    if (!e) return;
+    WS.lastPointer = { clientX: e.clientX, clientY: e.clientY };
+  }
+
+  function workspacePointFromPointer() {
+    if (!WS.lastPointer) return currentViewCenter();
+    const { clientX, clientY } = WS.lastPointer;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return currentViewCenter();
+    return clientToWorkspace(clientX, clientY);
+  }
 
   const NODE_MIN_WIDTH = 230;
   const NODE_MIN_HEIGHT = 120;
@@ -210,6 +268,66 @@ function refreshNodeResolution(force = false) {
   function currentViewCenter() {
     const rect = WS.root?.getBoundingClientRect?.() || document.body.getBoundingClientRect();
     return clientToWorkspace(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }
+
+  function positionNodeCentered(node, point, { save = true } = {}) {
+    if (!node?.el || !point) return;
+    const width = node.el.offsetWidth || node.w || 0;
+    const height = node.el.offsetHeight || node.h || 0;
+    const centeredX = Math.round(point.x - width / 2);
+    const centeredY = Math.round(point.y - height / 2);
+    node.x = centeredX;
+    node.y = centeredY;
+    node.el.style.left = `${centeredX}px`;
+    node.el.style.top = `${centeredY}px`;
+    if (save) saveGraph();
+    requestRedraw();
+  }
+
+  function snapshotNode(nodeId) {
+    const node = WS.nodes.get(nodeId);
+    if (!node) return null;
+    const rec = NodeStore.load(nodeId);
+    const config = rec?.config ? deepClone(rec.config) : {};
+    const width = Number.isFinite(node.w) ? node.w : Math.round(node.el?.offsetWidth || 0);
+    const height = Number.isFinite(node.h) ? node.h : Math.round(node.el?.offsetHeight || 0);
+    return {
+      sourceId: nodeId,
+      type: node.type,
+      config,
+      sizeLocked: Boolean(node.sizeLocked),
+      w: width,
+      h: height
+    };
+  }
+
+  function duplicateNodeFromSnapshot(snapshot, point, { select = false } = {}) {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    const dropPoint = point || currentViewCenter();
+    const width = Number.isFinite(snapshot.w) ? snapshot.w : undefined;
+    const height = Number.isFinite(snapshot.h) ? snapshot.h : undefined;
+    const node = addNode(snapshot.type, Math.round(dropPoint.x), Math.round(dropPoint.y), {
+      config: snapshot.config,
+      sizeLocked: snapshot.sizeLocked,
+      width,
+      height,
+      select
+    });
+    if (node) {
+      positionNodeCentered(node, dropPoint);
+    }
+    return node;
+  }
+
+  function duplicateNode(nodeId, point, { select = true, badge = true } = {}) {
+    const snapshot = snapshotNode(nodeId);
+    if (!snapshot) return null;
+    WS.clipboard = snapshot;
+    const targetPoint = point || currentViewCenter();
+    const node = duplicateNodeFromSnapshot(snapshot, targetPoint, { select });
+    if (node && badge) setBadge('Node duplicated');
+    if (node && select) setSelectedNode(node.id, { focus: true });
+    return node;
   }
 
   function uid() {
@@ -473,6 +591,9 @@ function refreshNodeResolution(force = false) {
 
   function handleInputPayload(node, portName, payload) {
     if (!node) return;
+    if (node.type === 'LogicGate') {
+      return handleLogicGateInput(node.id, portName, payload);
+    }
     if (node.type === 'LLM') {
       if (portName === 'prompt') {
         pullLlmSystemInput(node.id);
@@ -897,6 +1018,12 @@ function refreshNodeResolution(force = false) {
     if (initialWidth !== null) node.w = initialWidth;
     if (initialHeight !== null) node.h = initialHeight;
     el.dataset.id = node.id;
+    el.tabIndex = 0;
+    el.addEventListener('pointerdown', (evt) => {
+      if (evt.button !== undefined && evt.button !== 0) return;
+      setSelectedNode(node.id);
+    });
+    el.addEventListener('focus', () => setSelectedNode(node.id));
 
     node.sizeLocked = Boolean(node.sizeLocked);
     let headEl = null;
@@ -1070,6 +1197,10 @@ function refreshNodeResolution(force = false) {
             <textarea data-template-editor placeholder="Hello {name}, welcome to {place}."></textarea>
             <div class="template-preview" data-template-preview></div>
           </div>
+        ` : ''}
+        ${node.type === 'LogicGate' ? `
+          <div class="muted" style="margin-top:6px;">Rules</div>
+          <div class="logic-gate-list" data-logic-gate></div>
         ` : ''}
         ${node.type === 'ImageInput' ? `
           <div class="image-input" style="margin-top:6px;">
@@ -1418,6 +1549,10 @@ function refreshNodeResolution(force = false) {
 
     if (node.type === 'Template') {
       setupTemplateNode(node, left);
+    }
+
+    if (node.type === 'LogicGate') {
+      setupLogicGateNode(node, left);
     }
 
     const head = el.querySelector('.head');
@@ -1899,6 +2034,8 @@ function refreshNodeResolution(force = false) {
 
     WS.nodes.clear();
     WS.wires = [];
+    clearSelectedNode();
+    WS.clipboard = null;
     if (!data) {
       const a = addNode('ASR', 90, 200);
       const l = addNode('LLM', 380, 180);
@@ -1956,6 +2093,10 @@ function refreshNodeResolution(force = false) {
         const leftSide = node.el?.querySelector('.side.left');
         setupTemplateNode(node, leftSide);
         pullTemplateInputs(node.id);
+      });
+      if (node.type === 'LogicGate') requestAnimationFrame(() => {
+        const leftSide = node.el?.querySelector('.side.left');
+        setupLogicGateNode(node, leftSide);
       });
       if (node.type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
       if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
@@ -2162,6 +2303,14 @@ function refreshNodeResolution(force = false) {
       outputs: [{ name: 'text' }],
       schema: [
         { key: 'template', label: 'Template Text', type: 'textarea', placeholder: 'Hello {name}, welcome to {place}.' }
+      ]
+    },
+    LogicGate: {
+      title: 'Logic Gate',
+      inputs: [],
+      outputs: [],
+      schema: [
+        { key: 'rules', label: 'Logic Rules', type: 'logicRules' }
       ]
     },
     NknDM: {
@@ -2532,6 +2681,745 @@ function refreshNodeResolution(force = false) {
     return config;
   }
 
+  const LOGIC_OPERATOR_OPTIONS = [
+    { value: 'truthy', label: 'Truthy', needsValue: false },
+    { value: 'falsy', label: 'Falsy', needsValue: false },
+    { value: 'exists', label: 'Exists', needsValue: false },
+    { value: 'notExists', label: 'Not Exists', needsValue: false },
+    { value: 'equals', label: 'Equals', needsValue: true },
+    { value: 'notEquals', label: 'Not Equals', needsValue: true },
+    { value: 'contains', label: 'Contains', needsValue: true },
+    { value: 'greaterThan', label: 'Greater Than', needsValue: true },
+    { value: 'lessThan', label: 'Less Than', needsValue: true },
+    { value: 'greaterOrEqual', label: '≥', needsValue: true },
+    { value: 'lessOrEqual', label: '≤', needsValue: true },
+    { value: 'matches', label: 'Matches (regex)', needsValue: true }
+  ];
+  const LOGIC_OPERATORS_WITH_VALUE = new Set(LOGIC_OPERATOR_OPTIONS.filter((o) => o.needsValue).map((o) => o.value));
+  const LOGIC_OPERATOR_LABELS = new Map(LOGIC_OPERATOR_OPTIONS.map((o) => [o.value, o.label]));
+  const LOGIC_PASS_MODES = ['message', 'value', 'boolean'];
+
+  function logicRuleId() {
+    return `lg-${uid().slice(1)}`;
+  }
+
+  function sanitizeLogicRules(rules) {
+    const list = Array.isArray(rules) ? rules : [];
+    const usedInputs = new Set();
+    const sanitized = [];
+    list.forEach((raw, idx) => {
+      if (!raw || typeof raw !== 'object') return;
+      const copy = { ...raw };
+      let input = String(copy.input || '').trim();
+      if (!input) input = `input${idx + 1}`;
+      let unique = input;
+      let counter = 2;
+      while (usedInputs.has(unique)) {
+        unique = `${input}-${counter++}`;
+      }
+      if (unique !== input) copy.input = unique;
+      usedInputs.add(unique);
+
+      const id = String(copy.id || '').trim();
+      copy.id = id || logicRuleId();
+      copy.label = String(copy.label || unique);
+      copy.description = typeof copy.description === 'string' ? copy.description : '';
+      copy.path = typeof copy.path === 'string' ? copy.path.trim() : '';
+
+      copy.operator = LOGIC_OPERATOR_LABELS.has(copy.operator)
+        ? copy.operator
+        : 'truthy';
+
+      copy.compareValue = copy.compareValue != null ? String(copy.compareValue) : '';
+      if (copy.outputTrue === undefined || copy.outputTrue === null) copy.outputTrue = `${unique}:true`;
+      if (copy.outputFalse === undefined || copy.outputFalse === null) copy.outputFalse = `${unique}:false`;
+      copy.outputTrue = String(copy.outputTrue).trim();
+      copy.outputFalse = String(copy.outputFalse).trim();
+
+      copy.trueMode = LOGIC_PASS_MODES.includes(copy.trueMode) ? copy.trueMode : 'message';
+      copy.falseMode = LOGIC_PASS_MODES.includes(copy.falseMode) ? copy.falseMode : 'message';
+
+      sanitized.push(copy);
+    });
+    return sanitized;
+  }
+
+  function ensureLogicGateConfig(nodeId) {
+    const rec = NodeStore.ensure(nodeId, 'LogicGate');
+    const cfg = rec.config || {};
+    const sanitized = sanitizeLogicRules(cfg.rules);
+    const existing = Array.isArray(cfg.rules) ? cfg.rules : [];
+    if (JSON.stringify(existing) !== JSON.stringify(sanitized)) {
+      NodeStore.update(nodeId, { type: 'LogicGate', rules: sanitized });
+      const refreshed = NodeStore.ensure(nodeId, 'LogicGate');
+      return refreshed.config || { rules: sanitized };
+    }
+    return { ...cfg, rules: sanitized };
+  }
+
+  function normalizeLogicPath(path) {
+    if (!path) return '';
+    return String(path)
+      .replace(/\[(\w+)\]/g, '.$1')
+      .split('.')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join('.');
+  }
+
+  function resolveLogicValue(payload, path) {
+    const normalized = normalizeLogicPath(path);
+    if (!normalized) return payload;
+    const segments = normalized.split('.');
+    let current = payload;
+    for (const segment of segments) {
+      if (current == null) return undefined;
+      current = current[segment];
+    }
+    return current;
+  }
+
+  function parseLogicCompareValue(raw) {
+    if (raw === undefined) return undefined;
+    if (raw === null) return null;
+    const str = String(raw).trim();
+    if (!str.length) return '';
+    if (str === 'true') return true;
+    if (str === 'false') return false;
+    if (str === 'null') return null;
+    if (str === 'undefined') return undefined;
+    if (/^-?\d+(?:\.\d+)?$/.test(str)) return Number(str);
+    if ((str.startsWith('{') && str.endsWith('}')) || (str.startsWith('[') && str.endsWith(']'))) {
+      try {
+        return JSON.parse(str);
+      } catch (_) {
+        return str;
+      }
+    }
+    return str;
+  }
+
+  function logicEquals(a, b) {
+    if (a === b) return true;
+    if (a == null || b == null) return a == null && b == null;
+    if (typeof a === 'number' && typeof b === 'number') return Number.isFinite(a) && Number.isFinite(b) && a === b;
+    if (typeof a === 'boolean' && typeof b === 'boolean') return a === b;
+    if (typeof a === 'object' && typeof b === 'object') {
+      try {
+        return JSON.stringify(a) === JSON.stringify(b);
+      } catch (_) {
+        return false;
+      }
+    }
+    return String(a) === String(b);
+  }
+
+  function asNumber(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : NaN;
+  }
+
+  function toRegex(value) {
+    if (value instanceof RegExp) return value;
+    if (typeof value !== 'string') return null;
+    const match = value.match(/^\/(.*)\/(\w*)$/);
+    if (!match) return null;
+    try {
+      return new RegExp(match[1], match[2]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function evaluateLogicRule(rule, value) {
+    const op = rule.operator || 'truthy';
+    const compare = parseLogicCompareValue(rule.compareValue);
+    switch (op) {
+      case 'truthy':
+        return !!value;
+      case 'falsy':
+        return !value;
+      case 'exists':
+        return value !== undefined && value !== null;
+      case 'notExists':
+        return value === undefined || value === null;
+      case 'equals':
+        return logicEquals(value, compare);
+      case 'notEquals':
+        return !logicEquals(value, compare);
+      case 'contains': {
+        if (Array.isArray(value)) {
+          return value.some((entry) => logicEquals(entry, compare));
+        }
+        if (typeof value === 'string') {
+          return String(value).includes(String(compare));
+        }
+        if (value && typeof value === 'object' && typeof compare === 'string') {
+          return Object.prototype.hasOwnProperty.call(value, compare);
+        }
+        return false;
+      }
+      case 'greaterThan': {
+        const a = asNumber(value);
+        const b = asNumber(compare);
+        if (Number.isNaN(a) || Number.isNaN(b)) return false;
+        return a > b;
+      }
+      case 'lessThan': {
+        const a = asNumber(value);
+        const b = asNumber(compare);
+        if (Number.isNaN(a) || Number.isNaN(b)) return false;
+        return a < b;
+      }
+      case 'greaterOrEqual': {
+        const a = asNumber(value);
+        const b = asNumber(compare);
+        if (Number.isNaN(a) || Number.isNaN(b)) return false;
+        return a >= b;
+      }
+      case 'lessOrEqual': {
+        const a = asNumber(value);
+        const b = asNumber(compare);
+        if (Number.isNaN(a) || Number.isNaN(b)) return false;
+        return a <= b;
+      }
+      case 'matches': {
+        const regex = toRegex(compare);
+        if (regex) return regex.test(String(value ?? ''));
+        if (typeof compare === 'string') return String(value ?? '') === compare;
+        return false;
+      }
+      default:
+        return !!value;
+    }
+  }
+
+  function determineLogicOutputPayload(rule, result, originalPayload, extractedValue) {
+    const mode = result ? rule.trueMode : rule.falseMode;
+    if (mode === 'value') return extractedValue;
+    if (mode === 'boolean') return result;
+    return originalPayload;
+  }
+
+  function formatLogicValue(value) {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NaN';
+    if (typeof value === 'string') {
+      return value.length > 64 ? `${value.slice(0, 61)}…` : value || '""';
+    }
+    try {
+      const text = JSON.stringify(value);
+      return text.length > 64 ? `${text.slice(0, 61)}…` : text;
+    } catch (_) {
+      return '[Object]';
+    }
+  }
+
+  function refreshLogicGatePreview(node, rules) {
+    if (!node?.el) return;
+    const container = node.el.querySelector('[data-logic-gate]');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!rules || !rules.length) {
+      const empty = document.createElement('div');
+      empty.className = 'logic-gate-empty muted';
+      empty.textContent = 'No rules configured';
+      container.appendChild(empty);
+      return;
+    }
+    const state = node._logicState || new Map();
+    rules.forEach((rule) => {
+      const row = document.createElement('div');
+      row.className = 'logic-gate-row';
+      const snapshot = state.get(rule.id);
+      const status = snapshot ? (snapshot.result ? 'true' : 'false') : 'pending';
+      row.dataset.state = status;
+
+      const name = document.createElement('span');
+      name.className = 'logic-gate-name';
+      name.textContent = rule.label || rule.input;
+      row.appendChild(name);
+
+      const op = document.createElement('span');
+      op.className = 'logic-gate-operator';
+      const opLabel = LOGIC_OPERATOR_LABELS.get(rule.operator) || rule.operator;
+      op.textContent = opLabel;
+      row.appendChild(op);
+
+      const path = document.createElement('span');
+      path.className = 'logic-gate-path';
+      path.textContent = rule.path ? rule.path : '(payload)';
+      row.appendChild(path);
+
+      const val = document.createElement('span');
+      val.className = 'logic-gate-value';
+      val.textContent = snapshot ? formatLogicValue(snapshot.value) : '—';
+      row.appendChild(val);
+
+      container.appendChild(row);
+    });
+  }
+
+  function removeLogicInputPort(node, portName) {
+    if (!node) return;
+    removeWiresAt(node.id, 'in', portName);
+    unregisterInputPort(node, portName);
+    const key = `in:${portName}`;
+    const el = node.portEls?.[key];
+    if (el?.remove) el.remove();
+    if (node.portEls) delete node.portEls[key];
+  }
+
+  function removeLogicOutputPort(node, portName) {
+    if (!node) return;
+    removeWiresAt(node.id, 'out', portName);
+    const key = `out:${portName}`;
+    const el = node.portEls?.[key];
+    if (el?.remove) el.remove();
+    if (node.portEls) delete node.portEls[key];
+  }
+
+  function ensureLogicOutputPort(node, container, portName, variant = 'mixed') {
+    if (!node || !container || !portName) return null;
+    node.portEls = node.portEls || {};
+    node._logicOutputs = node._logicOutputs || new Map();
+    const key = `out:${portName}`;
+    const existing = node._logicOutputs.get(portName);
+    if (existing && existing.el?.isConnected) {
+      existing.variant = variant;
+      existing.el.dataset.logicVariant = variant;
+      const labelEl = existing.el.querySelector('span');
+      if (labelEl) labelEl.textContent = portName;
+      return existing.el;
+    }
+
+    const portEl = document.createElement('div');
+    portEl.className = 'wp-port out';
+    portEl.dataset.port = portName;
+    portEl.dataset.logicVariant = variant;
+    portEl.title = `${portName} (Alt-click to disconnect)`;
+    portEl.innerHTML = `<span>${portName}</span><span class="dot"></span>`;
+
+    portEl.addEventListener('click', (ev) => {
+      if (ev.altKey || ev.metaKey || ev.ctrlKey) {
+        removeWiresAt(node.id, 'out', portName);
+        return;
+      }
+      onPortClick(node.id, 'out', portName, portEl);
+    });
+
+    portEl.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch') ev.preventDefault();
+      const wires = connectedWires(node.id, 'out', portName);
+      if (wires.length) {
+        const w = wires[wires.length - 1];
+        w.path?.setAttribute('stroke-dasharray', '6 4');
+        const move = (e) => {
+          if (e.pointerType === 'touch') e.preventDefault();
+          if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+          const pt = clientToWorkspace(e.clientX, e.clientY);
+          drawRetarget(w, 'from', pt.x, pt.y);
+          if (WS.drag) updateDropHover(WS.drag.expected);
+        };
+        const up = (e) => {
+          setDropHover(null);
+          finishAnyDrag(e.clientX, e.clientY);
+        };
+        WS.drag = {
+          kind: 'retarget',
+          wireId: w.id,
+          grabSide: 'from',
+          path: w.path,
+          pointerId: ev.pointerId,
+          expected: 'in',
+          lastClient: { x: ev.clientX, y: ev.clientY },
+          _cleanup: () => window.removeEventListener('pointermove', move)
+        };
+        window.addEventListener('pointermove', move, { passive: false });
+        window.addEventListener('pointerup', up, { once: true, passive: false });
+        updateDropHover('in');
+        return;
+      }
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', 'rgba(255,255,255,.7)');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('opacity', '0.9');
+      path.setAttribute('stroke-dasharray', '6 4');
+      path.setAttribute('vector-effect', 'non-scaling-stroke');
+      path.setAttribute('pointer-events', 'none');
+      WS.svgLayer.appendChild(path);
+
+      const move = (e) => {
+        if (e.pointerType === 'touch') e.preventDefault();
+        if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+        const pt = clientToWorkspace(e.clientX, e.clientY);
+        drawTempFromPort({ nodeId: node.id, side: 'out', portName }, pt.x, pt.y);
+        updateDropHover(WS.drag?.expected);
+      };
+      const up = (e) => {
+        setDropHover(null);
+        finishAnyDrag(e.clientX, e.clientY);
+      };
+      WS.drag = {
+        kind: 'new',
+        fromNodeId: node.id,
+        fromPort: portName,
+        path,
+        pointerId: ev.pointerId,
+        expected: 'in',
+        lastClient: { x: ev.clientX, y: ev.clientY },
+        _cleanup: () => window.removeEventListener('pointermove', move)
+      };
+      window.addEventListener('pointermove', move, { passive: false });
+      window.addEventListener('pointerup', up, { once: true, passive: false });
+      const pt = clientToWorkspace(ev.clientX, ev.clientY);
+      drawTempFromPort({ nodeId: node.id, side: 'out', portName }, pt.x, pt.y);
+      updateDropHover('in');
+    });
+
+    container.appendChild(portEl);
+    node.portEls[key] = portEl;
+    node._logicOutputs.set(portName, { el: portEl, variant });
+    return portEl;
+  }
+
+  function setupLogicGateNode(node, leftContainer) {
+    if (!node || node.type !== 'LogicGate') return;
+    const left = leftContainer || node.el?.querySelector('.side.left');
+    const right = node.el?.querySelector('.side.right');
+    const cfg = ensureLogicGateConfig(node.id);
+    const rules = cfg.rules || [];
+
+    node._logicInputs = node._logicInputs || new Map();
+    node._logicOutputs = node._logicOutputs || new Map();
+    node._logicState = node._logicState || new Map();
+
+    const desiredInputs = new Set(rules.map((r) => r.input));
+
+    for (const [portName, info] of Array.from(node._logicInputs.entries())) {
+      if (!desiredInputs.has(portName)) {
+        removeLogicInputPort(node, portName);
+        node._logicInputs.delete(portName);
+      }
+    }
+
+    rules.forEach((rule) => {
+      if (!rule.input) return;
+      let entry = node._logicInputs.get(rule.input);
+      const label = rule.label || rule.input;
+      if (!entry) {
+        const portEl = createInputPort(node, left, rule.input, label);
+        if (portEl) {
+          portEl.dataset.logicRuleId = rule.id;
+          node._logicInputs.set(rule.input, { el: portEl, ruleId: rule.id });
+        }
+      } else {
+        const portEl = entry.el;
+        if (portEl) {
+          portEl.dataset.logicRuleId = rule.id;
+          const labelEl = portEl.querySelector('span:last-child');
+          if (labelEl) labelEl.textContent = label;
+          portEl.title = `${label} (Alt-click to disconnect)`;
+        }
+        entry.ruleId = rule.id;
+      }
+    });
+
+    const desiredOutputs = new Map();
+    rules.forEach((rule) => {
+      const trueName = rule.outputTrue?.trim();
+      const falseName = rule.outputFalse?.trim();
+      if (trueName) {
+        const existing = desiredOutputs.get(trueName);
+        desiredOutputs.set(trueName, existing && existing.variant !== 'true' ? { variant: 'mixed' } : { variant: 'true' });
+      }
+      if (falseName) {
+        const existing = desiredOutputs.get(falseName);
+        desiredOutputs.set(falseName, existing && existing.variant !== 'false' ? { variant: 'mixed' } : { variant: 'false' });
+      }
+    });
+
+    for (const [portName] of Array.from(node._logicOutputs.entries())) {
+      if (!desiredOutputs.has(portName)) {
+        removeLogicOutputPort(node, portName);
+        node._logicOutputs.delete(portName);
+      }
+    }
+
+    desiredOutputs.forEach((meta, portName) => {
+      ensureLogicOutputPort(node, right, portName, meta.variant);
+    });
+
+    refreshLogicGatePreview(node, rules);
+  }
+
+  function handleLogicGateInput(nodeId, portName, payload) {
+    const node = WS.nodes.get(nodeId);
+    if (!node || node.type !== 'LogicGate') return;
+    const cfg = ensureLogicGateConfig(nodeId);
+    const rules = cfg.rules || [];
+    const rule = rules.find((r) => r.input === portName);
+    if (!rule) return;
+    const extracted = resolveLogicValue(payload, rule.path);
+    const result = evaluateLogicRule(rule, extracted);
+    const targetPort = result ? rule.outputTrue : rule.outputFalse;
+    if (targetPort) {
+      const outPayload = determineLogicOutputPayload(rule, result, payload, extracted);
+      Router.sendFrom(nodeId, targetPort, outPayload);
+    }
+    node._logicState = node._logicState || new Map();
+    node._logicState.set(rule.id, {
+      result,
+      value: extracted,
+      emittedPort: targetPort,
+      ts: Date.now()
+    });
+    refreshLogicGatePreview(node, rules);
+  }
+
+  function createLogicRulesEditor(node, field, cfg) {
+    const wrap = document.createElement('div');
+    wrap.className = 'logic-rules-editor';
+
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = field.key;
+    wrap.appendChild(hidden);
+
+    const list = document.createElement('div');
+    list.className = 'logic-rules-items';
+    wrap.appendChild(list);
+
+    const note = document.createElement('div');
+    note.className = 'logic-rules-note muted';
+    note.textContent = 'Use dot paths (foo.bar) to inspect incoming payloads.';
+    wrap.appendChild(note);
+
+    const controls = document.createElement('div');
+    controls.className = 'logic-rules-controls';
+    wrap.appendChild(controls);
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'secondary';
+    addBtn.textContent = 'Add rule';
+    controls.appendChild(addBtn);
+
+    let rules = sanitizeLogicRules((cfg?.rules || []).map((rule) => ({ ...rule })));
+
+    const syncHidden = () => {
+      hidden.value = JSON.stringify(sanitizeLogicRules(rules));
+    };
+
+    const removeRule = (id) => {
+      rules = rules.filter((rule) => rule.id !== id);
+      render();
+    };
+
+    const buildSelect = (options, current) => {
+      const sel = document.createElement('select');
+      options.forEach((opt) => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        if (opt.value === current) option.selected = true;
+        sel.appendChild(option);
+      });
+      return sel;
+    };
+
+    const render = () => {
+      rules = sanitizeLogicRules(rules).map((rule) => ({ ...rule }));
+      list.innerHTML = '';
+      if (!rules.length) {
+        const empty = document.createElement('div');
+        empty.className = 'logic-rules-empty muted';
+        empty.textContent = 'No rules defined.';
+        list.appendChild(empty);
+        syncHidden();
+        return;
+      }
+      rules.forEach((rule, index) => {
+        const card = document.createElement('div');
+        card.className = 'logic-rule-card';
+        card.dataset.ruleId = rule.id;
+
+        const header = document.createElement('div');
+        header.className = 'logic-rule-header';
+        const title = document.createElement('span');
+        title.className = 'logic-rule-title';
+        title.textContent = rule.label || rule.input || `Rule ${index + 1}`;
+        header.appendChild(title);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'ghost';
+        removeBtn.textContent = 'Remove';
+        removeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          removeRule(rule.id);
+        });
+        header.appendChild(removeBtn);
+        card.appendChild(header);
+
+        const makeField = (labelText, control) => {
+          const row = document.createElement('label');
+          row.className = 'logic-field';
+          const span = document.createElement('span');
+          span.textContent = labelText;
+          row.appendChild(span);
+          row.appendChild(control);
+          return row;
+        };
+
+        const labelInput = document.createElement('input');
+        labelInput.type = 'text';
+        labelInput.value = rule.label || '';
+        labelInput.placeholder = `Rule ${index + 1}`;
+        labelInput.addEventListener('input', () => {
+          rule.label = labelInput.value;
+          title.textContent = rule.label || rule.input || `Rule ${index + 1}`;
+          syncHidden();
+        });
+        card.appendChild(makeField('Label', labelInput));
+
+        const inputName = document.createElement('input');
+        inputName.type = 'text';
+        inputName.value = rule.input || '';
+        inputName.placeholder = 'inputName';
+        inputName.addEventListener('input', () => {
+          rule.input = inputName.value;
+          syncHidden();
+        });
+        card.appendChild(makeField('Input port', inputName));
+
+        const pathInput = document.createElement('input');
+        pathInput.type = 'text';
+        pathInput.value = rule.path || '';
+        pathInput.placeholder = 'payload.data';
+        pathInput.addEventListener('input', () => {
+          rule.path = pathInput.value;
+          syncHidden();
+        });
+        card.appendChild(makeField('Payload path', pathInput));
+
+        const opSelect = buildSelect(LOGIC_OPERATOR_OPTIONS.map((o) => ({ value: o.value, label: o.label })), rule.operator);
+        const operatorRow = makeField('Operator', opSelect);
+        card.appendChild(operatorRow);
+
+        const compareInput = document.createElement('input');
+        compareInput.type = 'text';
+        compareInput.value = rule.compareValue || '';
+        compareInput.placeholder = 'Value';
+        compareInput.addEventListener('input', () => {
+          rule.compareValue = compareInput.value;
+          syncHidden();
+        });
+        const compareRow = makeField('Compare value', compareInput);
+        compareRow.dataset.role = 'compare';
+        card.appendChild(compareRow);
+
+        const outputsWrap = document.createElement('div');
+        outputsWrap.className = 'logic-output-grid';
+
+        const trueOutput = document.createElement('input');
+        trueOutput.type = 'text';
+        trueOutput.value = rule.outputTrue || '';
+        trueOutput.placeholder = 'true port';
+        trueOutput.addEventListener('input', () => {
+          rule.outputTrue = trueOutput.value;
+          syncHidden();
+        });
+        outputsWrap.appendChild(makeField('True output', trueOutput));
+
+        const trueMode = buildSelect([
+          { value: 'message', label: 'Whole message' },
+          { value: 'value', label: 'Extracted value' },
+          { value: 'boolean', label: 'Boolean' }
+        ], rule.trueMode || 'message');
+        trueMode.addEventListener('change', () => {
+          rule.trueMode = trueMode.value;
+          syncHidden();
+        });
+        outputsWrap.appendChild(makeField('When true send', trueMode));
+
+        const falseOutput = document.createElement('input');
+        falseOutput.type = 'text';
+        falseOutput.value = rule.outputFalse || '';
+        falseOutput.placeholder = 'false port';
+        falseOutput.addEventListener('input', () => {
+          rule.outputFalse = falseOutput.value;
+          syncHidden();
+        });
+        outputsWrap.appendChild(makeField('False output', falseOutput));
+
+        const falseMode = buildSelect([
+          { value: 'message', label: 'Whole message' },
+          { value: 'value', label: 'Extracted value' },
+          { value: 'boolean', label: 'Boolean' }
+        ], rule.falseMode || 'message');
+        falseMode.addEventListener('change', () => {
+          rule.falseMode = falseMode.value;
+          syncHidden();
+        });
+        outputsWrap.appendChild(makeField('When false send', falseMode));
+
+        card.appendChild(outputsWrap);
+
+        const description = document.createElement('textarea');
+        description.rows = 2;
+        description.placeholder = 'Optional notes';
+        description.value = rule.description || '';
+        description.addEventListener('input', () => {
+          rule.description = description.value;
+          syncHidden();
+        });
+        card.appendChild(makeField('Notes', description));
+
+        const toggleCompare = () => {
+          const needs = LOGIC_OPERATORS_WITH_VALUE.has(opSelect.value);
+          compareRow.classList.toggle('hidden', !needs);
+        };
+        opSelect.addEventListener('change', () => {
+          rule.operator = opSelect.value;
+          toggleCompare();
+          syncHidden();
+        });
+        toggleCompare();
+
+        list.appendChild(card);
+      });
+      syncHidden();
+    };
+
+    addBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const idx = rules.length + 1;
+      rules.push({
+        id: logicRuleId(),
+        label: `Rule ${idx}`,
+        input: `input${idx}`,
+        path: '',
+        operator: 'truthy',
+        compareValue: '',
+        outputTrue: undefined,
+        outputFalse: undefined,
+        trueMode: 'message',
+        falseMode: 'message',
+        description: ''
+      });
+      render();
+    });
+
+    render();
+    return wrap;
+  }
+
   function initTextInputNode(node) {
     const textarea = node.el?.querySelector('[data-textinput-field]');
     const sendBtn = node.el?.querySelector('[data-textinput-send]');
@@ -2814,6 +3702,12 @@ function refreshNodeResolution(force = false) {
 
         fields.appendChild(label);
         fields.appendChild(wrap);
+        continue;
+      }
+      if (field.type === 'logicRules') {
+        const editor = createLogicRulesEditor(node, field, cfg);
+        fields.appendChild(label);
+        fields.appendChild(editor);
         continue;
       }
       if (field.type === 'select') {
@@ -3180,6 +4074,16 @@ function refreshNodeResolution(force = false) {
           patch[k] = String(v);
           continue;
         }
+        if (schema.type === 'logicRules') {
+          let parsed = [];
+          try {
+            parsed = JSON.parse(v);
+          } catch (_) {
+            parsed = [];
+          }
+          patch[k] = sanitizeLogicRules(parsed);
+          continue;
+        }
         if (schema.type === 'number' || schema.type === 'range') {
           const num = Number(String(v).trim());
           patch[k] = Number.isFinite(num) ? num : undefined;
@@ -3221,6 +4125,10 @@ function refreshNodeResolution(force = false) {
         const leftSide = node.el?.querySelector('.side.left');
         setupTemplateNode(node, leftSide);
       }
+      if (node.type === 'LogicGate') {
+        const leftSide = node.el?.querySelector('.side.left');
+        setupLogicGateNode(node, leftSide);
+      }
       if (node.type === 'NknDM') {
         initNknDmNode(node);
       }
@@ -3243,10 +4151,22 @@ function refreshNodeResolution(force = false) {
     });
   }
 
-  function addNode(type, x = 70, y = 70) {
-    const id = uid();
-    const node = { id, type, x, y, sizeLocked: false };
+  function addNode(type, x = 70, y = 70, opts = {}) {
+    const id = opts.id || uid();
+    const node = {
+      id,
+      type,
+      x,
+      y,
+      sizeLocked: Boolean(opts.sizeLocked)
+    };
+    if (Number.isFinite(opts.width)) node.w = opts.width;
+    if (Number.isFinite(opts.height)) node.h = opts.height;
     NodeStore.ensure(id, type);
+    if (opts.config && typeof opts.config === 'object') {
+      const cloned = deepClone(opts.config);
+      NodeStore.saveObj(id, { id, type, config: cloned });
+    }
     node.el = makeNodeEl(node);
     WS.canvas.appendChild(node.el);
     WS.nodes.set(id, node);
@@ -3259,12 +4179,17 @@ function refreshNodeResolution(force = false) {
       setupTemplateNode(node, leftSide);
       pullTemplateInputs(id);
     });
+    if (type === 'LogicGate') requestAnimationFrame(() => {
+      const leftSide = node.el?.querySelector('.side.left');
+      setupLogicGateNode(node, leftSide);
+    });
     if (type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
     if (type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
     if (type === 'MCP') requestAnimationFrame(() => MCP.init(id));
     if (type === 'MediaStream') requestAnimationFrame(() => Media.init(id));
     if (type === 'Orientation') requestAnimationFrame(() => Orientation.init(id));
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
+    if (opts.select) setSelectedNode(id, { focus: true });
     saveGraph();
     requestRedraw();
     return node;
@@ -3273,6 +4198,7 @@ function refreshNodeResolution(force = false) {
   function removeNode(nodeId) {
     const node = WS.nodes.get(nodeId);
     if (!node) return;
+    if (WS.selectedNodeId === nodeId) clearSelectedNode();
     if (node._ro) {
       try {
         node._ro.disconnect();
@@ -3331,6 +4257,7 @@ function refreshNodeResolution(force = false) {
       { type: 'TextInput', label: 'Text Input', x: 420, y: 120 },
       { type: 'TextDisplay', label: 'Text Display', x: 540, y: 180 },
       { type: 'Template', label: 'Template', x: 540, y: 220 },
+      { type: 'LogicGate', label: 'Logic Gate', x: 520, y: 260 },
       { type: 'ImageInput', label: 'Image Input', x: 600, y: 220 },
       { type: 'NknDM', label: 'NKN DM', x: 720, y: 140 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
@@ -3362,18 +4289,9 @@ function refreshNodeResolution(force = false) {
 
       const spawnNodeAtPoint = (type, point) => {
         const pt = { x: Math.round(point.x), y: Math.round(point.y) };
-        const node = addNode(type, pt.x, pt.y);
+        const node = addNode(type, pt.x, pt.y, { select: true });
         if (node?.el) {
-          const width = node.el.offsetWidth || 0;
-          const height = node.el.offsetHeight || 0;
-          const centeredX = Math.round(pt.x - width / 2);
-          const centeredY = Math.round(pt.y - height / 2);
-          node.x = centeredX;
-          node.y = centeredY;
-          node.el.style.left = `${centeredX}px`;
-          node.el.style.top = `${centeredY}px`;
-          saveGraph();
-          requestRedraw();
+          positionNodeCentered(node, pt);
         }
         return node;
       };
@@ -3530,6 +4448,45 @@ function refreshNodeResolution(force = false) {
     });
   }
 
+  function bindNodeSelectionControls() {
+    document.addEventListener('pointermove', updatePointerLocation, { passive: true });
+    document.addEventListener('pointerdown', updatePointerLocation, { passive: true });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.defaultPrevented) return;
+      const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+      const modifier = e.metaKey || e.ctrlKey;
+      if (!modifier) return;
+      if (key === 'Escape') return;
+      if (isEditableTarget(e.target)) return;
+
+      if (key === 'd') {
+        if (!WS.selectedNodeId) return;
+        e.preventDefault();
+        duplicateNode(WS.selectedNodeId, currentViewCenter(), { select: true, badge: true });
+        return;
+      }
+
+      if (key === 'c') {
+        if (!WS.selectedNodeId) return;
+        e.preventDefault();
+        const snapshot = snapshotNode(WS.selectedNodeId);
+        if (!snapshot) return;
+        WS.clipboard = snapshot;
+        setBadge('Node copied');
+        return;
+      }
+
+      if (key === 'v') {
+        if (!WS.clipboard) return;
+        e.preventDefault();
+        const dropPoint = workspacePointFromPointer();
+        const node = duplicateNodeFromSnapshot(WS.clipboard, dropPoint, { select: true });
+        if (node) setBadge('Node pasted');
+      }
+    });
+  }
+
   function clamp(v, min, max) {
     return Math.max(min, Math.min(max, v));
   }
@@ -3611,6 +4568,8 @@ function refreshNodeResolution(force = false) {
       const hitPort = e.target.closest('.wp-port');
       const hitResize = e.target.closest('[data-resize]');
       const hitWire = e.target.closest('path[data-id]');
+      const nodeId = hitNode?.dataset?.id;
+      if (nodeId) setSelectedNode(nodeId);
       const isBackground = !hitNode && !hitPort && !hitResize && !hitWire && (
         e.target === WS.root ||
         e.target === WS.el ||
@@ -3618,6 +4577,7 @@ function refreshNodeResolution(force = false) {
         e.target.closest('#workspace') ||
         e.target.closest('#linksSvg')
       );
+      if (isBackground) clearSelectedNode();
       if (e.pointerType === 'touch') {
         touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
         maybeStartPinch();
@@ -3723,6 +4683,7 @@ function refreshNodeResolution(force = false) {
     bindToolbar();
     bindModal();
     bindWorkspaceCancels();
+    bindNodeSelectionControls();
     bindViewportControls();
     applyViewTransform();
     loadGraph();
