@@ -57,12 +57,13 @@ main {
   -webkit-appearance: none;
   width: 100%;
   height: 1px;
-  background: #ffffff;
+  background:#555;
   outline: none;
   border-radius: 1rem;
   opacity: 1;
   -webkit-transition: .2s;
   transition: opacity .2s;
+  transition:background 0.2s ease;
 }
 
 .slider:hover {
@@ -75,16 +76,47 @@ main {
   width: 10px;
   height: 10px;
   border-radius: 1rem;
-  border: 2px solid #ffffff;
+  border: 2px solid #555;
   background: #000000;
-  cursor: pointer;
+  cursor: pointer;  transition:background 0.2s ease;
+
+}
+
+.slider:active {
+  padding: unset !important;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 1px;
+  background:#aaa;
+  outline: none;
+  border-radius: 1rem;
+  opacity: 1;
+  -webkit-transition: .2s;
+  transition: opacity .2s;
+}
+
+.slider:hover::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 1rem;
+  border: 2px solid #fff;
+  background: #000000;
+  cursor: pointer;  transition:background 0.2s ease;
+
 }
 
 .slider::-moz-range-thumb {
-  width: 25px;
-  height: 25px;
-  background: #ffffff;
-  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 1rem;
+  border: 2px solid #fff;
+  background: #000000;
+  cursor: pointer;  transition:background 0.2s ease;
+
 }
 
 .hidden {
@@ -94,6 +126,10 @@ main {
 #nodeMenuList button:hover::after {
   content: '+';
   margin-left: auto;
+}
+
+#nodeMenuToggle {
+  border: 1px solid white;
 }
 
 
@@ -279,7 +315,7 @@ header {
     background-size: contain;
     background-position: top left;
     background-repeat: no-repeat;
-    transform: scale(105%)translatey(-2%)!important;
+    transform: scale(103%)translatey(-1.5%) !important;
     background-image: url('/img/left.svg');
     height: 39px;
     position: absolute;
@@ -291,7 +327,7 @@ header {
     content: '';
     background-repeat: no-repeat;
     width: 80px;
-    transform: scale(105%)translatey(-2%)!important;
+    transform: scale(103%)translatey(-1.5%) !important;
     background-image: url('/img/right.svg');
     background-size: contain;
     background-position: top right;
@@ -776,8 +812,8 @@ button.danger {
   max-height: 360px;
   overflow: auto;
   border: 1px solid rgba(255, 255, 255, .12);
-  padding: 5px;
-  margin-top: 6px;
+  padding: 6px;
+  min-height: 32px;
   border-radius: 4px
 }
 
@@ -891,6 +927,9 @@ button.danger {
   background: transparent;
 }
 
+#graphCard {
+  background-image: radial-gradient(at bottom right, #040a10, #05080c),radial-gradient(at bottom left, #07111b, #121b27);
+}
 
 #linksSvg {
   position: absolute;
@@ -946,10 +985,19 @@ button.danger {
   -webkit-user-select: text;
   touch-action: manipulation;
 }
-
+.node__frame {
+  padding: 1px;
+  border-radius: 14px;
+  box-sizing: border-box;
+  backdrop-filter: blur(10px);
+  clip-path: polygon(8.6rem 38px, calc(100% - 8.6rem) 38px, calc(100% - 6.2rem) 0, 100% 0, 100% 100%, 0 100%, 0 0, 6.2rem 0);
+}
 
 /* hide ::after when .node < 260px wide */
-@container node (max-width: 275px) {
+@container node (max-width: 280px) {
+
+  .node__frame { clip-path: none !important; }
+
   .node .head::before {
     display: none !important;
   }
@@ -1004,6 +1052,7 @@ button.danger {
   position: relative;
   padding: 0.5rem;
   cursor: grab;
+  min-height: 40px;
   border-top-left-radius: 14px;
   border-top-right-radius: 14px;
 }
@@ -1018,8 +1067,9 @@ button.danger {
   transform: scale(103%)translatey(-2.4%);
   background-image: url('/img/left.svg');
   height: 39px;
+  top: 1px;
   position: absolute;
-  left: 4rem;
+  left: 4.8rem;
 }
 
 .node .head::after {
@@ -1032,8 +1082,9 @@ button.danger {
   background-size: contain;
   background-position: top right;
   height: 39px;
+  top: 1px;
   position: absolute;
-  right: 5rem;
+  right: 4.8rem;
 }
 
 .node .head>.row {
@@ -1043,7 +1094,7 @@ button.danger {
 .node .head>.row::before {
   pointer-events: none !important;
   content: '';
-  width: 4rem;
+  width: 4.8rem;
   border-left: 1px solid rgba(255, 255, 255, 1);
   border-top: 1px solid rgba(255, 255, 255, 1);
   height: 100%;
@@ -1056,7 +1107,7 @@ button.danger {
 .node .head>.titleRow::after {
   pointer-events: none !important;
   content: '';
-  width: 5rem;
+  width: 4.8rem;
   border-right: 1px solid rgba(255, 255, 255, 1);
   border-top: 1px solid rgba(255, 255, 255, 1);
   height: 100%;
@@ -1070,11 +1121,11 @@ button.danger {
 .node .head>.titleRow::before {
   pointer-events: none !important;
   content: '';
-  width: calc(100% - 8rem - 10rem);
+  width: calc(100% - 8rem - 10.95rem);
   border-bottom: 1px solid rgba(255, 255, 255, 1);
   height: 1px;
   position: absolute;
-  left: 8.5rem;
+  left: 9.45rem;
   top: 37px;
   border-top-right-radius: 14px;
 }
@@ -1082,9 +1133,9 @@ button.danger {
 
 .node .titleRow {
   display: flex;
+  flex-flow: wrap;
   align-items: center;
   gap: 8px;
-  flex: 1 1 auto;
   max-width: 4rem;
 }
 
@@ -1114,6 +1165,36 @@ button.danger {
 .node .node-transport.active {
   border-color: rgba(255, 255, 255, .65);
   box-shadow: 0 0 12px rgba(255, 255, 255, 0.25);
+}
+
+.node .body::before {
+  content: '';
+  pointer-events: none;
+  border-radius: 14px;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  bottom: 0px;
+  left: 0px;
+  z-index: -1;
+  opacity: 0;
+  background-image: radial-gradient(at bottom center, #fff1, transparent);
+  transition: all 0.5s ease;
+}
+
+.node:hover .body::before {
+  content: '';
+  pointer-events: none;
+  border-radius: 14px;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  bottom: 0px;
+  left: 0px;
+  mix-blend-mode: color-burn;
+  z-index: -1;
+  opacity: 1;
+  background-image: radial-gradient(at bottom center, #fff1, transparent);
 }
 
 .node .head:active {

@@ -59,7 +59,7 @@ function createGraph({
       }
     }
     if (uiAudioCtx && uiAudioCtx.state === 'suspended') {
-      uiAudioCtx.resume().catch(() => {});
+      uiAudioCtx.resume().catch(() => { });
     }
     return uiAudioCtx;
   };
@@ -116,6 +116,7 @@ function createGraph({
       WS._redrawReq = false;
       drawAllLinks();
     });
+    //console.log('redraw requested')
   }
 
   function scheduleZoomRefresh() {
@@ -126,28 +127,78 @@ function createGraph({
     });
   }
 
+  function broadcastViewportChange(reason = 'zoom') {
+    const payload = { x: WS.view.x, y: WS.view.y, scale: WS.view.scale, reason };
+    WS.nodes.forEach((node) => {
+      node.refreshDimensions?.(false, reason);
+      node.el?.dispatchEvent(new CustomEvent('workspace:viewport', { detail: payload }));
+      // let feature modules repaint if they expose hooks
+      if (node.type === 'TTS') TTS?.refreshUI?.(node.id);
+      if (node.type === 'ASR') ASR?.refreshUI?.(node.id);
+      Media?.onViewport?.(node.id, payload);
+    });
+  }
+
+
   function applyViewTransform() {
     const t = `translate(${WS.view.x}px, ${WS.view.y}px) scale(${WS.view.scale})`;
     if (WS.canvas) WS.canvas.style.transform = t;
     if (WS.svgLayer) WS.svgLayer.setAttribute('transform', `translate(${WS.view.x},${WS.view.y}) scale(${WS.view.scale})`);
-    syncWorkspaceBackground();
-    scheduleZoomRefresh();
+    syncWorkspaceBackground();       // maintains grid vars
+    broadcastViewportChange('zoom'); // tell every node to recompute + repaint
+    scheduleZoomRefresh();           // bump canvas backing stores next frame
+    requestRedraw();                 // re-path the wires immediately
   }
+
 
   function syncWorkspaceBackground() {
     if (!WS.el) return;
     WS.el.style.setProperty('--grid-scale', WS.view.scale.toFixed(4));
     WS.el.style.setProperty('--grid-offset-x', `${WS.view.x}px`);
     WS.el.style.setProperty('--grid-offset-y', `${WS.view.y}px`);
+    //console.log('synced workspace background')
+    refreshNodeResolution();
   }
+function refreshNodeResolution(force = false) {
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+  const scale = currentScale();
 
-  function refreshNodeResolution() {
-    WS.nodes.forEach((node) => {
-      node.refreshDimensions?.(false);
-      node.el?.getBoundingClientRect();
+  WS.nodes.forEach((node) => {
+    const root = node.el;
+    if (!root) return;
+
+    // DO NOT call node.refreshDimensions() here; it can cause width jumps.
+    root.querySelectorAll('canvas').forEach((cv) => {
+      // getBoundingClientRect() already includes CSS transforms (zoom)
+      const r = cv.getBoundingClientRect();
+      const targetW = Math.max(1, Math.round(r.width * dpr));
+      const targetH = Math.max(1, Math.round(r.height * dpr));
+
+      if (force || cv.width !== targetW || cv.height !== targetH) {
+        cv.width = targetW;
+        cv.height = targetH;
+
+        // let node-specific drawers repaint if they want
+        if (typeof node.onCanvasResize === 'function') {
+          node.onCanvasResize(cv, { dpr, scale, width: targetW, height: targetH });
+        }
+        try {
+          cv.dispatchEvent(new CustomEvent('canvas:resized', {
+            bubbles: false,
+            detail: { dpr, scale, width: targetW, height: targetH }
+          }));
+        } catch (_) { /* no-op */ }
+      }
     });
-    requestRedraw();
-  }
+
+    if (typeof node.onResolutionChange === 'function') {
+      node.onResolutionChange({ dpr, scale });
+    }
+  });
+
+  requestRedraw();
+}
+
 
   function clientToWorkspace(cx, cy) {
     const rect = WS.root?.getBoundingClientRect?.() || document.body.getBoundingClientRect();
@@ -876,6 +927,7 @@ function createGraph({
       : '';
 
     el.innerHTML = `
+      <div class="node__frame">
       <div class="head">
         <div class="titleRow"><div class="title">${t.title}</div>${transportMarkup}</div>
         <div class="row" style="gap:6px;">
@@ -990,26 +1042,29 @@ function createGraph({
           </div>
         ` : ''}
       </div>
+      </div>
     `;
 
     ensureNodeRefs();
     setSizeLock(node.sizeLocked);
 
     const computeMinDimensions = () => {
-      ensureNodeRefs();
-      const scale = currentScale();
-      const invScale = scale ? 1 / scale : 1;
-      const headHeight = headEl ? headEl.offsetHeight * invScale : 0;
-      const bodyHeight = bodyEl ? bodyEl.scrollHeight * invScale : 0;
-      const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
-      const headWidth = headEl ? headEl.scrollWidth * invScale : 0;
-      const bodyWidth = bodyEl ? bodyEl.scrollWidth * invScale : 0;
-      const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
-      return {
-        minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
-        minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
-      };
-    };
+  ensureNodeRefs();
+  // IMPORTANT: layout metrics are already in CSS pixels, do NOT scale by view
+  const headHeight = headEl ? headEl.offsetHeight : 0;
+  const bodyHeight = bodyEl ? bodyEl.scrollHeight : 0;
+  const baseMinHeight = Math.max(NODE_MIN_HEIGHT, Math.ceil(headHeight + bodyHeight));
+
+  const headWidth = headEl ? headEl.scrollWidth : 0;
+  const bodyWidth = bodyEl ? bodyEl.scrollWidth : 0;
+  const baseMinWidth = Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(headWidth, bodyWidth)));
+
+  return {
+    minHeight: Math.min(baseMinHeight, NODE_MAX_HEIGHT),
+    minWidth: Math.min(baseMinWidth, NODE_MAX_WIDTH)
+  };
+};
+
 
     const getMeasuredWidth = () => {
       const direct = Number.parseFloat(el.style.width);
@@ -1024,47 +1079,55 @@ function createGraph({
       const rect = el.getBoundingClientRect();
       return rect.height / currentScale();
     };
+    const applyMinDimensions = ({ save = false, reason = 'auto' } = {}) => {
+  const dims = computeMinDimensions();
+  const locked = Boolean(node.sizeLocked);
 
-    const applyMinDimensions = ({ save = false } = {}) => {
-      const dims = computeMinDimensions();
-      const locked = Boolean(node.sizeLocked);
-      el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
-      el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
-      el.style.minWidth = `${NODE_MIN_WIDTH}px`;
-      el.style.minHeight = 'min-content';
-      updateBodyOverflow();
-      const currentW = getMeasuredWidth();
-      const currentH = getMeasuredHeight();
-      let widthTarget;
-      let heightTarget;
-      if (locked) {
-        widthTarget = clampSize(currentW, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-        heightTarget = clampSize(currentH, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
-      } else {
-        widthTarget = clampSize(Math.max(currentW, dims.minWidth), NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-        heightTarget = clampSize(Math.max(currentH, dims.minHeight), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
-      }
-      let adjusted = false;
-      if (widthTarget !== currentW) {
-        el.style.width = `${widthTarget}px`;
-        node.w = widthTarget;
-        adjusted = true;
-      }
-      if (heightTarget !== currentH) {
-        el.style.height = `${heightTarget}px`;
-        node.h = heightTarget;
-        adjusted = true;
-      }
-      if (!adjusted) {
-        node.w = widthTarget;
-        node.h = heightTarget;
-      }
-      if (adjusted) requestRedraw();
-      if (save && (!locked || adjusted)) saveGraph();
-      return { minWidth: dims.minWidth, minHeight: dims.minHeight };
-    };
+  el.style.maxWidth = `${NODE_MAX_WIDTH}px`;
+  el.style.maxHeight = `${NODE_MAX_HEIGHT}px`;
+  el.style.minWidth = `${NODE_MIN_WIDTH}px`;
+  el.style.minHeight = 'min-content';
+  updateBodyOverflow();
 
-    node.refreshDimensions = (save = false) => applyMinDimensions({ save });
+  const currentW = getMeasuredWidth();
+  const currentH = getMeasuredHeight();
+
+  // Do NOT enforce mins on zoom; only when unlocked or non-zoom reasons
+  const allowEnforceMins = !locked && reason !== 'zoom';
+
+  const targetW = allowEnforceMins
+    ? clampSize(Math.max(currentW, dims.minWidth), NODE_MIN_WIDTH, NODE_MAX_WIDTH)
+    : clampSize(currentW, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+
+  const targetH = allowEnforceMins
+    ? clampSize(Math.max(currentH, dims.minHeight), NODE_MIN_HEIGHT, NODE_MAX_HEIGHT)
+    : clampSize(currentH, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT);
+
+  let adjusted = false;
+  if (targetW !== currentW) {
+    el.style.width = `${targetW}px`;
+    node.w = targetW;
+    adjusted = true;
+  }
+  if (targetH !== currentH) {
+    el.style.height = `${targetH}px`;
+    node.h = targetH;
+    adjusted = true;
+  }
+  if (!adjusted) {
+    node.w = targetW;
+    node.h = targetH;
+  }
+
+  if (adjusted) requestRedraw();
+  if (save && (!locked || adjusted)) saveGraph();
+
+  return { minWidth: dims.minWidth, minHeight: dims.minHeight };
+};
+
+
+    node.refreshDimensions = (save = false, reason = 'auto') => applyMinDimensions({ save, reason });
+
 
     const scheduleAutoGrow = (() => {
       let raf = 0;
