@@ -122,6 +122,17 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     return { src, payload };
   }
 
+  function stripGraphPrefix(addr) {
+    if (!addr) return '';
+    return String(addr).replace(/^graph\./i, '');
+  }
+
+  function ensureGraphPrefix(addr) {
+    const raw = stripGraphPrefix(addr);
+    if (!raw) return '';
+    return raw.startsWith('graph.') ? raw : `graph.${raw}`;
+  }
+
   const NKNDM_META_KEYS = [
     'from',
     'componentId',
@@ -575,8 +586,9 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function notifyNoCandidate(src, data, reason) {
+    const normalizedSrc = ensureGraphPrefix(src);
     const targetId = typeof data?.targetId === 'string' ? data.targetId : '';
-    const message = `Dropped ${reason} DM from ${src}${targetId ? ` targeting ${targetId}` : ''}: no matching NKN DM node`;
+    const message = `Dropped ${reason} DM from ${normalizedSrc || src}${targetId ? ` targeting ${targetId}` : ''}: no matching NKN DM node`;
     log(`[nkndm] ${message}`);
     setBadge(message, false);
     const hintNodes = new Set();
@@ -585,10 +597,10 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     }
     for (const nodeId of nodeState.keys()) {
       const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-      const handshakePeer = (cfg.handshake?.peer || '').trim();
-      const activeAddress = (cfg.address || cfg.peer?.address || handshakePeer || '').trim();
-      const allowed = Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : [];
-      if (handshakePeer === src || activeAddress === src || allowed.includes(src)) {
+      const handshakePeer = ensureGraphPrefix((cfg.handshake?.peer || '').trim());
+      const activeAddress = ensureGraphPrefix((cfg.address || cfg.peer?.address || handshakePeer || '').trim());
+      const allowed = new Set((Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []).map((addr) => ensureGraphPrefix(addr)));
+      if (handshakePeer === normalizedSrc || activeAddress === normalizedSrc || allowed.has(normalizedSrc)) {
         hintNodes.add(nodeId);
       }
     }
@@ -850,9 +862,9 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     registerComponent(nodeId);
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     const st = getState(nodeId);
-    const localAddress = (cfg.address || '').trim();
-    const peerAddress = (cfg.peer?.address || '').trim();
-    const hintAddress = (cfg.handshake?.peer || '').trim();
+    const localAddress = ensureGraphPrefix((cfg.address || '').trim());
+    const peerAddress = ensureGraphPrefix((cfg.peer?.address || '').trim());
+    const hintAddress = ensureGraphPrefix((cfg.handshake?.peer || '').trim());
     const activeAddress = localAddress || peerAddress || hintAddress;
     registerAddress(nodeId, activeAddress);
     updatePeerDisplay(nodeId, cfg);
@@ -943,16 +955,18 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
       set.delete(nodeId);
       if (set.size === 0) addressIndex.delete(st.address);
     }
-    st.address = address || '';
-    if (st.address) {
-      if (!addressIndex.has(st.address)) addressIndex.set(st.address, new Set());
-      addressIndex.get(st.address).add(nodeId);
+    const normalized = ensureGraphPrefix(address || '');
+    st.address = normalized;
+    if (normalized) {
+      if (!addressIndex.has(normalized)) addressIndex.set(normalized, new Set());
+      addressIndex.get(normalized).add(nodeId);
     }
   }
 
   function decoratePayload(nodeId, payload, targetId) {
     const out = { ...(payload || {}) };
     if (!out.from && Net.nkn?.addr) out.from = Net.nkn.addr;
+    if (out.from) out.from = ensureGraphPrefix(out.from);
     const componentId = registerComponent(nodeId);
     if (componentId) out.componentId = componentId;
     if (targetId) out.targetId = targetId;
@@ -963,8 +977,9 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   function setPeerInfo(nodeId, info) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     const next = { ...(cfg.peer || {}), ...(info || {}) };
+    if (next.address) next.address = ensureGraphPrefix(next.address);
     const patch = { type: 'NknDM', peer: next };
-    if (info && info.address) patch.address = info.address;
+    if (next.address) patch.address = next.address;
     const updatedCfg = NodeStore.update(nodeId, patch);
     const activeAddress = updatedCfg.address || next.address || '';
     registerAddress(nodeId, activeAddress);
@@ -982,7 +997,8 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
       const nodeId = componentIndex.get(targetId);
       result.set(nodeId, NodeStore.ensure(nodeId, 'NknDM').config || {});
     }
-    for (const candidate of findNodesForAddress(src)) {
+    const normalizedSrc = ensureGraphPrefix(src);
+    for (const candidate of findNodesForAddress(normalizedSrc)) {
       result.set(candidate.id, candidate.cfg);
     }
     if (!result.size) {
@@ -992,14 +1008,14 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
           const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
           const handshake = cfg.handshake || {};
           const status = handshake.status || 'idle';
-          const handshakePeer = (handshake.peer || '').trim();
-          const activeAddress = (cfg.address || cfg.peer?.address || handshakePeer || '').trim();
-          if (status === 'accepted' && handshakePeer && handshakePeer !== src) continue;
-          const allowed = Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : [];
+          const handshakePeer = ensureGraphPrefix((handshake.peer || '').trim());
+          const activeAddress = ensureGraphPrefix((cfg.address || cfg.peer?.address || handshakePeer || '').trim());
+          if (status === 'accepted' && handshakePeer && handshakePeer !== normalizedSrc) continue;
+          const allowedSet = new Set((Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []).map((addr) => ensureGraphPrefix(addr)));
           const likely =
-            (handshakePeer && handshakePeer === src) ||
+            (handshakePeer && handshakePeer === normalizedSrc) ||
             (!activeAddress && status !== 'accepted') ||
-            allowed.includes(src) ||
+            allowedSet.has(normalizedSrc) ||
             cfg.autoAccept;
           if (likely) {
             result.set(nodeId, cfg);
@@ -1015,7 +1031,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function logRawDm(src, raw, data) {
-    const candidates = findNodesForTarget(src, data || {}, null);
+    const candidates = findNodesForTarget(ensureGraphPrefix(src), data || {}, null);
     const payloadObj = (data && typeof data === 'object') ? data : null;
     const normalizedRaw = typeof raw === 'object' && raw !== null ? deepHydrateJson(raw) : raw;
     const normalizedPayload = payloadObj ? deepHydrateJson(payloadObj) : null;
@@ -1063,7 +1079,8 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   function attemptHandshake(nodeId) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     refresh(nodeId);
-    const targetAddress = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
+    const targetAddressRaw = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
+    const targetAddress = ensureGraphPrefix(targetAddressRaw);
     if (!targetAddress) {
       stopHeartbeat(nodeId);
       return;
@@ -1110,6 +1127,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     const base = { status: 'idle', peer: '', direction: 'idle', remoteId: '', graphId: '' };
     const current = { ...base, ...(cfg.handshake || {}) };
     const next = { ...current, ...patch };
+    if (next.peer) next.peer = ensureGraphPrefix(next.peer);
     if (next.direction === undefined) next.direction = current.direction;
     NodeStore.update(nodeId, { type: 'NknDM', handshake: next });
     refresh(nodeId);
@@ -1131,8 +1149,10 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     }
     try {
       const enriched = decoratePayload(nodeId, payload, targetId);
-      debugLog('[nkndm] send-json', { address, payload: enriched, targetId });
-      client.send(address, JSON.stringify(enriched), { noReply: true });
+      const normalizedAddress = ensureGraphPrefix(address);
+      debugLog('[nkndm] send-json', { address: normalizedAddress || address, payload: enriched, targetId });
+      if (!normalizedAddress) throw new Error('Invalid target address');
+      client.send(normalizedAddress, JSON.stringify(enriched), { noReply: true });
     } catch (err) {
       log(`nkn dm send error: ${err?.message || err}`);
       scheduleRetry(nodeId);
@@ -1141,7 +1161,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
 
   function sendHandshake(nodeId, action) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-    const address = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
+    const address = ensureGraphPrefix((cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim());
     if (!address) return;
     if (!Net.nkn.addr) {
       scheduleRetry(nodeId);
@@ -1163,26 +1183,27 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function acceptHandshake(nodeId, from) {
+    const normalizedFrom = ensureGraphPrefix(from);
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-    const allowedSet = new Set(Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []);
-    if (!allowedSet.has(from)) {
-      allowedSet.add(from);
-      NodeStore.update(nodeId, { type: 'NknDM', allowedPeers: Array.from(allowedSet) });
+    const allowedSet = new Set((Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []).map((addr) => ensureGraphPrefix(addr)));
+    if (normalizedFrom && !allowedSet.has(normalizedFrom)) {
+      allowedSet.add(normalizedFrom);
+      NodeStore.update(nodeId, { type: 'NknDM', allowedPeers: Array.from(allowedSet).filter(Boolean) });
     }
     const peerInfo = {
-      address: from,
+      address: normalizedFrom,
       componentId: cfg.handshake?.remoteId || cfg.peer?.componentId || '',
       graphId: cfg.handshake?.graphId || cfg.peer?.graphId || ''
     };
     setPeerInfo(nodeId, peerInfo);
     updateHandshake(nodeId, {
       status: 'accepted',
-      peer: from,
+      peer: normalizedFrom,
       direction: 'accepted',
       remoteId: peerInfo.componentId,
       graphId: peerInfo.graphId
     });
-    logLine(nodeId, `Handshake accepted for ${from}`);
+    logLine(nodeId, `Handshake accepted for ${normalizedFrom || from}`);
     const localAddr = Net.nkn?.addr;
     if (!localAddr) {
       scheduleRetry(nodeId);
@@ -1190,7 +1211,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     }
     const updatedCfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     const targetId = updatedCfg.handshake?.remoteId || updatedCfg.peer?.componentId || undefined;
-    sendJson(nodeId, from, {
+    sendJson(nodeId, normalizedFrom, {
       type: 'nkndm.handshake',
       action: 'accept',
       ts: Date.now()
@@ -1200,13 +1221,14 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function declineHandshake(nodeId, from) {
+    const normalizedFrom = ensureGraphPrefix(from);
     const localAddr = Net.nkn?.addr;
-    updateHandshake(nodeId, { status: 'declined', peer: from, direction: 'declined' });
-    logLine(nodeId, `Handshake declined for ${from}`);
+    updateHandshake(nodeId, { status: 'declined', peer: normalizedFrom || from, direction: 'declined' });
+    logLine(nodeId, `Handshake declined for ${normalizedFrom || from}`);
     if (localAddr) {
       const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
       const targetId = cfg.handshake?.remoteId || cfg.peer?.componentId || undefined;
-      sendJson(nodeId, from, {
+      sendJson(nodeId, normalizedFrom, {
         type: 'nkndm.handshake',
         action: 'decline',
         ts: Date.now()
@@ -1222,7 +1244,8 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     clearStateTimers(st);
     const intervalSec = Math.max(5, Number(cfg.heartbeatInterval) || 15);
     const intervalMs = intervalSec * 1000;
-    const address = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
+    const addressRaw = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
+    const address = ensureGraphPrefix(addressRaw);
     if (!address) return;
     st.connected = false;
     st.lastSeen = Date.now();
@@ -1289,7 +1312,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function handleDebugMessage(src, data) {
-    const candidates = findNodesForTarget(src, data, 'debug');
+    const candidates = findNodesForTarget(ensureGraphPrefix(src), data, 'debug');
     if (!candidates.length) {
       log(`[nkndm] debug DM from ${src}: ${JSON.stringify(data)}`);
       return;
@@ -1319,24 +1342,28 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   }
 
   function findNodesForAddress(address) {
-    if (!address) return [];
-    const set = addressIndex.get(address);
+    const normalized = ensureGraphPrefix(address);
+    if (!normalized) return [];
+    const set = addressIndex.get(normalized);
     if (!set || !set.size) return [];
     return Array.from(set).map((id) => ({ id, cfg: NodeStore.ensure(id, 'NknDM').config || {} }));
   }
 
   function handleHandshakeMessage(src, data) {
-    const candidates = findNodesForTarget(src, data, 'handshake');
+    const candidates = findNodesForTarget(ensureGraphPrefix(src), data, 'handshake');
     if (!candidates.length) return;
     debugLog('[nkndm] handshake-message:dispatch', { src, data, candidates: candidates.map((c) => c.id) });
     candidates.forEach(({ id, cfg }) => {
+      const normalizedSrc = ensureGraphPrefix(src);
+      const peerAddress = normalizedSrc || src;
       const status = cfg.handshake?.status || 'idle';
       const remoteId = typeof data?.componentId === 'string' ? data.componentId : '';
       const remoteGraph = typeof data?.graphId === 'string' ? data.graphId : '';
       const logSuffix = remoteId ? ` (uuid ${remoteId})` : '';
       if (data.action === 'request') {
-        if (status === 'accepted' && cfg.handshake?.peer === src) {
-          sendJson(id, src, {
+        const handshakePeerNormalized = ensureGraphPrefix(cfg.handshake?.peer || '');
+        if (status === 'accepted' && handshakePeerNormalized && handshakePeerNormalized === normalizedSrc) {
+          sendJson(id, peerAddress, {
             type: 'nkndm.handshake',
             action: 'accept',
             ts: Date.now()
@@ -1344,51 +1371,52 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
           startHeartbeat(id);
           return;
         }
-        const allowed = Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : [];
+        const allowedSet = new Set((Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []).map((addr) => ensureGraphPrefix(addr)));
         updateHandshake(id, {
           status: 'pending',
-          peer: src,
+          peer: peerAddress,
           direction: 'incoming',
           remoteId: remoteId || cfg.handshake?.remoteId || '',
           graphId: remoteGraph || cfg.handshake?.graphId || ''
         });
-        if (cfg.autoAccept || allowed.includes(src)) {
-          logLine(id, `Auto-accepting handshake from ${src}${logSuffix}`);
-          acceptHandshake(id, src);
+        if (cfg.autoAccept || (normalizedSrc && allowedSet.has(normalizedSrc))) {
+          logLine(id, `Auto-accepting handshake from ${peerAddress}${logSuffix}`);
+          acceptHandshake(id, peerAddress);
           return;
         }
-        logLine(id, `Handshake request received from ${src}${logSuffix}`);
-        openInvite(id, src, remoteId);
+        logLine(id, `Handshake request received from ${peerAddress}${logSuffix}`);
+        openInvite(id, peerAddress, remoteId);
         setIndicator(id, 'pending');
-        emitStatus(id, { type: 'handshake', status: 'pending', peer: src });
+        emitStatus(id, { type: 'handshake', status: 'pending', peer: peerAddress });
       } else if (data.action === 'accept') {
-        setPeerInfo(id, { address: src, componentId: remoteId, graphId: remoteGraph });
-        if (status !== 'accepted' || cfg.handshake?.peer !== src || cfg.handshake?.remoteId !== remoteId) {
+        setPeerInfo(id, { address: peerAddress, componentId: remoteId, graphId: remoteGraph });
+        const handshakePeerNormalized = ensureGraphPrefix(cfg.handshake?.peer || '');
+        if (status !== 'accepted' || handshakePeerNormalized !== normalizedSrc || cfg.handshake?.remoteId !== remoteId) {
           updateHandshake(id, {
             status: 'accepted',
-            peer: src,
+            peer: peerAddress,
             direction: 'accepted',
             remoteId,
             graphId: remoteGraph
           });
         }
-        logLine(id, `Handshake accepted by ${src}${logSuffix}`);
+        logLine(id, `Handshake accepted by ${peerAddress}${logSuffix}`);
         startHeartbeat(id);
-        emitStatus(id, { type: 'handshake', status: 'accepted', peer: src });
+        emitStatus(id, { type: 'handshake', status: 'accepted', peer: peerAddress });
       } else if (data.action === 'decline') {
-        logLine(id, `Handshake declined by ${src}${logSuffix}`, true);
+        logLine(id, `Handshake declined by ${peerAddress}${logSuffix}`, true);
         updateHandshake(id, {
           status: 'declined',
-          peer: src,
+          peer: peerAddress,
           direction: 'declined',
           remoteId,
           graphId: remoteGraph
         });
         stopHeartbeat(id);
-        emitStatus(id, { type: 'handshake', status: 'declined', peer: src });
+        emitStatus(id, { type: 'handshake', status: 'declined', peer: peerAddress });
       } else if (data.action === 'sync') {
-        if (status === 'accepted' && cfg.handshake?.peer === src) {
-          sendJson(id, src, {
+        if (status === 'accepted' && ensureGraphPrefix(cfg.handshake?.peer || '') === normalizedSrc) {
+          sendJson(id, peerAddress, {
             type: 'nkndm.handshake',
             action: 'accept',
             ts: Date.now()
@@ -1637,7 +1665,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
 
   function sendHandshakeRequest(nodeId, onDone) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-    const address = (cfg.address || '').trim();
+    const address = ensureGraphPrefix((cfg.address || '').trim());
     if (!address) {
       logLine(nodeId, 'Peer address missing', true);
       onDone && onDone();
@@ -1656,7 +1684,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     }
     const st = getState(nodeId);
     st.spinnerDone = onDone || null;
-    if ((cfg.handshake?.status || 'idle') !== 'pending' || cfg.handshake?.direction !== 'outgoing' || cfg.handshake?.peer !== address) {
+    if ((cfg.handshake?.status || 'idle') !== 'pending' || cfg.handshake?.direction !== 'outgoing' || ensureGraphPrefix(cfg.handshake?.peer || '') !== address) {
       updateHandshake(nodeId, {
         status: 'pending',
         peer: address,
@@ -1711,7 +1739,14 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     if (cfg.handshake && cfg.handshake.graphId === undefined) {
       defaultsPatch.handshake = { ...(defaultsPatch.handshake || cfg.handshake), graphId: '' };
     }
-    if (!Array.isArray(cfg.allowedPeers)) defaultsPatch.allowedPeers = [];
+    if (Array.isArray(cfg.allowedPeers)) {
+      const normalizedAllowed = Array.from(new Set(cfg.allowedPeers.map((addr) => ensureGraphPrefix(addr)).filter(Boolean)));
+      if (normalizedAllowed.length !== cfg.allowedPeers.length || normalizedAllowed.some((val, idx) => val !== cfg.allowedPeers[idx])) {
+        defaultsPatch.allowedPeers = normalizedAllowed;
+      }
+    } else {
+      defaultsPatch.allowedPeers = [];
+    }
     if (typeof cfg.autoAccept !== 'boolean') defaultsPatch.autoAccept = false;
     if (!Number.isFinite(cfg.heartbeatInterval)) defaultsPatch.heartbeatInterval = 15;
     if (!cfg.componentId) defaultsPatch.componentId = `${CFG.graphId || 'graph'}:${nodeId}`;
@@ -1736,18 +1771,18 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     sendProbe,
     approvePeer(nodeId) {
       const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-      const address = (cfg.address || '').trim();
+      const address = ensureGraphPrefix((cfg.address || '').trim());
       if (!address) {
         setBadge('No peer to approve', false);
         return;
       }
-      const allowed = Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers.slice() : [];
-      if (!allowed.includes(address)) allowed.push(address);
-      NodeStore.update(nodeId, { type: 'NknDM', allowedPeers: allowed });
+      const allowedSet = new Set((Array.isArray(cfg.allowedPeers) ? cfg.allowedPeers : []).map((addr) => ensureGraphPrefix(addr)));
+      if (!allowedSet.has(address)) allowedSet.add(address);
+      NodeStore.update(nodeId, { type: 'NknDM', allowedPeers: Array.from(allowedSet).filter(Boolean) });
       logLine(nodeId, `Peer ${address} trusted`);
       if (closeInviteModal) closeInviteModal();
       const current = NodeStore.ensure(nodeId, 'NknDM').config || {};
-      if ((current.handshake?.status || 'idle') === 'pending' && current.handshake?.peer === address) {
+      if ((current.handshake?.status || 'idle') === 'pending' && ensureGraphPrefix(current.handshake?.peer || '') === address) {
         acceptHandshake(nodeId, address);
       } else {
         attemptHandshake(nodeId);

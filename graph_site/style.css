@@ -1520,6 +1520,7 @@ button.danger {
 
 .asr-partial-row {
   font-size: 12px;
+  margin-bottom:6px;
 }
 
 .asr-partial-row [data-asr-partial-flag] {

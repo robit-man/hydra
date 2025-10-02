@@ -4041,8 +4041,13 @@ function refreshNodeResolution(force = false) {
           const input = fields.querySelector('input[name="address"]');
           const spinner = fields.querySelector('[data-nkndm-settings-spinner]');
           const statusEl = fields.querySelector('[data-nkndm-settings-status]');
-          const value = input?.value?.trim?.() || '';
-          NodeStore.update(nodeId, { type: 'NknDM', address: value });
+          const raw = input?.value?.trim?.() || '';
+          const normalized = raw ? (raw.toLowerCase().startsWith('graph.') ? raw.replace(/^graph\./i, 'graph.') : `graph.${raw.replace(/^graph\./i, '')}`) : '';
+          if (input && normalized !== raw) {
+            input.value = normalized;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          NodeStore.update(nodeId, { type: 'NknDM', address: normalized });
           if (spinner) spinner.classList.remove('hidden');
           if (statusEl) {
             statusEl.textContent = '…';
