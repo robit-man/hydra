@@ -1236,6 +1236,11 @@ function refreshNodeResolution(force = false) {
             <div class="file-transfer-receive">
               <div class="tiny" data-ft-status>Waiting for file…</div>
               <div class="file-transfer-info" data-ft-info></div>
+              <div class="file-progress hidden" data-ft-rprogress>
+                <div class="file-progress-bar" data-ft-rprogress-bar></div>
+                <div class="tiny" data-ft-rprogress-text>0%</div>
+              </div>
+              <div class="tiny" data-ft-stats></div>
               <div class="row" style="margin-top:8px;gap:8px;">
                 <button type="button" class="ghost" data-ft-save disabled>Save File</button>
                 <button type="button" class="ghost" data-ft-clear disabled>Clear</button>
@@ -2379,7 +2384,7 @@ function refreshNodeResolution(force = false) {
     FileTransfer: {
       title: 'File Transfer',
       inputs: [{ name: 'incoming', label: 'Incoming DM' }, { name: 'file', label: 'File Input' }],
-      outputs: [{ name: 'outgoing', label: 'DM Packet' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
+      outputs: [{ name: 'packet', label: 'DM Packet' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
       schema: [
         { key: 'chunkSize', label: 'Chunk Size (bytes)', type: 'number', def: 1024 },
         { key: 'autoAccept', label: 'Auto-accept incoming', type: 'select', options: ['true', 'false'], def: 'true' },

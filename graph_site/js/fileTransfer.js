@@ -135,6 +135,10 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       progressText: el.querySelector('[data-ft-progress-text]'),
       statusLine: el.querySelector('[data-ft-status]'),
       info: el.querySelector('[data-ft-info]'),
+      recvProgressWrap: el.querySelector('[data-ft-rprogress]'),
+      recvProgressBar: el.querySelector('[data-ft-rprogress-bar]'),
+      recvProgressText: el.querySelector('[data-ft-rprogress-text]'),
+      stats: el.querySelector('[data-ft-stats]'),
       save: el.querySelector('[data-ft-save]'),
       clear: el.querySelector('[data-ft-clear]'),
       route: el.querySelector('[data-ft-route]'),
@@ -255,6 +259,10 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       ui.info && (ui.info.textContent = '');
       ui.save?.setAttribute('disabled', 'disabled');
       ui.clear?.setAttribute('disabled', 'disabled');
+      if (ui.recvProgressWrap) ui.recvProgressWrap.classList.add('hidden');
+      if (ui.recvProgressBar) ui.recvProgressBar.style.setProperty('--pct', '0%');
+      if (ui.recvProgressText) ui.recvProgressText.textContent = '0%';
+      if (ui.stats) ui.stats.textContent = '';
       return;
     }
     const pct = entry.totalChunks ? Math.floor((entry.receivedCount / entry.totalChunks) * 100) : 0;
@@ -265,6 +273,24 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
     if (entry.route) infoParts.push(`route ${entry.route}`);
     if (entry.encrypted) infoParts.push('encrypted');
     ui.info && (ui.info.textContent = infoParts.join(' | '));
+    if (ui.recvProgressWrap) {
+      const show = entry.totalChunks > 0;
+      ui.recvProgressWrap.classList.toggle('hidden', !show);
+      if (show && ui.recvProgressBar) ui.recvProgressBar.style.setProperty('--pct', `${pct}%`);
+      if (show && ui.recvProgressText) ui.recvProgressText.textContent = `${pct}% (${entry.receivedCount}/${entry.totalChunks})`;
+    }
+    if (ui.stats) {
+      const statsParts = [];
+      const total = entry.totalChunks;
+      const received = entry.receivedCount || 0;
+      const remaining = total ? Math.max(0, total - received) : null;
+      statsParts.push(`received ${received}${total ? `/${total}` : ''}`);
+      if (remaining !== null) statsParts.push(`${remaining} remaining`);
+      if (entry.outOfOrder) statsParts.push(`${entry.outOfOrder} out-of-order`);
+      if (entry.duplicates) statsParts.push(`${entry.duplicates} duplicate${entry.duplicates === 1 ? '' : 's'}`);
+      if (entry.missingTries) statsParts.push(`${entry.missingTries} resend request${entry.missingTries === 1 ? '' : 's'}`);
+      ui.stats.textContent = statsParts.join(' • ');
+    }
     if (entry.ready) {
       ui.save?.removeAttribute('disabled');
     } else {
@@ -396,7 +422,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ivBytes: DEFAULT_IV_BYTES
       };
     }
-    Router.sendFrom(id, 'outgoing', header);
+    Router.sendFrom(id, 'packet', header);
     await sleep(10);
   }
 
@@ -432,7 +458,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ts: Date.now()
       };
       if (encMeta) chunkMessage.encryption = encMeta;
-      Router.sendFrom(id, 'outgoing', chunkMessage);
+      Router.sendFrom(id, 'packet', chunkMessage);
       sending.sentChunks = seq;
       updateSendUi(id, sending);
       emitStatus(id, {
@@ -458,7 +484,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       route: sending.route,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', message);
+    Router.sendFrom(id, 'packet', message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: sending.id,
@@ -479,7 +505,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       reason,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', message);
+    Router.sendFrom(id, 'packet', message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: st.sending.id,
@@ -524,7 +550,11 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         digest: data.checksum || '',
         createdAt: Date.now(),
         autoAccept: cfg.autoAccept !== false,
-        missingTries: 0
+        missingTries: 0,
+        receivedSet: new Set(),
+        outOfOrder: 0,
+        duplicates: 0,
+        expectedSeq: 1
       });
     }
     const entry = map.get(transferId);
@@ -536,6 +566,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
     if (data.route) entry.route = data.route;
     if (payload?.from) entry.from = payload.from;
     st.activeIncoming = transferId;
+    if (entry.totalChunks > 0 && entry.chunks.length !== entry.totalChunks) entry.chunks.length = entry.totalChunks;
     return entry;
   }
 
@@ -568,6 +599,21 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
   function handleIncomingHeader(id, data, payload) {
     const entry = ensureIncomingEntry(id, data, payload);
     entry.statusText = `Incoming ${entry.name} (${formatBytes(entry.size)})`;
+    const isFresh = !entry.receivedSet || entry.receivedSet.size === 0;
+    if (isFresh) {
+      entry.receivedSet = new Set();
+      entry.outOfOrder = 0;
+      entry.duplicates = 0;
+      entry.expectedSeq = 1;
+      entry.receivedCount = 0;
+      entry.ready = false;
+      entry.completed = false;
+      entry.resultBlob = null;
+      entry.resultBuffer = null;
+      entry.chunks = entry.totalChunks > 0 ? new Array(entry.totalChunks) : [];
+    } else if (entry.totalChunks > 0 && entry.chunks.length !== entry.totalChunks) {
+      entry.chunks.length = entry.totalChunks;
+    }
     emitStatus(id, {
       direction: 'incoming',
       transferId: entry.transferId,
@@ -578,6 +624,8 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       route: entry.route,
       encrypted: entry.encrypted,
       from: entry.from,
+      received: 0,
+      remaining: entry.totalChunks || undefined,
       ts: Date.now()
     });
     updateReceiveUi(id, entry);
@@ -590,8 +638,20 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
     if (!entry.totalChunks) entry.totalChunks = Number(data.totalChunks || data.total) || 0;
     if (!entry.size) entry.size = Number(data.size) || 0;
     if (!entry.chunkSize) entry.chunkSize = Number(data.chunkSize) || 0;
-    if (!entry.chunks[seq - 1]) entry.receivedCount += 1;
+    if (entry.totalChunks > 0 && entry.chunks.length !== entry.totalChunks) entry.chunks.length = entry.totalChunks;
+    entry.receivedSet = entry.receivedSet || new Set();
+    entry.outOfOrder = entry.outOfOrder || 0;
+    entry.duplicates = entry.duplicates || 0;
+    entry.expectedSeq = entry.expectedSeq || 1;
     entry.chunks[seq - 1] = { data: data.data, encryption: data.encryption || null };
+    if (entry.receivedSet.has(seq)) {
+      entry.duplicates += 1;
+    } else {
+      entry.receivedSet.add(seq);
+      entry.receivedCount = entry.receivedSet.size;
+      if (seq !== entry.expectedSeq) entry.outOfOrder += 1;
+      while (entry.receivedSet.has(entry.expectedSeq)) entry.expectedSeq += 1;
+    }
     entry.statusText = `Receiving chunk ${seq}/${entry.totalChunks}`;
     emitStatus(id, {
       direction: 'incoming',
@@ -599,8 +659,12 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       op: 'chunk',
       seq,
       totalChunks: entry.totalChunks,
-      progress: entry.receivedCount / entry.totalChunks,
+      progress: entry.totalChunks ? entry.receivedCount / entry.totalChunks : 0,
       from: entry.from,
+      received: entry.receivedCount,
+      remaining: entry.totalChunks ? Math.max(0, entry.totalChunks - entry.receivedCount) : undefined,
+      outOfOrder: entry.outOfOrder || 0,
+      duplicates: entry.duplicates || 0,
       ts: Date.now()
     });
     updateReceiveUi(id, entry);
@@ -672,7 +736,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ts: Date.now()
       };
       if (chunk.enc) message.encryption = chunk.enc;
-      Router.sendFrom(id, 'outgoing', JSON.stringify(message));
+      Router.sendFrom(id, 'packet', message);
     });
     emitStatus(id, {
       direction: 'outgoing',
@@ -692,7 +756,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       missing,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', message);
+    Router.sendFrom(id, 'packet', message);
     entry.missingTries += 1;
     emitStatus(id, {
       direction: 'incoming',
@@ -702,6 +766,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       tries: entry.missingTries,
       ts: Date.now()
     });
+    updateReceiveUi(id, entry);
   }
 
   async function assembleIncoming(id, entry) {
@@ -763,6 +828,10 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       transferId: entry.transferId,
       op: 'complete',
       size: offset,
+      totalChunks: entry.totalChunks,
+      received: entry.receivedCount,
+      outOfOrder: entry.outOfOrder || 0,
+      duplicates: entry.duplicates || 0,
       ts: Date.now()
     });
     Router.sendFrom(id, 'file', {
@@ -776,6 +845,10 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       buffer: entry.resultBuffer,
       blob: entry.resultBlob,
       encrypted: entry.encrypted,
+      totalChunks: entry.totalChunks,
+      receivedChunks: entry.receivedCount,
+      outOfOrder: entry.outOfOrder || 0,
+      duplicates: entry.duplicates || 0,
       ts: Date.now()
     });
   }
