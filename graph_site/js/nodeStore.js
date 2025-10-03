@@ -85,6 +85,12 @@ const NodeStore = {
         }
       ]
     },
+    FileTransfer: {
+      chunkSize: 1024,
+      autoAccept: true,
+      defaultKey: '',
+      preferRoute: ''
+    },
     TextDisplay: {
       text: ''
     },

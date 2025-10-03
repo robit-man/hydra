@@ -582,6 +582,12 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     if (typeof original?.graphId === 'string') payload.remoteGraphId = original.graphId;
     if (typeof original?.targetId === 'string') payload.targetComponentId = original.targetId;
     if (typeof original?.targetGraphId === 'string') payload.targetGraphId = original.targetGraphId;
+    const rawOut = normalized.parsed !== undefined && normalized.parsed !== null
+      ? normalized.parsed
+      : normalized.text;
+    if (rawOut !== undefined) {
+      Router.sendFrom(nodeId, 'raw', rawOut);
+    }
     Router.sendFrom(nodeId, 'incoming', payload);
   }
 

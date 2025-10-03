@@ -1514,6 +1514,83 @@ button.danger {
   background: rgba(255, 255, 255, 0.7);
 }
 
+.node .file-transfer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.node .file-transfer-send,
+.node .file-transfer-receive {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.node .file-drop {
+  border: 1px dashed rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  padding: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.node .file-drop:hover,
+.node .file-drop.dragover {
+  border-color: rgba(125, 255, 176, 0.8);
+  background: rgba(125, 255, 176, 0.08);
+}
+
+.node .file-progress {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  overflow: hidden;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.node .file-progress.hidden {
+  display: none;
+}
+
+.node .file-progress-bar {
+  position: relative;
+  height: 6px;
+  flex: 1 1 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.node .file-progress-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: var(--pct, 0%);
+  background: linear-gradient(90deg, rgba(125, 255, 176, 0.85), rgba(68, 188, 255, 0.85));
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+
+.node .file-transfer-info {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  white-space: pre-wrap;
+}
+
+.node .file-transfer-receive .tiny {
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .tts-volume input[type="range"] {
   -webkit-appearance: none;
   appearance: none;

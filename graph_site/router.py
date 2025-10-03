@@ -41,28 +41,6 @@ BIN_DIR = VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
 PY_BIN = BIN_DIR / ("python.exe" if os.name == "nt" else "python")
 PIP_BIN = BIN_DIR / ("pip.exe" if os.name == "nt" else "pip")
 
-# Accept any Python >= 3.9; try 3.9, then 3.10, 3.11, 3.12, 3.13
-MIN_VERSION = (3, 9)
-CANDIDATE_MINORS = list(range(9, 14))  # 3.9 .. 3.13
-
-def _cmd_version(cmd: List[str]) -> Optional[Tuple[int, int]]:
-    """Return (major, minor) for a python runner, or None if it can't run."""
-    try:
-        code = "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"
-        p = subprocess.run([*cmd, "-c", code], capture_output=True, text=True)
-        if p.returncode != 0:
-            return None
-        s = (p.stdout or "").strip()
-        parts = s.split(".")
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            return (int(parts[0]), int(parts[1]))
-        return None
-    except Exception:
-        return None
-
-def _meets_min(cmd: List[str], min_ver: Tuple[int, int] = MIN_VERSION) -> bool:
-    ver = _cmd_version(cmd)
-    return bool(ver and (ver >= min_ver))
 
 def _in_venv() -> bool:
     try:
@@ -70,84 +48,15 @@ def _in_venv() -> bool:
     except Exception:
         return False
 
-def _target_python_cmd() -> List[str]:
-    """
-    Choose a Python >=3.9 runner.
-    Order:
-      1) ROUTER_BOOTSTRAP_PY (if points to >=3.9)
-      2) On Windows, 'py -3' if >=3.9
-      3) Try 3.9→3.13 sequentially (Windows: 'py -3.x'; POSIX: 'python3.x' and common absolute paths)
-      4) 'python3' then 'python' if >=3.9
-      5) Current sys.executable if >=3.9
-      6) Else: exit with a clear message
-    """
-    # 1) Respect explicit override if it works; otherwise just ignore it (don't bail).
-    env_override = os.environ.get("ROUTER_BOOTSTRAP_PY", "").strip()
-    if env_override:
-        cmd = shlex.split(env_override)
-        if _meets_min(cmd):
-            return cmd
-
-    # 2) Windows launcher 'py'
-    if os.name == "nt" and shutil.which("py"):
-        if _meets_min(["py", "-3"]):
-            return ["py", "-3"]
-        for m in CANDIDATE_MINORS:
-            if _meets_min(["py", f"-3.{m}"]):
-                return ["py", f"-3.{m}"]
-
-    # 3) Try specific minor versions first (POSIX & Windows PATH)
-    posix_names: List[str] = []
-    for m in CANDIDATE_MINORS:
-        posix_names.extend([
-            f"python3.{m}",
-            f"/usr/local/bin/python3.{m}",
-            f"/opt/homebrew/bin/python3.{m}",
-            f"/usr/bin/python3.{m}",
-            f"/Library/Frameworks/Python.framework/Versions/3.{m}/bin/python3",
-        ])
-    for name in posix_names:
-        path = shutil.which(name) or (name if Path(name).exists() else "")
-        if path and _meets_min([path]):
-            return [path]
-
-    # 4) Generic 'python3' / 'python'
-    for name in ["python3", "python"]:
-        path = shutil.which(name)
-        if path and _meets_min([path]):
-            return [path]
-
-    # 5) Current interpreter as a last resort
-    if _meets_min([sys.executable]):
-        return [sys.executable]
-
-    # 6) Nothing usable found
-    raise SystemExit(
-        "Python ≥ 3.9 is required. Install one (e.g., `py -3.11` on Windows; "
-        "`brew install python@3.11` on macOS; `apt-get install python3.11` on Debian/Ubuntu) "
-        "or set ROUTER_BOOTSTRAP_PY to a suitable interpreter."
-    )
 
 def _ensure_venv() -> None:
-    # If venv exists, only reuse if its interpreter meets the minimum
-    if VENV_DIR.exists() and PY_BIN.exists():
-        if _meets_min([str(PY_BIN)]):
-            return
-        shutil.rmtree(VENV_DIR, ignore_errors=True)
+    if VENV_DIR.exists():
+        return
+    import venv
 
-    # Create venv with the selected interpreter
-    py_cmd = _target_python_cmd()
-    chosen_ver = _cmd_version(py_cmd)
-    try:
-        print(f"→ using Python {chosen_ver[0]}.{chosen_ver[1]} to build {VENV_DIR}", flush=True)
-    except Exception:
-        pass
-    subprocess.check_call([*py_cmd, "-m", "venv", str(VENV_DIR)])
-    # Ensure pip/setuptools/wheel are present & up to date in the venv
-    subprocess.check_call(
-        [str(PY_BIN), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
-        cwd=BASE_DIR,
-    )
+    venv.EnvBuilder(with_pip=True).create(VENV_DIR)
+    subprocess.check_call([str(PY_BIN), "-m", "pip", "install", "--upgrade", "pip"], cwd=BASE_DIR)
+
 
 def _ensure_deps() -> None:
     need = []
@@ -162,28 +71,12 @@ def _ensure_deps() -> None:
     if need:
         subprocess.check_call([str(PIP_BIN), "install", *need], cwd=BASE_DIR)
 
-# If we're already inside the router venv but it's too old, we can't rebuild it from within itself.
-# Tell the user what to do instead of failing mysteriously.
-if _in_venv() and not _meets_min([sys.executable]):
-    raise SystemExit(
-        f"Existing {VENV_DIR} uses an older Python. Delete that directory or set ROUTER_BOOTSTRAP_PY "
-        "to a Python ≥ 3.9 and rerun."
-    )
 
 if not _in_venv():
     _ensure_venv()
     os.execv(str(PY_BIN), [str(PY_BIN), *sys.argv])
 
 _ensure_deps()
-
-import requests  # type: ignore
-import qrcode  # type: ignore
-
-try:
-    import curses  # type: ignore
-except Exception:  # pragma: no cover
-    curses = None
-
 
 import requests  # type: ignore
 import qrcode  # type: ignore

@@ -14,6 +14,7 @@ import { createMCP } from './mcp.js';
 import { createMediaNode } from './mediaNode.js';
 import { createOrientationNode } from './orientation.js';
 import { createLocationNode } from './location.js';
+import { createFileTransfer } from './fileTransfer.js';
 import { createWorkspaceSync } from './workspaceSync.js';
 import { createGraph } from './graph.js';
 import { createFlowsLibrary } from './flows.js';
@@ -110,6 +111,14 @@ const LocationNode = createLocationNode({
   log
 });
 
+const FileTransfer = createFileTransfer({
+  getNode: (id) => graphAccess.getNode(id),
+  NodeStore,
+  Router,
+  log,
+  setBadge
+});
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -127,7 +136,8 @@ const Graph = createGraph({
   openQrScanner,
   closeQrScanner,
   registerQrResultHandler,
-  updateTransportButton
+  updateTransportButton,
+  FileTransfer
 });
 
 graphAccess.getNode = (id) => Graph.getNode(id);

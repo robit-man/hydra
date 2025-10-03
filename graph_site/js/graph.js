@@ -10,6 +10,7 @@ function createGraph({
   Media,
   Orientation,
   Location,
+  FileTransfer,
   MCP,
   Net,
   CFG,
@@ -621,6 +622,11 @@ function refreshNodeResolution(force = false) {
       if (portName === 'text') return NknDM.onText(node.id, payload);
       return;
     }
+    if (node.type === 'FileTransfer') {
+      if (portName === 'incoming') return FileTransfer.onIncoming(node.id, payload);
+      if (portName === 'file') return FileTransfer.onFilePayload(node.id, payload);
+      return;
+    }
     if (node.type === 'MCP') {
       if (portName === 'query') return MCP.onQuery(node.id, payload);
       if (portName === 'tool') return MCP.onTool(node.id, payload);
@@ -1201,6 +1207,36 @@ function refreshNodeResolution(force = false) {
         ${node.type === 'LogicGate' ? `
           <div class="muted" style="margin-top:6px;">Rules</div>
           <div class="logic-gate-list" data-logic-gate></div>
+        ` : ''}
+        ${node.type === 'FileTransfer' ? `
+          <div class="file-transfer">
+            <div class="file-transfer-send">
+              <div class="file-drop" data-ft-drop>
+                <input type="file" data-ft-input hidden>
+                <span data-ft-drop-label>Drop file or click to select</span>
+              </div>
+              <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap;">
+                <input type="text" data-ft-route class="input" placeholder="Route (optional)" style="flex:1 1 160px;">
+                <input type="password" data-ft-pass class="input" placeholder="Passphrase (optional)" autocomplete="new-password" style="flex:1 1 160px;">
+              </div>
+              <div class="row" style="margin-top:8px;gap:8px;">
+                <button type="button" class="secondary" data-ft-send disabled>Send</button>
+                <button type="button" class="ghost" data-ft-cancel hidden>Cancel</button>
+              </div>
+              <div class="file-progress hidden" data-ft-progress>
+                <div class="file-progress-bar" data-ft-progress-bar></div>
+                <div class="tiny" data-ft-progress-text>0%</div>
+              </div>
+            </div>
+            <div class="file-transfer-receive">
+              <div class="tiny" data-ft-status>Waiting for file…</div>
+              <div class="file-transfer-info" data-ft-info></div>
+              <div class="row" style="margin-top:8px;gap:8px;">
+                <button type="button" class="ghost" data-ft-save disabled>Save File</button>
+                <button type="button" class="ghost" data-ft-clear disabled>Clear</button>
+              </div>
+            </div>
+          </div>
         ` : ''}
         ${node.type === 'ImageInput' ? `
           <div class="image-input" style="margin-top:6px;">
@@ -2124,6 +2160,7 @@ function refreshNodeResolution(force = false) {
       if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
       if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
       if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
+      if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
     }
     for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
     requestRedraw();
@@ -2332,6 +2369,17 @@ function refreshNodeResolution(force = false) {
       outputs: [],
       schema: [
         { key: 'rules', label: 'Logic Rules', type: 'logicRules' }
+      ]
+    },
+    FileTransfer: {
+      title: 'File Transfer',
+      inputs: [{ name: 'incoming', label: 'Incoming DM' }, { name: 'file', label: 'File Input' }],
+      outputs: [{ name: 'outgoing', label: 'DM Out' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
+      schema: [
+        { key: 'chunkSize', label: 'Chunk Size (bytes)', type: 'number', def: 1024 },
+        { key: 'autoAccept', label: 'Auto-accept incoming', type: 'select', options: ['true', 'false'], def: 'true' },
+        { key: 'defaultKey', label: 'Default Passphrase', type: 'text', placeholder: '(optional shared key)' },
+        { key: 'preferRoute', label: 'Default Route Tag', type: 'text', placeholder: 'optional route identifier' }
       ]
     },
     NknDM: {
@@ -4215,6 +4263,7 @@ function refreshNodeResolution(force = false) {
     if (type === 'MediaStream') requestAnimationFrame(() => Media.init(id));
     if (type === 'Orientation') requestAnimationFrame(() => Orientation.init(id));
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
+    if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
     if (opts.select) setSelectedNode(id, { focus: true });
     saveGraph();
     requestRedraw();
@@ -4249,6 +4298,9 @@ function refreshNodeResolution(force = false) {
     }
     if (node.type === 'MediaStream') {
       Media.dispose(nodeId);
+    }
+    if (node.type === 'FileTransfer') {
+      FileTransfer.dispose(nodeId);
     }
     if (node.type === 'Orientation') {
       Orientation.dispose(nodeId);
@@ -4286,6 +4338,7 @@ function refreshNodeResolution(force = false) {
       { type: 'LogicGate', label: 'Logic Gate', x: 520, y: 260 },
       { type: 'ImageInput', label: 'Image Input', x: 600, y: 220 },
       { type: 'NknDM', label: 'NKN DM', x: 720, y: 140 },
+      { type: 'FileTransfer', label: 'File Transfer', x: 780, y: 200 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
       { type: 'Orientation', label: 'Orientation', x: 220, y: 260 },
