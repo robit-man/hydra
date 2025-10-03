@@ -57,7 +57,6 @@ function createMCP({
       const cfg = NodeStore.ensure(nodeId, 'MCP').config || {};
       const relay = (cfg.relay || '').trim();
       if (!relay) return;
-      if (CFG.transport !== 'nkn') return;
       if (state.status === 'ready') {
         setRelayState(nodeId, { state: 'ok', message: 'Server ready' });
       } else if (state.status === 'error') {
@@ -158,8 +157,8 @@ function createMCP({
       if (!quiet) setBadge('Configure MCP base URL', false);
       return null;
     }
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
     updateStatus(nodeId, { status: 'loading', lastError: null });
@@ -253,8 +252,8 @@ function createMCP({
       return;
     }
 
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
 
@@ -381,8 +380,8 @@ function createMCP({
       return;
     }
 
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
 

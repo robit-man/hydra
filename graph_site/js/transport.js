@@ -15,10 +15,12 @@ function makeTransportButtonUpdater({ CFG, Net }) {
       label.textContent = 'NKN';
       if (Net?.nkn?.ready) {
         dot.classList.add('ok');
-        btn.title = Net.nkn.addr || 'NKN relay address';
+        btn.title = Net.nkn.addr
+          ? `Hybrid mode: HTTP for local endpoints, NKN relay ${Net.nkn.addr}`
+          : 'Hybrid mode: HTTP for local endpoints, NKN relay ready';
       } else {
         dot.classList.add(Net?.nkn?.client ? 'warn' : 'err');
-        btn.title = 'NKN relay connecting';
+        btn.title = 'Hybrid mode: initializing NKN relay';
       }
     } else {
       btn.classList.remove('active');

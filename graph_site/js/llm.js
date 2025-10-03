@@ -236,8 +236,8 @@ function createLLM({
     const cfg = rec?.config || {};
     const base = (cfg.base || '').trim();
     if (!base) return null;
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
 
     const promise = Net.postJSON(base.replace(/\/+$/, ''), '/api/show', { name: modelId }, api, viaNkn, relay)
@@ -313,8 +313,8 @@ function createLLM({
         throw err;
       }
     }
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const task = (async () => {
       const list = await fetchModelMetadataList(base, api, viaNkn, relay);
@@ -372,14 +372,14 @@ function createLLM({
     const api = (cfg.api || '').trim();
     const relay = (cfg.relay || '').trim();
     const model = (cfg.model || '').trim();
-    const viaNkn = CFG.transport === 'nkn';
+    const viaNkn = !!relay;
     const stream = !!cfg.stream;
     const sysUse = !!cfg.useSystem;
     const sysTxt = (cfg.system || '').trim();
     const memOn = !!cfg.memoryOn;
     const persist = !!cfg.persistMemory;
     const maxTurns = Number.isFinite(cfg.maxTurns) ? cfg.maxTurns : 16;
-    const usingNkn = viaNkn && !!relay;
+    const usingNkn = viaNkn;
     const updateRelayState = (state, message) => {
       if (!usingNkn) return;
       setRelayState(nodeId, { state, message });

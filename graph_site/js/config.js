@@ -14,12 +14,21 @@ function generateGraphId() {
 }
 
 const CFG = LS.get('graph.cfg', {
-  transport: 'http',
+  transport: 'nkn',
   wires: []
 });
 
 if (!CFG.graphId) {
   CFG.graphId = generateGraphId();
+  try {
+    LS.set('graph.cfg', CFG);
+  } catch (err) {
+    // ignore store failures
+  }
+}
+
+if (CFG.transport !== 'nkn') {
+  CFG.transport = 'nkn';
   try {
     LS.set('graph.cfg', CFG);
   } catch (err) {

@@ -118,8 +118,8 @@ function createASR({
     }
     if (!force && MODEL_METADATA.has(nodeId)) return MODEL_METADATA.get(nodeId);
     if (MODEL_PROMISE.has(nodeId)) return MODEL_PROMISE.get(nodeId);
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const task = (async () => {
       const list = await fetchModelMetadata(base, api, viaNkn, relay);
@@ -644,9 +644,9 @@ function createASR({
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
       this._live = !!cfg.live;
-      this._viaNkn = CFG.transport === 'nkn';
-      this._base = cfg.base || '';
-      this._relay = cfg.relay || '';
+      this._base = (cfg.base || '').trim();
+      this._relay = (cfg.relay || '').trim();
+      this._viaNkn = !!this._relay;
       this._api = cfg.api || '';
       this._relayStatus('warn', 'Initializing session');
       this._sawSpeech = false;

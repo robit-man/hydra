@@ -161,29 +161,17 @@ let graphDragDepth = 0;
 function bindUI() {
   const toggle = qs('#transportToggle');
   if (toggle) {
-    toggle.addEventListener('click', () => {
-      if (CFG.transport === 'nkn') {
-        CFG.transport = 'http';
-        try {
-          Net.nkn.client && Net.nkn.client.close();
-        } catch (err) {
-          // ignore
-        }
-        Net.nkn.client = null;
-        Net.nkn.ready = false;
-        Net.nkn.addr = '';
-        saveCFG();
-        updateTransportButton();
-        setBadge('HTTP mode');
-      } else {
-        CFG.transport = 'nkn';
-        saveCFG();
-        updateTransportButton();
-        Net.ensureNkn();
-        setBadge('Connecting via NKN…');
-      }
+    toggle.classList.add('transport-locked');
+    toggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      setBadge('Hybrid transport: HTTP for local endpoints, NKN for relays');
     });
   }
+  if (CFG.transport !== 'nkn') {
+    CFG.transport = 'nkn';
+    saveCFG();
+  }
+  Net.ensureNkn();
   updateTransportButton();
 }
 

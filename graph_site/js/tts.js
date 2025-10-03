@@ -143,8 +143,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     if (MODEL_PROMISE.has(nodeId)) {
       return MODEL_PROMISE.get(nodeId);
     }
-    const viaNkn = CFG.transport === 'nkn';
     const relay = (cfg.relay || '').trim();
+    const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const task = (async () => {
       const list = await fetchModelMetadata(base, api, viaNkn, relay);
@@ -500,9 +500,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const api = (cfg.api || '').trim();
     const relay = (cfg.relay || '').trim();
     const model = (cfg.model || '').trim();
-    const viaNkn = CFG.transport === 'nkn';
+    const viaNkn = !!relay;
     const mode = cfg.mode || 'stream';
-    const usingNkn = viaNkn && !!relay;
+    const usingNkn = viaNkn;
     const updateRelayState = (state, message) => {
       if (!usingNkn) return;
       setRelayState(nodeId, { state, message });

@@ -321,6 +321,10 @@ header {
   transition: background .2s ease, color .2s ease, border .2s ease, box-shadow .2s ease;
 }
 
+.transport-btn.transport-locked {
+  cursor: default;
+}
+
 .transport-btn .dot {
   width: 10px;
   height: 10px;

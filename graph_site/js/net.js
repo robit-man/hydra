@@ -60,7 +60,6 @@ const Net = {
   },
 
   ensureNkn() {
-    if (CFG.transport !== 'nkn') return;
     if (this.nkn.client) return;
     if (!window.nkn || !window.nkn.MultiClient) {
       setBadge('nkn-sdk missing', false);

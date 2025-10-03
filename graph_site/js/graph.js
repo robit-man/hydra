@@ -2039,7 +2039,7 @@ function refreshNodeResolution(force = false) {
         y: Math.round(WS.view.y),
         scale: Number(WS.view.scale.toFixed(4))
       },
-      transport: CFG.transport === 'nkn' ? 'nkn' : 'http'
+      transport: 'nkn'
     };
     for (const n of WS.nodes.values()) {
       const rec = NodeStore.load(n.id);
@@ -2085,15 +2085,12 @@ function refreshNodeResolution(force = false) {
       applyViewTransform();
     }
 
-    if (typeof data.transport === 'string') {
-      const nextTransport = data.transport === 'nkn' ? 'nkn' : 'http';
-      if (CFG.transport !== nextTransport) {
-        CFG.transport = nextTransport;
-        saveCFG();
-        updateTransportButton();
-        if (CFG.transport === 'nkn') Net.ensureNkn();
-      }
+    if (CFG.transport !== 'nkn') {
+      CFG.transport = 'nkn';
+      saveCFG();
     }
+    Net.ensureNkn();
+    updateTransportButton();
 
     for (const n of (data.nodes || [])) {
       const node = {
@@ -3932,10 +3929,10 @@ function refreshNodeResolution(force = false) {
           select.value = '';
           (async () => {
             try {
-              const viaNkn = CFG.transport === 'nkn';
               const base = cfg.base || '';
               const api = cfg.api || '';
               const relay = cfg.relay || '';
+              const viaNkn = !!relay;
               const list = node.type === 'LLM'
                 ? await discoverLLMModels(base, api, viaNkn, relay)
                 : node.type === 'TTS'
