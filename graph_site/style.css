@@ -63,15 +63,20 @@ body.graph-drop-hover::before {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   pointer-events: none;
-  opacity:1;
+  opacity: 1;
   animation: fadeIn 0.3s ease 1;
 }
 
 @keyframes fadeIn {
-  from {opacity:0;  backdrop-filter: blur(0px);
-}
-  to {opacity:1;  backdrop-filter: blur(20px);
-}
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0px);
+  }
+
+  to {
+    opacity: 1;
+    backdrop-filter: blur(20px);
+  }
 }
 
 main {
@@ -84,13 +89,13 @@ main {
   -webkit-appearance: none;
   width: 100%;
   height: 1px;
-  background:#555;
+  background: #555;
   outline: none;
   border-radius: 1rem;
   opacity: 1;
   -webkit-transition: .2s;
   transition: opacity .2s;
-  transition:background 0.2s ease;
+  transition: background 0.2s ease;
 }
 
 .slider:hover {
@@ -105,7 +110,8 @@ main {
   border-radius: 1rem;
   border: 2px solid #555;
   background: #000000;
-  cursor: pointer;  transition:background 0.2s ease;
+  cursor: pointer;
+  transition: background 0.2s ease;
 
 }
 
@@ -114,7 +120,7 @@ main {
   -webkit-appearance: none;
   width: 100%;
   height: 1px;
-  background:#aaa;
+  background: #aaa;
   outline: none;
   border-radius: 1rem;
   opacity: 1;
@@ -130,7 +136,8 @@ main {
   border-radius: 1rem;
   border: 2px solid #fff;
   background: #000000;
-  cursor: pointer;  transition:background 0.2s ease;
+  cursor: pointer;
+  transition: background 0.2s ease;
 
 }
 
@@ -142,7 +149,8 @@ main {
   border-radius: 1rem;
   border: 2px solid #fff;
   background: #000000;
-  cursor: pointer;  transition:background 0.2s ease;
+  cursor: pointer;
+  transition: background 0.2s ease;
 
 }
 
@@ -308,9 +316,9 @@ header {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-flow:row-reverse;
+  flex-flow: row-reverse;
   gap: 8px;
-  height:34px;
+  height: 34px;
   padding: 10px 12px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, .25);
@@ -337,13 +345,11 @@ header {
   box-shadow: 0 0 18px rgba(255, 255, 255, 0.25);
 }
 
-.router-download button{
-  border:1px solid white;
+.router-download button {
+  border: 1px solid white;
 }
 
-@media screen and (max-width:740px) {
-
-}
+@media screen and (max-width:740px) {}
 
 @media(max-width: 640px) {
   .brand-text {
@@ -446,15 +452,16 @@ option {
 }
 
 @keyframes emit {
-  0%{
-  box-shadow: 0 0 0px 0px #7dffb0;
+  0% {
+    box-shadow: 0 0 0px 0px #7dffb0;
 
   }
-  100%{
-  box-shadow: 0 0 20px 5px #7dffb000;
+
+  100% {
+    box-shadow: 0 0 20px 5px #7dffb000;
 
   }
-  
+
 }
 
 .dot.warn {
@@ -1020,7 +1027,7 @@ button.danger {
 }
 
 #graphCard {
-  background-image: radial-gradient(at bottom right, #040a10, #05080c),radial-gradient(at bottom left, #07111b, #121b27);
+  background-image: radial-gradient(at bottom right, #040a10, #05080c), radial-gradient(at bottom left, #07111b, #121b27);
 }
 
 #linksSvg {
@@ -1079,6 +1086,10 @@ button.danger {
   background-image: radial-gradient(at bottom center, #0f21, transparent);
 }
 
+.node.selected {
+  z-index: 4;
+}
+
 .node.selected .body::after {
   content: '';
   pointer-events: none;
@@ -1094,6 +1105,7 @@ button.danger {
   animation: glow 2s ease infinite;
   background-image: radial-gradient(at bottom center, #0fa1, transparent);
 }
+
 .node .body::after {
   content: '';
   pointer-events: none;
@@ -1109,11 +1121,20 @@ button.danger {
   transition: opacity 0.5s ease;
   background-image: radial-gradient(at bottom center, #0fa1, transparent);
 }
+
 @keyframes glow {
-  0%{opacity: 1;}
-  50%{opacity: 0.5;}
-  100%{opacity: 1;}
-  
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+
+  100% {
+    opacity: 1;
+  }
+
 }
 
 .node:active {
@@ -1130,6 +1151,7 @@ button.danger {
   -webkit-user-select: text;
   touch-action: manipulation;
 }
+
 .node__frame {
   border-radius: 14px;
   box-sizing: border-box;
@@ -1139,14 +1161,14 @@ button.danger {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  padding:1px;
+  padding: 1px;
 }
 
-.node__frame > .head {
+.node__frame>.head {
   flex: 0 0 auto;
 }
 
-.node__frame > .body {
+.node__frame>.body {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -1154,7 +1176,9 @@ button.danger {
 /* hide ::after when .node < 260px wide */
 @container node (max-width: 300px) {
 
-  .node__frame { clip-path: none !important; }
+  .node__frame {
+    clip-path: none !important;
+  }
 
   .node .head::before {
     display: none !important;
@@ -1223,7 +1247,7 @@ button.danger {
   background-position: top left;
   background-repeat: no-repeat;
   transform-origin: top left;
-  top:0px;
+  top: 0px;
   transform: scale(100%);
   background-image: url('/img/left.svg');
   height: 40px;
@@ -1237,7 +1261,7 @@ button.danger {
   background-repeat: no-repeat;
   width: 80px;
   transform-origin: top right;
-  top:0px;
+  top: 0px;
   transform: scale(100%);
   background-image: url('/img/right.svg');
   background-size: contain;
@@ -1389,9 +1413,10 @@ button.danger {
   padding: 10px;
   border: 1px solid rgba(255, 255, 255, 1);
   border-top-width: 0px !important;
-  cursor:grab;
+  cursor: grab;
 }
-.node .body *{
+
+.node .body * {
   cursor: initial;
 }
 
@@ -1524,7 +1549,7 @@ button.danger {
 
 .asr-partial-row {
   font-size: 12px;
-  margin-bottom:6px;
+  margin-bottom: 6px;
 }
 
 .asr-partial-row [data-asr-partial-flag] {
