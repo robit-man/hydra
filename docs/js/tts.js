@@ -99,6 +99,58 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     if (next) setActiveState(nodeId, st, false);
   };
 
+  async function streamHttpNdjson(url, options, onEvent) {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      let detail = '';
+      try {
+        detail = await res.text();
+      } catch (err) {
+        detail = '';
+      }
+      const msg = detail ? `${res.status} ${res.statusText}: ${detail}` : `${res.status} ${res.statusText}`;
+      throw new Error(msg);
+    }
+    if (!res.body) {
+      try {
+        const obj = await res.json();
+        if (obj) onEvent?.(obj);
+      } catch (err) {
+        // ignore
+      }
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf('\n');
+      while (idx >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (line) {
+          try {
+            onEvent?.(JSON.parse(line));
+          } catch (err) {
+            // ignore
+          }
+        }
+        idx = buffer.indexOf('\n');
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        onEvent?.(JSON.parse(tail));
+      } catch (err) {
+        // ignore trailing fragment
+      }
+    }
+  }
+
   function normalizeModelEntry(raw) {
     if (raw == null) return null;
     if (typeof raw === 'string') {
@@ -262,6 +314,96 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   function getModelInfo(nodeId, modelId) {
     const models = listModels(nodeId);
     return models.find((item) => item.id === modelId) || null;
+  }
+
+  async function pullModel(nodeId, params = {}) {
+    const { onnxJsonUrl, onnxModelUrl, name, override = null, onEvent, signal } = params || {};
+    const jsonUrl = String(onnxJsonUrl || '').trim();
+    const modelUrl = String(onnxModelUrl || '').trim();
+    if (!jsonUrl || !modelUrl) throw new Error('Both JSON and ONNX URLs are required');
+
+    const rec = NodeStore.ensure(nodeId, 'TTS');
+    const cfg = rec?.config || {};
+    const effective = Object.assign({}, cfg, override || {});
+    const base = String(effective.base || '').trim();
+    if (!base) throw new Error('Base URL is required');
+    const relay = String(effective.relay || '').trim();
+    const api = String(effective.api || '').trim();
+    const viaNkn = !!relay;
+
+    const body = {
+      onnx_json_url: jsonUrl,
+      onnx_model_url: modelUrl
+    };
+    const trimmedName = String(name || '').trim();
+    if (trimmedName) body.name = trimmedName;
+
+    let success = false;
+    let lastError = null;
+    const handleEvent = (evt) => {
+      if (!evt || typeof evt !== 'object') return;
+      try { onEvent?.(evt); } catch (err) { /* ignore */ }
+      if (typeof evt.status === 'string') {
+        const status = evt.status.toLowerCase();
+        if (status === 'success') success = true;
+        if (status === 'error' && !lastError) lastError = evt.error || evt.message || 'Pull failed';
+      }
+      if (evt.error && !lastError) lastError = evt.error;
+    };
+
+    const baseUrl = base.replace(/\/+$/, '');
+    const timeout = 10 * 60 * 1000;
+
+    if (viaNkn) {
+      const headers = Net.auth({ 'X-Relay-Stream': 'lines' }, api);
+      await Net.nknStream(
+        {
+          url: `${baseUrl}/models/pull`,
+          method: 'POST',
+          headers,
+          json: body,
+          stream: 'lines',
+          timeout_ms: timeout
+        },
+        relay,
+        {
+          onLine: (line) => {
+            if (!line) return;
+            try {
+              handleEvent(JSON.parse(line));
+            } catch (err) {
+              // ignore
+            }
+          },
+          onError: (err) => {
+            if (!lastError) lastError = err?.message || String(err || 'Pull failed');
+          },
+          onEnd: (meta) => {
+            try {
+              if (meta && meta.json) handleEvent(meta.json);
+            } catch (err) {
+              // ignore
+            }
+          }
+        },
+        timeout
+      );
+    } else {
+      const headers = Net.auth({ Accept: 'application/x-ndjson', 'Content-Type': 'application/json' }, api);
+      await streamHttpNdjson(
+        `${baseUrl}/models/pull`,
+        { method: 'POST', headers, body: JSON.stringify(body), signal },
+        handleEvent
+      );
+    }
+
+    if (!success) {
+      const message = lastError || 'Voice pull did not complete';
+      throw new Error(message);
+    }
+
+    await ensureModelMetadata(nodeId, cfg, { force: true, override });
+    return { ok: true };
   }
 
   function refreshModels(nodeId, override = null, options = {}) {
@@ -810,6 +952,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     ensureModels,
     listModels,
     getModelInfo,
+    pullModel,
     refreshModels,
     subscribeModels,
     dispose,

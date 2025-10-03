@@ -4031,6 +4031,173 @@ function refreshNodeResolution(force = false) {
             showStatus(`Failed to load models: ${err?.message || err}`);
           };
 
+          if (node.type === 'LLM') {
+            const pullWrap = document.createElement('div');
+            pullWrap.className = 'model-pull llm';
+            const pullInput = document.createElement('input');
+            pullInput.type = 'text';
+            pullInput.placeholder = 'Model to pull (e.g. llama3.2)';
+            pullInput.className = 'model-pull-input';
+            const pullButton = document.createElement('button');
+            pullButton.type = 'button';
+            pullButton.className = 'model-pull-button';
+            pullButton.textContent = 'Pull model';
+            pullButton.disabled = true;
+            const pullLog = document.createElement('pre');
+            pullLog.className = 'model-pull-log';
+            pullLog.textContent = '';
+            pullWrap.appendChild(pullInput);
+            pullWrap.appendChild(pullButton);
+            pullWrap.appendChild(pullLog);
+            wrapper.appendChild(pullWrap);
+
+            pullInput.addEventListener('input', () => {
+              pullButton.disabled = !pullInput.value.trim();
+            });
+
+            pullButton.addEventListener('click', async () => {
+              if (!pullInput.value.trim()) return;
+              if (typeof modelProvider.pullModel !== 'function') {
+                pullLog.textContent = 'Pull unsupported for this provider\n';
+                return;
+              }
+              const override = buildOverrideConfig({ mutateRelay: true });
+              pullButton.disabled = true;
+              pullInput.disabled = true;
+              pullLog.textContent = '';
+              try {
+                await modelProvider.pullModel?.(node.id, {
+                  model: pullInput.value.trim(),
+                  override,
+                  onEvent: (evt) => {
+                    if (!evt || typeof evt !== 'object') return;
+                    const status = evt.status || evt.message || '';
+                    const total = Number(evt.total || 0);
+                    const completed = Number(evt.completed || 0);
+                    let line = status || JSON.stringify(evt);
+                    if (total > 0 && completed >= 0) {
+                      const pct = Math.min(100, Math.round((completed / total) * 100));
+                      if (Number.isFinite(pct)) line = `${line} (${pct}%)`;
+                    }
+                    pullLog.textContent += `${line}\n`;
+                    pullLog.scrollTop = pullLog.scrollHeight;
+                  }
+                });
+                pullLog.textContent += 'Pull complete\n';
+                await modelProvider.refreshModels?.(node.id, override, { force: true });
+                renderButtons();
+              } catch (err) {
+                const msg = err?.message || err || 'Pull failed';
+                pullLog.textContent += `Error: ${msg}\n`;
+              } finally {
+                pullInput.disabled = false;
+                pullButton.disabled = !pullInput.value.trim();
+              }
+            });
+          } else if (node.type === 'TTS') {
+            const pullToggle = document.createElement('button');
+            pullToggle.type = 'button';
+            pullToggle.className = 'model-pull-toggle';
+            pullToggle.textContent = 'Pull voice model';
+            pullToggle.setAttribute('aria-expanded', 'false');
+            const pullForm = document.createElement('div');
+            pullForm.className = 'model-pull-form hidden';
+            const jsonInput = document.createElement('input');
+            jsonInput.type = 'url';
+            jsonInput.placeholder = 'Voice manifest (.onnx.json) URL';
+            jsonInput.className = 'model-pull-input';
+            const modelInput = document.createElement('input');
+            modelInput.type = 'url';
+            modelInput.placeholder = 'Voice model (.onnx) URL';
+            modelInput.className = 'model-pull-input';
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.placeholder = 'Optional voice name';
+            nameInput.className = 'model-pull-input';
+            const pullAction = document.createElement('button');
+            pullAction.type = 'button';
+            pullAction.className = 'model-pull-button';
+            pullAction.textContent = 'Download voice';
+            pullAction.disabled = true;
+            const pullLog = document.createElement('pre');
+            pullLog.className = 'model-pull-log';
+            pullLog.textContent = '';
+
+            pullForm.appendChild(jsonInput);
+            pullForm.appendChild(modelInput);
+            pullForm.appendChild(nameInput);
+            pullForm.appendChild(pullAction);
+            pullForm.appendChild(pullLog);
+
+            wrapper.appendChild(pullToggle);
+            wrapper.appendChild(pullForm);
+
+            const updateToggleState = () => {
+              const active = !pullForm.classList.contains('hidden');
+              pullToggle.setAttribute('aria-expanded', active ? 'true' : 'false');
+            };
+
+            pullToggle.addEventListener('click', () => {
+              pullForm.classList.toggle('hidden');
+              updateToggleState();
+            });
+
+            const updateActionState = () => {
+              pullAction.disabled = !(jsonInput.value.trim() && modelInput.value.trim());
+            };
+
+            jsonInput.addEventListener('input', updateActionState);
+            modelInput.addEventListener('input', updateActionState);
+
+            pullAction.addEventListener('click', async () => {
+              if (!jsonInput.value.trim() || !modelInput.value.trim()) return;
+              if (typeof modelProvider.pullModel !== 'function') {
+                pullLog.textContent = 'Pull unsupported for this provider\n';
+                return;
+              }
+              const override = buildOverrideConfig({ mutateRelay: true });
+              pullAction.disabled = true;
+              jsonInput.disabled = true;
+              modelInput.disabled = true;
+              nameInput.disabled = true;
+              pullLog.textContent = '';
+              try {
+                await modelProvider.pullModel?.(node.id, {
+                  onnxJsonUrl: jsonInput.value.trim(),
+                  onnxModelUrl: modelInput.value.trim(),
+                  name: nameInput.value.trim(),
+                  override,
+                  onEvent: (evt) => {
+                    if (!evt || typeof evt !== 'object') return;
+                    const status = evt.status || evt.message || '';
+                    const total = Number(evt.total || 0);
+                    const completed = Number(evt.completed || 0);
+                    let line = status || JSON.stringify(evt);
+                    if (total > 0 && completed >= 0) {
+                      const pct = Math.min(100, Math.round((completed / total) * 100));
+                      if (Number.isFinite(pct)) line = `${line} (${pct}%)`;
+                    }
+                    pullLog.textContent += `${line}\n`;
+                    pullLog.scrollTop = pullLog.scrollHeight;
+                  }
+                });
+                pullLog.textContent += 'Pull complete\n';
+                await modelProvider.refreshModels?.(node.id, override, { force: true });
+                renderButtons();
+              } catch (err) {
+                const msg = err?.message || err || 'Pull failed';
+                pullLog.textContent += `Error: ${msg}\n`;
+              } finally {
+                jsonInput.disabled = false;
+                modelInput.disabled = false;
+                nameInput.disabled = false;
+                updateActionState();
+              }
+            });
+
+            updateToggleState();
+          }
+
           if (typeof modelProvider.subscribeModels === 'function') {
             settingsModelSubscription = modelProvider.subscribeModels(node.id, () => {
               const models = modelProvider.listModels?.(node.id) || [];
