@@ -90,6 +90,27 @@ function createASR({
     return { id, label, raw };
   }
 
+  function resolveEndpointConfig(baseCfg, override = null) {
+    const effective = Object.assign({}, baseCfg || {}, override || {});
+    const base = String(effective.base || '').trim();
+    const relayRaw = String(effective.relay || '').trim();
+    const api = String(effective.api || '').trim();
+    const mode = String(effective.endpointMode || 'auto').toLowerCase();
+    const hasRelay = !!relayRaw;
+    let useRelay = false;
+    if (mode === 'remote') useRelay = hasRelay;
+    else if (mode === 'auto') useRelay = hasRelay;
+    else useRelay = false;
+    return {
+      base,
+      api,
+      relay: useRelay ? relayRaw : '',
+      rawRelay: relayRaw,
+      viaNkn: useRelay && hasRelay,
+      mode
+    };
+  }
+
   const makeCacheKey = (nodeId, base, relay, api) => `${nodeId}::${base}::${relay}::${api}`;
 
   const getCachedMeta = (nodeId) => MODEL_CACHE.get(nodeId) || null;
@@ -126,11 +147,10 @@ function createASR({
       try {
         const rec = NodeStore.ensure(nodeId, 'ASR');
         const cfg = rec?.config || {};
-        const cfgBase = String(cfg.base || '').trim();
-        const cfgRelay = String(cfg.relay || '').trim();
-        const cfgApi = String(cfg.api || '').trim();
-        const override = (entry.base !== cfgBase || entry.relay !== cfgRelay || entry.api !== cfgApi)
-          ? { base: entry.base, relay: entry.relay, api: entry.api }
+        const endpoint = resolveEndpointConfig(cfg);
+        const needsOverride = entry.base !== endpoint.base || entry.relay !== endpoint.relay || entry.api !== endpoint.api || (entry.mode || 'auto') !== endpoint.mode;
+        const override = needsOverride
+          ? { base: entry.base, relay: entry.relay, api: entry.api, endpointMode: entry.mode }
           : null;
         const opts = override ? { force: true, override } : { force: true };
         ensureModelMetadata(nodeId, cfg, opts).catch(() => {});
@@ -181,16 +201,13 @@ function createASR({
   }
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
-    const effective = Object.assign({}, cfg || {}, override || {});
-    const base = String(effective.base || '').trim();
-    const relay = String(effective.relay || '').trim();
-    const api = String(effective.api || '').trim();
+    const endpoint = resolveEndpointConfig(cfg, override);
+    const { base, relay, api, viaNkn, mode } = endpoint;
     if (!base) {
-      setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now() });
+      setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode });
       clearModelRefresh(nodeId);
       return [];
     }
-    const viaNkn = !!relay;
     const cache = getCachedMeta(nodeId);
     const now = Date.now();
     if (!force && cache && cache.base === base && cache.relay === relay && cache.api === api && (now - cache.fetchedAt) < MODEL_REFRESH_MS) {
@@ -200,7 +217,7 @@ function createASR({
     if (MODEL_PROMISE.has(key)) return MODEL_PROMISE.get(key);
     const task = (async () => {
       const list = await fetchModelMetadata(base, api, viaNkn, relay);
-      setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now() });
+      setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now(), mode });
       return list.slice();
     })();
     MODEL_PROMISE.set(key, task);
@@ -742,10 +759,11 @@ function createASR({
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
       this._live = !!cfg.live;
-      this._base = (cfg.base || '').trim();
-      this._relay = (cfg.relay || '').trim();
-      this._viaNkn = !!this._relay;
-      this._api = cfg.api || '';
+      const endpoint = resolveEndpointConfig(cfg);
+      this._base = endpoint.base;
+      this._relay = endpoint.relay;
+      this._viaNkn = endpoint.viaNkn;
+      this._api = endpoint.api;
       this._relayStatus('warn', 'Initializing session');
       this._sawSpeech = false;
       this.finalizing = false;

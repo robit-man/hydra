@@ -808,6 +808,8 @@ function refreshNodeResolution(force = false) {
 
   function getRelayValueFromConfig(cfg, info) {
     if (!info || !info.relayKey) return '';
+    const mode = String(cfg?.endpointMode || 'auto').toLowerCase();
+    if (mode === 'local') return '';
     const raw = cfg ? cfg[info.relayKey] : '';
     return typeof raw === 'string' ? raw.trim() : '';
   }
@@ -3919,6 +3921,9 @@ function refreshNodeResolution(force = false) {
             }
             const apiVal = apiInput?.value?.trim?.() || '';
             if (apiVal) override.api = apiVal;
+            const modeInput = relayInput?._endpointModeInput || fields.querySelector('input[name="endpointMode"]');
+            const modeVal = String(modeInput?.value || '').trim().toLowerCase();
+            if (modeVal) override.endpointMode = modeVal;
             return override;
           };
 
@@ -3961,10 +3966,13 @@ function refreshNodeResolution(force = false) {
               if (hasOverride) {
                 fetchOptions = { override };
                 const cfgCurrent = (NodeStore.ensure(node.id, node.type)?.config) || {};
-                const differs = ['base', 'relay', 'api'].some((key) => {
+                const differs = ['base', 'relay', 'api', 'endpointMode'].some((key) => {
                   const oVal = String(override[key] || '').trim();
+                  const current = key === 'endpointMode'
+                    ? String(cfgCurrent.endpointMode || 'auto').trim()
+                    : String(cfgCurrent[key] || '').trim();
                   if (!oVal) return false;
-                  return oVal !== String(cfgCurrent[key] || '').trim();
+                  return oVal !== current;
                 });
                 if (differs || !cfgCurrent.base) fetchOptions.force = true;
               }
@@ -4023,13 +4031,42 @@ function refreshNodeResolution(force = false) {
 
           const cachedModels = modelProvider.listModels?.(node.id) || [];
           if (cachedModels.length) renderButtons();
-          else showStatus('Loading models…');
+          else showStatus('No models found');
 
           const handleFetchError = (err) => {
             const available = modelProvider.listModels?.(node.id) || [];
             if (available.length) return;
             showStatus(`Failed to load models: ${err?.message || err}`);
           };
+
+          const fetchControls = document.createElement('div');
+          fetchControls.className = 'model-fetch-row';
+          const fetchButton = document.createElement('button');
+          fetchButton.type = 'button';
+          fetchButton.className = 'ghost model-fetch-button';
+          fetchButton.textContent = 'Fetch models';
+          fetchControls.appendChild(fetchButton);
+          wrapper.appendChild(fetchControls);
+
+          const triggerFetch = async ({ force = true } = {}) => {
+            const override = buildOverrideConfig({ mutateRelay: true });
+            fetchButton.disabled = true;
+            try {
+              showStatus('Fetching models…');
+              await modelProvider.ensureModels(node.id, { force, override });
+              renderButtons();
+            } catch (err) {
+              handleFetchError(err);
+            } finally {
+              fetchButton.disabled = false;
+            }
+          };
+
+          fetchButton.addEventListener('click', () => triggerFetch({ force: true }));
+
+          if (!cachedModels.length) {
+            triggerFetch({ force: true }).catch(() => {});
+          }
 
           if (node.type === 'LLM') {
             const pullWrap = document.createElement('div');
@@ -4084,8 +4121,7 @@ function refreshNodeResolution(force = false) {
                   }
                 });
                 pullLog.textContent += 'Pull complete\n';
-                await modelProvider.refreshModels?.(node.id, override, { force: true });
-                renderButtons();
+                await triggerFetch({ force: true });
               } catch (err) {
                 const msg = err?.message || err || 'Pull failed';
                 pullLog.textContent += `Error: ${msg}\n`;
@@ -4182,8 +4218,7 @@ function refreshNodeResolution(force = false) {
                   }
                 });
                 pullLog.textContent += 'Pull complete\n';
-                await modelProvider.refreshModels?.(node.id, override, { force: true });
-                renderButtons();
+                await triggerFetch({ force: true });
               } catch (err) {
                 const msg = err?.message || err || 'Pull failed';
                 pullLog.textContent += `Error: ${msg}\n`;
@@ -4206,12 +4241,11 @@ function refreshNodeResolution(force = false) {
             });
           }
 
-          modelProvider.ensureModels(node.id, { force: true })
-            .then(() => {
-              const models = modelProvider.listModels?.(node.id) || [];
-              if (models.length) renderButtons();
-            })
-            .catch(handleFetchError);
+          if (cachedModels.length) {
+            renderButtons();
+          } else {
+            triggerFetch({ force: true }).catch(handleFetchError);
+          }
           let pendingRelayFetch = null;
           let lastRelayKey = '';
 
@@ -4220,14 +4254,19 @@ function refreshNodeResolution(force = false) {
             const baseVal = override.base || '';
             const relayVal = override.relay || '';
             const apiVal = override.api || '';
-            if (!baseVal || !relayVal) return;
-            const key = `${baseVal}|${relayVal}|${apiVal}`;
+            const modeInput = relayInput?._endpointModeInput || fields.querySelector('input[name="endpointMode"]');
+            const modeVal = String((override.endpointMode ?? modeInput?.value ?? 'auto')).toLowerCase();
+            if (modeVal === 'local') return;
+            if (!baseVal) return;
+            const hasRelay = !!relayVal;
+            if (modeVal === 'remote' && !hasRelay) return;
+            if (!hasRelay) return;
+            const key = `${baseVal}|${relayVal}|${apiVal}|${modeVal}`;
             if (!force && key === lastRelayKey) return;
             lastRelayKey = key;
             const existing = modelProvider.listModels?.(node.id) || [];
-            if (!existing.length) showStatus('Refreshing models…');
-            modelProvider.refreshModels?.(node.id, { base: baseVal, relay: relayVal, ...(apiVal ? { api: apiVal } : {}) }, { force: true })
-              ?.catch(handleFetchError);
+            if (!existing.length) showStatus('Fetching models…');
+            triggerFetch({ force: true }).catch(handleFetchError);
           };
 
           const scheduleRelayFetch = () => {
@@ -4301,18 +4340,58 @@ function refreshNodeResolution(force = false) {
         let control = input;
         if (field.key === 'relay') {
           const wrap = document.createElement('div');
-          wrap.className = 'input-with-btn';
+          wrap.className = 'input-with-btn relay-input-wrap';
           wrap.appendChild(input);
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'ghost';
-          btn.textContent = 'Scan QR';
-          btn.addEventListener('click', (e) => {
+
+          const scanBtn = document.createElement('button');
+          scanBtn.type = 'button';
+          scanBtn.className = 'ghost';
+          scanBtn.textContent = 'Scan QR';
+          scanBtn.addEventListener('click', (e) => {
             e.preventDefault();
             openQrScanner(input);
           });
-          wrap.appendChild(btn);
-          control = wrap;
+          wrap.appendChild(scanBtn);
+
+          const modeBtn = document.createElement('button');
+          modeBtn.type = 'button';
+          modeBtn.className = 'ghost endpoint-mode-btn';
+          wrap.appendChild(modeBtn);
+
+          const modeHidden = document.createElement('input');
+          modeHidden.type = 'hidden';
+          modeHidden.name = 'endpointMode';
+          const MODE_ORDER = ['auto', 'remote', 'local'];
+          const MODE_LABEL = { auto: 'Auto', remote: 'Remote', local: 'Local' };
+          let modeValue = String(cfg.endpointMode || 'auto').toLowerCase();
+          if (!MODE_ORDER.includes(modeValue)) modeValue = 'auto';
+          modeHidden.value = modeValue;
+
+          const applyModeUI = () => {
+            const labelText = MODE_LABEL[modeValue] || 'Auto';
+            modeBtn.textContent = `Endpoint: ${labelText}`;
+            const isLocal = modeValue === 'local';
+            input.disabled = isLocal;
+            input.classList.toggle('relay-disabled', isLocal);
+          };
+
+          modeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const idx = MODE_ORDER.indexOf(modeValue);
+            modeValue = MODE_ORDER[(idx + 1) % MODE_ORDER.length];
+            modeHidden.value = modeValue;
+            applyModeUI();
+          });
+
+          applyModeUI();
+
+          input._endpointModeInput = modeHidden;
+          input._endpointModeButton = modeBtn;
+
+          fields.appendChild(label);
+          fields.appendChild(wrap);
+          fields.appendChild(modeHidden);
+          continue;
         }
         fields.appendChild(label);
         fields.appendChild(control);

@@ -195,11 +195,10 @@ function createLLM({
       try {
         const rec = NodeStore.ensure(nodeId, 'LLM');
         const cfg = rec?.config || {};
-        const cfgBase = String(cfg.base || '').trim();
-        const cfgRelay = String(cfg.relay || '').trim();
-        const cfgApi = String(cfg.api || '').trim();
-        const override = (entry.base !== cfgBase || entry.relay !== cfgRelay || entry.api !== cfgApi)
-          ? { base: entry.base, relay: entry.relay, api: entry.api }
+        const endpoint = resolveEndpointConfig(cfg);
+        const needsOverride = entry.base !== endpoint.base || entry.relay !== endpoint.relay || entry.api !== endpoint.api || (entry.mode || 'auto') !== endpoint.mode;
+        const override = needsOverride
+          ? { base: entry.base, relay: entry.relay, api: entry.api, endpointMode: entry.mode }
           : null;
         const opts = override ? { force: true, override } : { force: true };
         ensureModelMetadata(nodeId, cfg, opts).catch(() => {});
@@ -280,6 +279,27 @@ function createLLM({
     };
   }
 
+  function resolveEndpointConfig(baseCfg, override = null) {
+    const effective = Object.assign({}, baseCfg || {}, override || {});
+    const base = String(effective.base || '').trim();
+    const relayRaw = String(effective.relay || '').trim();
+    const api = String(effective.api || '').trim();
+    const mode = String(effective.endpointMode || 'auto').toLowerCase();
+    const hasRelay = !!relayRaw;
+    let useRelay = false;
+    if (mode === 'remote') useRelay = hasRelay;
+    else if (mode === 'auto') useRelay = hasRelay;
+    else useRelay = false;
+    return {
+      base,
+      api,
+      relay: useRelay ? relayRaw : '',
+      rawRelay: relayRaw,
+      viaNkn: useRelay && hasRelay,
+      mode
+    };
+  }
+
   function cacheModelInfo(nodeId, modelId, info) {
     if (!modelId || !info) return;
     const key = `${nodeId}:${modelId}`;
@@ -354,23 +374,22 @@ function createLLM({
     const { force = false, override = null } = options || {};
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
-    const effective = Object.assign({}, cfg, override || {});
-    const base = String(effective.base || '').trim();
+    const endpoint = resolveEndpointConfig(cfg, override);
+    const { base, relay, api, viaNkn } = endpoint;
     if (!base) return null;
-    const relay = String(effective.relay || '').trim();
-    const viaNkn = !!relay;
-    const api = String(effective.api || '').trim();
 
     let skipCache = force;
     if (!skipCache && override) {
       const normalizedOverride = {
         base: String(override.base || '').trim(),
         relay: String(override.relay || '').trim(),
-        api: String(override.api || '').trim()
+        api: String(override.api || '').trim(),
+        endpointMode: String(override.endpointMode || '').trim().toLowerCase()
       };
       if (normalizedOverride.base && normalizedOverride.base !== String(cfg.base || '').trim()) skipCache = true;
       if (normalizedOverride.relay && normalizedOverride.relay !== String(cfg.relay || '').trim()) skipCache = true;
       if (normalizedOverride.api && normalizedOverride.api !== String(cfg.api || '').trim()) skipCache = true;
+      if (normalizedOverride.endpointMode && normalizedOverride.endpointMode !== String(cfg.endpointMode || 'auto').trim().toLowerCase()) skipCache = true;
     }
 
     const key = `${nodeId}:${modelId}`;
@@ -437,16 +456,13 @@ function createLLM({
   }
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
-    const effective = Object.assign({}, cfg || {}, override || {});
-    const base = String(effective.base || '').trim();
-    const relay = String(effective.relay || '').trim();
-    const api = String(effective.api || '').trim();
+    const endpoint = resolveEndpointConfig(cfg, override);
+    const { base, relay, api, viaNkn, mode } = endpoint;
     if (!base) {
-      setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now() });
+      setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode });
       clearModelRefresh(nodeId);
       return [];
     }
-    const viaNkn = !!relay;
     const cache = getCachedMeta(nodeId);
     const now = Date.now();
     if (!force && cache && cache.base === base && cache.relay === relay && cache.api === api && (now - cache.fetchedAt) < MODEL_REFRESH_MS) {
@@ -458,7 +474,7 @@ function createLLM({
     }
     const task = (async () => {
       const list = await fetchModelMetadataList(base, api, viaNkn, relay);
-      setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now() });
+      setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now(), mode });
       return list.slice();
     })();
     MODEL_PROMISE.set(key, task);
@@ -513,12 +529,10 @@ function createLLM({
 
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
-    const effective = Object.assign({}, cfg, override || {});
-    const base = String(effective.base || '').trim();
+    const endpoint = resolveEndpointConfig(cfg, override);
+    const { base, api, relay, viaNkn, mode } = endpoint;
     if (!base) throw new Error('Base URL is required');
-    const relay = String(effective.relay || '').trim();
-    const api = String(effective.api || '').trim();
-    const viaNkn = !!relay;
+    if (mode === 'remote' && !viaNkn) throw new Error('Relay address required for remote mode');
 
     const body = { model: modelName, stream: true };
     if (insecure) body.insecure = true;
@@ -622,11 +636,9 @@ function createLLM({
     const rec = NodeStore.ensure(nodeId, 'LLM');
     let cfg = rec.config || {};
     cfg = await ensureModelConfigured(nodeId, cfg);
-    const base = (cfg.base || '').trim();
-    const api = (cfg.api || '').trim();
-    const relay = (cfg.relay || '').trim();
+    const endpoint = resolveEndpointConfig(cfg);
+    const { base, api, relay, viaNkn } = endpoint;
     const model = (cfg.model || '').trim();
-    const viaNkn = !!relay;
     const stream = !!cfg.stream;
     const sysUse = !!cfg.useSystem;
     const sysTxt = (cfg.system || '').trim();

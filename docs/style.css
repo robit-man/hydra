@@ -642,6 +642,14 @@ textarea {
   flex: 0 0 auto;
 }
 
+.relay-input-wrap .endpoint-mode-btn {
+  min-width: 120px;
+}
+
+input.relay-disabled {
+  opacity: 0.6;
+}
+
 .model-picker {
   display: flex;
   flex-direction: column;
@@ -672,6 +680,15 @@ textarea {
   background: var(--accent);
   border-color: rgba(0, 0, 0, 0.1);
   color: black;
+}
+
+.model-fetch-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.model-fetch-button {
+  min-width: 120px;
 }
 
 .model-picker-status,
@@ -738,6 +755,29 @@ textarea {
   background: rgba(255, 107, 107, 0.18);
   border-color: rgba(255, 107, 107, 0.4);
   color: #ffc7c7;
+}
+
+.model-pull {
+  display: flex;
+  flex-flow: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.model-fetch-row{
+  justify-content: flex-start;
+}
+
+.model-pull-log {
+  height: 34px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 0px 0px;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .image-input {
