@@ -102,7 +102,8 @@ const NodeStore = {
       handshake: { status: 'idle', peer: '', direction: 'idle', remoteId: '', graphId: '' },
       peer: null,
       allowedPeers: [],
-      autoAccept: false
+      autoAccept: false,
+      autoChunk: false
     },
     MCP: {
       base: 'http://127.0.0.1:9003',

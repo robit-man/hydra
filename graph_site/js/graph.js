@@ -1173,6 +1173,10 @@ function refreshNodeResolution(force = false) {
             <button type="button" class="ghost" data-nkndm-copy>Copy</button>
             <span class="dm-indicator offline" data-nkndm-indicator title="Offline"></span>
           </div>
+          <div class="row" style="margin-top:6px;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="tiny" data-nkndm-chunk-note>Chunk Size</span>
+            <button type="button" class="ghost" data-nkndm-autochunk>Auto chunk: off</button>
+          </div>
           <div class="muted" style="margin-top:6px;">Peer</div>
           <div class="dm-peer-row">
             <div class="bubble" data-nkndm-peer style="min-height:24px">(none)</div>
@@ -3678,6 +3682,20 @@ function refreshNodeResolution(force = false) {
     const copyBtn = node.el?.querySelector('[data-nkndm-copy]');
     const approveBtn = node.el?.querySelector('[data-nkndm-approve]');
     const revokeBtn = node.el?.querySelector('[data-nkndm-revoke]');
+    const autoBtn = node.el?.querySelector('[data-nkndm-autochunk]');
+
+    const syncAutoChunkUi = () => {
+      const cfg = NodeStore.ensure(node.id, 'NknDM').config || {};
+      const on = !!cfg.autoChunk;
+      if (autoBtn) {
+        autoBtn.textContent = on ? 'Auto chunk: on' : 'Auto chunk: off';
+        autoBtn.classList.toggle('active', on);
+        autoBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+      const note = node.el?.querySelector('[data-nkndm-chunk-note]');
+      if (note) note.textContent = on ? 'Chunk Size (auto)' : 'Chunk Size';
+    };
+
     if (copyBtn && !copyBtn._nkndmCopyBound) {
       copyBtn.addEventListener('click', async () => {
         const localEl = node.el?.querySelector('[data-nkndm-local]');
@@ -3707,6 +3725,17 @@ function refreshNodeResolution(force = false) {
       });
       revokeBtn._nkndmRevokeBound = true;
     }
+    if (autoBtn && !autoBtn._nkndmAutoBound) {
+      autoBtn.addEventListener('click', () => {
+        const cfg = NodeStore.ensure(node.id, 'NknDM').config || {};
+        const next = !cfg.autoChunk;
+        NodeStore.update(node.id, { type: 'NknDM', autoChunk: next });
+        syncAutoChunkUi();
+        setBadge(next ? 'Auto chunk enabled' : 'Auto chunk disabled');
+      });
+      autoBtn._nkndmAutoBound = true;
+    }
+    syncAutoChunkUi();
     NknDM.init(node.id);
   }
 

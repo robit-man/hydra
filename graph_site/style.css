@@ -1739,6 +1739,11 @@ button.danger {
   align-items: center;
 }
 
+.node button.ghost.active {
+  background: rgba(125, 255, 176, 0.12);
+  border-color: rgba(125, 255, 176, 0.4);
+}
+
 .dm-indicator {
   width: 12px;
   height: 12px;

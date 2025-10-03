@@ -1617,6 +1617,20 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     return [text];
   }
 
+  const AUTO_CHUNK_MAX_BYTES = 2048;
+
+  function determineChunkBytes(cfg, text) {
+    const base = Math.max(512, Number(cfg.chunkBytes) || 1800);
+    if (!cfg.autoChunk) return base;
+    const hardCap = Math.max(512, Math.min(base, AUTO_CHUNK_MAX_BYTES));
+    const bodyBytes = encoder.encode(text).length;
+    if (bodyBytes <= hardCap - 200) return hardCap;
+    const payloadBudget = Math.max(256, hardCap - 220);
+    const chunksNeeded = Math.max(1, Math.ceil(bodyBytes / payloadBudget));
+    const perChunk = Math.ceil(bodyBytes / chunksNeeded) + 220;
+    return Math.max(512, Math.min(hardCap, perChunk));
+  }
+
   function sendProbe(nodeId) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     const address = (cfg.address || cfg.peer?.address || cfg.handshake?.peer || '').trim();
@@ -1650,7 +1664,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
       scheduleRetry(nodeId);
       return;
     }
-    const maxBytes = Math.max(512, Number(cfg.chunkBytes) || 1800);
+    const maxBytes = determineChunkBytes(cfg, text);
     const chunks = chunkText(text, maxBytes);
     const total = chunks.length;
     const batchId = `dm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1665,8 +1679,9 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
         ts: Date.now()
       }, targetId);
     });
-    logLine(nodeId, `Sent ${total} part${total > 1 ? 's' : ''} to ${address}`);
-    emitStatus(nodeId, { type: 'sent', id: batchId, total, peer: address });
+    const chunkNote = cfg.autoChunk ? ` (auto ${maxBytes} bytes)` : ` (${maxBytes} bytes)`;
+    logLine(nodeId, `Sent ${total} part${total > 1 ? 's' : ''} to ${address}${chunkNote}`);
+    emitStatus(nodeId, { type: 'sent', id: batchId, total, peer: address, chunkBytes: maxBytes, auto: !!cfg.autoChunk });
   }
 
   function sendPacket(nodeId, packet) {
@@ -1769,6 +1784,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
       defaultsPatch.allowedPeers = [];
     }
     if (typeof cfg.autoAccept !== 'boolean') defaultsPatch.autoAccept = false;
+    if (typeof cfg.autoChunk !== 'boolean') defaultsPatch.autoChunk = false;
     if (!Number.isFinite(cfg.heartbeatInterval)) defaultsPatch.heartbeatInterval = 15;
     if (!cfg.componentId) defaultsPatch.componentId = `${CFG.graphId || 'graph'}:${nodeId}`;
     if (cfg.peer === undefined) defaultsPatch.peer = null;
