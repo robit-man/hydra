@@ -1674,23 +1674,14 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
       logLine(nodeId, 'DM packet must be an object', true);
       return;
     }
-    const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
-    const address = (cfg.address || '').trim();
-    if (!address) {
-      logLine(nodeId, 'Peer address missing', true);
+    let payload;
+    try {
+      payload = JSON.stringify(packet);
+    } catch (err) {
+      logLine(nodeId, `Failed to encode packet: ${err?.message || err}`, true);
       return;
     }
-    if ((cfg.handshake?.status || 'idle') !== 'accepted') {
-      logLine(nodeId, 'Handshake not accepted yet', true);
-      return;
-    }
-    const message = { ...packet };
-    if (typeof message.type !== 'string' || !message.type) {
-      message.type = 'nkndm.data';
-    }
-    if (!message.ts) message.ts = Date.now();
-    const targetId = getTargetComponentId(cfg) || message.targetId || undefined;
-    sendJson(nodeId, address, message, targetId);
+    sendData(nodeId, payload);
   }
 
   function sendHandshakeRequest(nodeId, onDone) {

@@ -32,13 +32,15 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
         frameTimer: null,
         recorder: null,
         recorderHandler: null,
-      canvas: null,
-      lastSendTs: 0,
-      lastRemoteFrom: null,
-      audioCtx: null,
-      audioQueueTime: 0
-    });
-  }
+        canvas: null,
+        lastSendTs: 0,
+        lastRemoteFrom: null,
+        audioCtx: null,
+        audioQueueTime: 0,
+        frameSeq: 0,
+        audioSeq: 0
+      });
+    }
     return state.get(id);
   }
 
@@ -193,6 +195,7 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
     if (!localVideo) return;
     if (!st.canvas) st.canvas = document.createElement('canvas');
     const ctx = st.canvas.getContext('2d');
+    st.frameSeq = 0;
 
     const sendFrame = () => {
       if (!st.running || !st.stream) return;
@@ -209,18 +212,25 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
       if (!dataUrl) return;
       const idx = dataUrl.indexOf(',');
       const b64 = idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl;
-      Router.sendFrom(id, 'media', {
-        nodeId: id,
-        from: id,
+      const mime = dataUrl.slice(5, dataUrl.indexOf(';')) || 'image/webp';
+      const ts = Date.now();
+      const seq = (st.frameSeq = (st.frameSeq || 0) + 1);
+      const packet = {
+        type: 'nkndm.media',
+        op: 'video',
         kind: 'video',
-        mime: dataUrl.slice(5, dataUrl.indexOf(';')) || 'image/webp',
+        mime,
         b64,
         image: b64,
         width: st.canvas.width,
         height: st.canvas.height,
-        ts: Date.now(),
-        route: 'media'
-      });
+        ts,
+        seq,
+        nodeId: id,
+        route: 'media.video'
+      };
+      Router.sendFrom(id, 'packet', packet);
+      Router.sendFrom(id, 'media', packet);
     };
 
     if (st.frameTimer) clearInterval(st.frameTimer);
@@ -231,6 +241,7 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
     const st = ensureState(id);
     const stream = st.stream;
     if (!stream) return;
+    st.audioSeq = 0;
 
     const supports = (m) => {
       try {
@@ -263,18 +274,26 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
       try {
         const buffer = await event.data.arrayBuffer();
         const b64 = arrayBufferToBase64(buffer);
-        Router.sendFrom(id, 'media', {
-          nodeId: id,
-          from: id,
+        const ts = Date.now();
+        const seq = (st.audioSeq = (st.audioSeq || 0) + 1);
+        const sr = Number(cfg.audioSampleRate) || 48000;
+        const channels = Number(cfg.audioChannels) || 1;
+        const packet = {
+          type: 'nkndm.media',
+          op: 'audio',
           kind: 'audio',
           mime: event.data.type || targetMime,
           b64,
-          ts: Date.now(),
-          route: 'media',
+          ts,
+          route: 'media.audio',
           format: usePcm ? 'pcm16' : 'opus',
-          sr: Number(cfg.audioSampleRate) || 48000,
-          channels: Number(cfg.audioChannels) || 1
-        });
+          sr,
+          channels,
+          nodeId: id,
+          seq
+        };
+        Router.sendFrom(id, 'packet', packet);
+        Router.sendFrom(id, 'media', packet);
       } catch (err) {
         log(`[media] audio encode error: ${err?.message || err}`);
       }
@@ -319,6 +338,14 @@ function createMediaNode({ getNode, Router, NodeStore, setBadge, log }) {
     }
 
     if (!data || typeof data !== 'object') return;
+
+    if (data.type === 'nkndm.media' && data.payload && typeof data.payload === 'object') {
+      data = { ...data, ...data.payload };
+    }
+    if (!data.kind && typeof data.op === 'string') data.kind = data.op;
+    if (!data.route && typeof payload?.route === 'string') data.route = payload.route;
+    if (!data.from && typeof payload?.from === 'string') data.from = payload.from;
+    if (!data.nodeId && typeof payload?.nodeId === 'string') data.nodeId = payload.nodeId;
 
     const kind = data.kind || data.type;
     if (kind === 'video' && data.b64) {

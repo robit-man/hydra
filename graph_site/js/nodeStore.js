@@ -134,7 +134,7 @@ const NodeStore = {
       compression: 60,
       audioSampleRate: 48000,
       audioChannels: 1,
-      audioFormat: 'opus',
+      audioFormat: 'pcm16',
       audioBitsPerSecond: 32000,
       running: false,
       lastRemoteFrame: '',

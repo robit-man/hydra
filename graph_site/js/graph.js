@@ -2398,7 +2398,7 @@ function refreshNodeResolution(force = false) {
     MediaStream: {
       title: 'Media Stream',
       inputs: [{ name: 'media' }],
-      outputs: [{ name: 'media' }],
+      outputs: [{ name: 'packet', label: 'DM Packet' }, { name: 'media', label: 'Media' }],
       schema: [
         { key: 'includeVideo', label: 'Include Video', type: 'select', options: ['true', 'false'], def: 'true' },
         { key: 'includeAudio', label: 'Include Audio', type: 'select', options: ['false', 'true'], def: 'false' },
@@ -2408,7 +2408,7 @@ function refreshNodeResolution(force = false) {
         { key: 'compression', label: 'Compression (%)', type: 'range', def: 60, min: 0, max: 95, step: 5 },
         { key: 'audioSampleRate', label: 'Audio Sample Rate', type: 'select', options: ['16000', '24000', '32000', '44100', '48000'], def: '48000' },
         { key: 'audioChannels', label: 'Audio Channels', type: 'select', options: ['1', '2'], def: '1' },
-        { key: 'audioFormat', label: 'Audio Format', type: 'select', options: ['opus', 'pcm16'], def: 'opus' },
+        { key: 'audioFormat', label: 'Audio Format', type: 'select', options: ['pcm16', 'opus'], def: 'pcm16' },
         { key: 'audioBitsPerSecond', label: 'Audio Bitrate (bps)', type: 'number', def: 32000 }
       ]
     },
