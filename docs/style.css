@@ -226,6 +226,7 @@ header {
   width: 100%;
   pointer-events: none;
   top: 0px;
+  left: 0px;
   display: block;
   mask: linear-gradient(to bottom, black, black, transparent);
   backdrop-filter: blur(20px);
