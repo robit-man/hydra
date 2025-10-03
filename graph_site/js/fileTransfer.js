@@ -396,7 +396,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ivBytes: DEFAULT_IV_BYTES
       };
     }
-    Router.sendFrom(id, 'outgoing', JSON.stringify(header));
+    Router.sendFrom(id, 'outgoing', header);
     await sleep(10);
   }
 
@@ -432,7 +432,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ts: Date.now()
       };
       if (encMeta) chunkMessage.encryption = encMeta;
-      Router.sendFrom(id, 'outgoing', JSON.stringify(chunkMessage));
+      Router.sendFrom(id, 'outgoing', chunkMessage);
       sending.sentChunks = seq;
       updateSendUi(id, sending);
       emitStatus(id, {
@@ -458,7 +458,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       route: sending.route,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', JSON.stringify(message));
+    Router.sendFrom(id, 'outgoing', message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: sending.id,
@@ -479,7 +479,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       reason,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', JSON.stringify(message));
+    Router.sendFrom(id, 'outgoing', message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: st.sending.id,
@@ -692,7 +692,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       missing,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'outgoing', JSON.stringify(message));
+    Router.sendFrom(id, 'outgoing', message);
     entry.missingTries += 1;
     emitStatus(id, {
       direction: 'incoming',

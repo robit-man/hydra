@@ -620,6 +620,7 @@ function refreshNodeResolution(force = false) {
     }
     if (node.type === 'NknDM') {
       if (portName === 'text') return NknDM.onText(node.id, payload);
+      if (portName === 'packet') return NknDM.onPacket(node.id, payload);
       return;
     }
     if (node.type === 'FileTransfer') {
@@ -2374,7 +2375,7 @@ function refreshNodeResolution(force = false) {
     FileTransfer: {
       title: 'File Transfer',
       inputs: [{ name: 'incoming', label: 'Incoming DM' }, { name: 'file', label: 'File Input' }],
-      outputs: [{ name: 'outgoing', label: 'DM Out' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
+      outputs: [{ name: 'outgoing', label: 'DM Packet' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
       schema: [
         { key: 'chunkSize', label: 'Chunk Size (bytes)', type: 'number', def: 1024 },
         { key: 'autoAccept', label: 'Auto-accept incoming', type: 'select', options: ['true', 'false'], def: 'true' },
@@ -2386,7 +2387,7 @@ function refreshNodeResolution(force = false) {
       title: 'NKN DM',
       supportsNkn: true,
       relayKey: 'address',
-      inputs: [{ name: 'text' }],
+      inputs: [{ name: 'text' }, { name: 'packet', label: 'DM Packet' }],
       outputs: [{ name: 'incoming' }, { name: 'status' }, { name: 'raw' }],
       schema: [
         { key: 'address', label: 'Target Address', type: 'text', placeholder: 'nkn...' },

@@ -1669,6 +1669,30 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     emitStatus(nodeId, { type: 'sent', id: batchId, total, peer: address });
   }
 
+  function sendPacket(nodeId, packet) {
+    if (!packet || typeof packet !== 'object') {
+      logLine(nodeId, 'DM packet must be an object', true);
+      return;
+    }
+    const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
+    const address = (cfg.address || '').trim();
+    if (!address) {
+      logLine(nodeId, 'Peer address missing', true);
+      return;
+    }
+    if ((cfg.handshake?.status || 'idle') !== 'accepted') {
+      logLine(nodeId, 'Handshake not accepted yet', true);
+      return;
+    }
+    const message = { ...packet };
+    if (typeof message.type !== 'string' || !message.type) {
+      message.type = 'nkndm.data';
+    }
+    if (!message.ts) message.ts = Date.now();
+    const targetId = getTargetComponentId(cfg) || message.targetId || undefined;
+    sendJson(nodeId, address, message, targetId);
+  }
+
   function sendHandshakeRequest(nodeId, onDone) {
     const cfg = NodeStore.ensure(nodeId, 'NknDM').config || {};
     const address = ensureGraphPrefix((cfg.address || '').trim());
@@ -1772,6 +1796,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     init,
     refresh,
     onText,
+    onPacket: sendPacket,
     dispose,
     sendHandshake: sendHandshakeRequest,
     sendProbe,
