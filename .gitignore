@@ -1,6 +1,6 @@
-graph_site/venv
-graph_site/*.pem
-graph_site/config.json
+docs/venv
+docs/*.pem
+docs/config.json
 service_router/.*
 service_router/.*
 service_router/bridge-node

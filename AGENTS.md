@@ -5,12 +5,12 @@ This guide gives future agents a map of Hydra's runtime surfaces, code organizat
 ## System Topology
 
 ```
-graph_site (browser UI) ⇆ service_router/router.py (Python orchestrator) ⇆ local services (ASR/TTS/LLM/MCP)
+docs (browser UI) ⇆ service_router/router.py (Python orchestrator) ⇆ local services (ASR/TTS/LLM/MCP)
                        ⇡                                       ⇣
                 NKN transport via Net module           bridge-node/nkn_bridge.js (Node.js)
 ```
 
-- The browser workspace toggles HTTP vs NKN for every request (`graph_site/js/main.js:144`).
+- The browser workspace toggles HTTP vs NKN for every request (`docs/js/main.js:144`).
 - Python router supervises service processes, drives HTTP multiplexing, and owns relay state (`service_router/router.py:35`).
 - Node bridge provides the raw NKN MultiClient connection used by the router's DM queue (`service_router/bridge-node/nkn_bridge.js:18`).
 
@@ -18,8 +18,8 @@ graph_site (browser UI) ⇆ service_router/router.py (Python orchestrator) ⇆ l
 
 | Path | Purpose | Highlights |
 | --- | --- | --- |
-| `graph_site/` | Front-end workspace + local HTTPS dev server | UI entrypoint (`graph_site/index.html:5`), SPA runtime (`graph_site/js/main.js:1`), TLS dev server (`graph_site/server.py:53`)
-| `graph_site/js/` | Modular node graph runtime | Transport core (`graph_site/js/net.js:8`), graph layout (`graph_site/js/graph.js:1`), node wiring (`graph_site/js/router.js:1`)
+| `docs/` | Front-end workspace + local HTTPS dev server | UI entrypoint (`docs/index.html:5`), SPA runtime (`docs/js/main.js:1`), TLS dev server (`docs/server.py:53`)
+| `docs/js/` | Modular node graph runtime | Transport core (`docs/js/net.js:8`), graph layout (`docs/js/graph.js:1`), node wiring (`docs/js/router.js:1`)
 | `service_router/` | Unified NKN router and config | Bootstrap & orchestration (`service_router/router.py:35`), config defaults (`service_router/router_config.json:1`)
 | `service_router/bridge-node/` | Node-based NKN sidecar | MultiClient runner (`service_router/bridge-node/nkn_bridge.js:18`)
 
@@ -37,51 +37,51 @@ graph_site (browser UI) ⇆ service_router/router.py (Python orchestrator) ⇆ l
 - Emits structured stdout events for ready status, probes, and DM payloads that the router consumes (`service_router/bridge-node/nkn_bridge.js:55`).
 - Listens for JSON control messages on stdin to relay outbound DMs and enforces heartbeat-based self exits for hung connections (`service_router/bridge-node/nkn_bridge.js:73`).
 
-### Graph Workspace (graph_site/index.html & js/main.js)
-- Minimal HTML shell loads the node graph bundle, NKN SDK, and QR libraries (`graph_site/index.html:5`).
-- `main.js` wires together transport, graph rendering, node factories, and workspace synchronization in one place (`graph_site/js/main.js:20`).
-- Transport toggle button flips CFG state and reinitializes NKN clients as needed (`graph_site/js/main.js:144`).
+### Graph Workspace (docs/index.html & js/main.js)
+- Minimal HTML shell loads the node graph bundle, NKN SDK, and QR libraries (`docs/index.html:5`).
+- `main.js` wires together transport, graph rendering, node factories, and workspace synchronization in one place (`docs/js/main.js:20`).
+- Transport toggle button flips CFG state and reinitializes NKN clients as needed (`docs/js/main.js:144`).
 
-### Local HTTPS Dev Server (graph_site/server.py)
-- Bootstraps a venv on first launch and installs `cryptography` automatically (`graph_site/server.py:53`).
-- Generates self-signed certificates covering LAN/public IPs and optional SANs (`graph_site/server.py:162`).
-- Supports Let’s Encrypt, Smallstep, and GCP Private CA options via CLI flags (`graph_site/server.py:100`).
-- Serves `graph_site/config.json`-defined roots and prints LAN/public URLs for quick device pairing (`graph_site/server.py:148`).
+### Local HTTPS Dev Server (docs/server.py)
+- Bootstraps a venv on first launch and installs `cryptography` automatically (`docs/server.py:53`).
+- Generates self-signed certificates covering LAN/public IPs and optional SANs (`docs/server.py:162`).
+- Supports Let’s Encrypt, Smallstep, and GCP Private CA options via CLI flags (`docs/server.py:100`).
+- Serves `docs/config.json`-defined roots and prints LAN/public URLs for quick device pairing (`docs/server.py:148`).
 
 ## Front-End Core Modules
 
-- **Configuration & Storage**: `CFG` is persisted to `localStorage` and seeded with transport + wiring defaults (`graph_site/js/config.js:9`). Use `saveCFG` to persist edits.
-- **Transport Layer**: `Net` abstracts HTTP vs NKN for JSON, blob, and streaming requests, caching NKN seeds in storage and maintaining pending requests (`graph_site/js/net.js:25`).
-- **Wire Router**: User-created connections live in `CFG.wires`; `Router` handles port registration, wiring UI, and payload fan-out (`graph_site/js/router.js:23`).
-- **Graph Engine**: `createGraph` owns workspace canvas transforms, node lifecycle, link drawing, and relay state badges (`graph_site/js/graph.js:18`).
-- **Node Registry**: `NodeStore` persists per-node configuration and provides typed defaults for every node category (`graph_site/js/nodeStore.js:9`).
-- **Workspace Sync**: Generates QR codes, attaches modal listeners, and drives NKN workspace sharing flow (`graph_site/js/workspaceSync.js:35`).
-- **Utilities**: Common helpers for logging, QR conversion, boolean toggles, and ASR prompt sanitization (`graph_site/js/utils.js:1`).
-- **Transport Toggle UI**: `makeTransportButtonUpdater` renders the status pill based on current transport state (`graph_site/js/transport.js:3`).
-- **QR Scanner**: Camera capture + jsQR integration for filling inputs from codes (`graph_site/js/qrScanner.js:21`).
-- **Sentence & Streaming Helpers**: Handles NDJSON/Server-Sent Events and sentence stabilization for LLM streams (`graph_site/js/sentence.js:11`).
-- **Flows Library**: Modal-based flow manager for saving, importing, editing, and loading named workspaces (`graph_site/js/flows.js:1`).
+- **Configuration & Storage**: `CFG` is persisted to `localStorage` and seeded with transport + wiring defaults (`docs/js/config.js:9`). Use `saveCFG` to persist edits.
+- **Transport Layer**: `Net` abstracts HTTP vs NKN for JSON, blob, and streaming requests, caching NKN seeds in storage and maintaining pending requests (`docs/js/net.js:25`).
+- **Wire Router**: User-created connections live in `CFG.wires`; `Router` handles port registration, wiring UI, and payload fan-out (`docs/js/router.js:23`).
+- **Graph Engine**: `createGraph` owns workspace canvas transforms, node lifecycle, link drawing, and relay state badges (`docs/js/graph.js:18`).
+- **Node Registry**: `NodeStore` persists per-node configuration and provides typed defaults for every node category (`docs/js/nodeStore.js:9`).
+- **Workspace Sync**: Generates QR codes, attaches modal listeners, and drives NKN workspace sharing flow (`docs/js/workspaceSync.js:35`).
+- **Utilities**: Common helpers for logging, QR conversion, boolean toggles, and ASR prompt sanitization (`docs/js/utils.js:1`).
+- **Transport Toggle UI**: `makeTransportButtonUpdater` renders the status pill based on current transport state (`docs/js/transport.js:3`).
+- **QR Scanner**: Camera capture + jsQR integration for filling inputs from codes (`docs/js/qrScanner.js:21`).
+- **Sentence & Streaming Helpers**: Handles NDJSON/Server-Sent Events and sentence stabilization for LLM streams (`docs/js/sentence.js:11`).
+- **Flows Library**: Modal-based flow manager for saving, importing, editing, and loading named workspaces (`docs/js/flows.js:1`).
 
 ## Node Implementations
 
 | Node | Responsibilities | Source |
 | --- | --- | --- |
-| LLM | Model discovery, NDJSON streaming, image/tool payload prep, relay state updates | `graph_site/js/llm.js:11` |
-| ASR | Model metadata, Web Audio capture, chunked uploads, sign-off filtering | `graph_site/js/asr.js:20` |
-| TTS | Model caching, audio queue, oscilloscope visualization | `graph_site/js/tts.js:20` |
-| NKN DM | Handshake state machine, inbox tracking, invite modal control | `graph_site/js/nknDm.js:3` |
-| MCP | Handles MCP connection lifecycle, resource/tool syncing, status rendering | `graph_site/js/mcp.js:52` |
-| Media Stream | Screenshots + audio capture, base64 packaging, remote playback | `graph_site/js/mediaNode.js:24` |
-| Orientation | Device orientation permissions, throttling, quaternion conversion | `graph_site/js/orientation.js:20` |
-| Location | Geolocation watch, geohash/latlon formatting, payload throttling | `graph_site/js/location.js:76` |
+| LLM | Model discovery, NDJSON streaming, image/tool payload prep, relay state updates | `docs/js/llm.js:11` |
+| ASR | Model metadata, Web Audio capture, chunked uploads, sign-off filtering | `docs/js/asr.js:20` |
+| TTS | Model caching, audio queue, oscilloscope visualization | `docs/js/tts.js:20` |
+| NKN DM | Handshake state machine, inbox tracking, invite modal control | `docs/js/nknDm.js:3` |
+| MCP | Handles MCP connection lifecycle, resource/tool syncing, status rendering | `docs/js/mcp.js:52` |
+| Media Stream | Screenshots + audio capture, base64 packaging, remote playback | `docs/js/mediaNode.js:24` |
+| Orientation | Device orientation permissions, throttling, quaternion conversion | `docs/js/orientation.js:20` |
+| Location | Geolocation watch, geohash/latlon formatting, payload throttling | `docs/js/location.js:76` |
 
-Defaults (base URLs, auth slots, feature toggles) are centralized in `NodeStore.defaultsByType` for quick inspection (`graph_site/js/nodeStore.js:9`). When adding a new node type, mirror this pattern so `NodeStore.ensure` remains authoritative (`graph_site/js/nodeStore.js:41`).
+Defaults (base URLs, auth slots, feature toggles) are centralized in `NodeStore.defaultsByType` for quick inspection (`docs/js/nodeStore.js:9`). When adding a new node type, mirror this pattern so `NodeStore.ensure` remains authoritative (`docs/js/nodeStore.js:41`).
 
 ## Workspace & Share Flow
 
-1. QR modal exposes current workspace state as a signed payload; `workspaceSync` ensures QR dependencies are loaded before rendering (`graph_site/js/workspaceSync.js:80`).
-2. Incoming `?sync=` URLs are stripped and stored while forcing NKN transport to connect to the sender (`graph_site/js/workspaceSync.js:134`).
-3. NKN messages fan through `Net.nkn` listeners, so ensure the transport toggle is in sync before expecting share invitations (`graph_site/js/net.js:119`).
+1. QR modal exposes current workspace state as a signed payload; `workspaceSync` ensures QR dependencies are loaded before rendering (`docs/js/workspaceSync.js:80`).
+2. Incoming `?sync=` URLs are stripped and stored while forcing NKN transport to connect to the sender (`docs/js/workspaceSync.js:134`).
+3. NKN messages fan through `Net.nkn` listeners, so ensure the transport toggle is in sync before expecting share invitations (`docs/js/net.js:119`).
 
 ## Router Configuration
 
@@ -93,9 +93,9 @@ Defaults (base URLs, auth slots, feature toggles) are centralized in `NodeStore.
 
 ### Start the Graph UI (self-signed TLS)
 ```bash
-python3 graph_site/server.py --cert-mode self
+python3 docs/server.py --cert-mode self
 ```
-- First run builds `graph_site/venv` and emits LAN/public URLs. Adjust SANs via `graph_site/config.json:1` before launch.
+- First run builds `docs/venv` and emits LAN/public URLs. Adjust SANs via `docs/config.json:1` before launch.
 
 ### Run the Unified Router
 ```bash
@@ -112,26 +112,26 @@ python3 service_router/router.py --config router_config.json
 
 ### Manage Workspace Flows
 - Use the `Flows` button in the toolbar to open the modal library.
-- Save the current canvas, import/export JSON snapshots, or load flows back into the editor within the same modal (`graph_site/js/flows.js`).
+- Save the current canvas, import/export JSON snapshots, or load flows back into the editor within the same modal (`docs/js/flows.js`).
 
 ## Troubleshooting Checklist
 
-- **NKN badge stays red**: Confirm CDN `nkn.min.js` loads (browser console) and reinitialize transport via toggle (`graph_site/js/main.js:147`).
-- **Workspace QR fails**: Verify `QRCode.toCanvas` is available; `ensureQrReady()` waits for CDN script but logs errors if missing (`graph_site/js/workspaceSync.js:97`).
+- **NKN badge stays red**: Confirm CDN `nkn.min.js` loads (browser console) and reinitialize transport via toggle (`docs/js/main.js:147`).
+- **Workspace QR fails**: Verify `QRCode.toCanvas` is available; `ensureQrReady()` waits for CDN script but logs errors if missing (`docs/js/workspaceSync.js:97`).
 - **Service won’t start**: Inspect `.logs/<service>.log` created by `ServiceWatchdog` and check `state.last_error` snapshots (`service_router/router.py:384`).
 - **Ollama health fallback**: Router auto-frees ports and retries before falling back to “system” mode (`service_router/router.py:438`).
-- **Audio underruns**: TTS node increments `underruns` on empty buffers; adjust stream chunk sizes or model latency (`graph_site/js/tts.js:128`).
+- **Audio underruns**: TTS node increments `underruns` on empty buffers; adjust stream chunk sizes or model latency (`docs/js/tts.js:128`).
 
 ## External Dependencies
 
-- CDN: NKN SDK 1.3.6, jsQR 1.4.0, QRCode 1.5.4 (`graph_site/index.html:13`).
+- CDN: NKN SDK 1.3.6, jsQR 1.4.0, QRCode 1.5.4 (`docs/index.html:13`).
 - Python: requests, python-dotenv, qrcode (auto-installed) (`service_router/router.py:61`).
 - Node: nkn-sdk (bridge) (`service_router/bridge-node/package.json`).
 
 ## Contributing Notes
 
 - Maintain ASCII-friendly UI assets and avoid heavy dependencies to keep front-end lightweight.
-- New nodes should expose ports via `Router.register` and persist configuration through `NodeStore` to participate in exports/imports (`graph_site/js/router.js:23`).
+- New nodes should expose ports via `Router.register` and persist configuration through `NodeStore` to participate in exports/imports (`docs/js/router.js:23`).
 - For additional backend services, extend `ServiceWatchdog.DEFINITIONS` and map aliases in `SERVICE_TARGETS` to keep router lookups consistent (`service_router/router.py:100`).
 
 Keep this guide updated when new node types, transports, or services land so future agents can onboard instantly.
