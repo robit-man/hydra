@@ -41,9 +41,10 @@ BIN_DIR = VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
 PY_BIN = BIN_DIR / ("python.exe" if os.name == "nt" else "python")
 PIP_BIN = BIN_DIR / ("pip.exe" if os.name == "nt" else "pip")
 
-# Require Python >= 3.9; when selecting, try 3.9, 3.10, 3.11, 3.12 in that order.
+# Minimum supported Python
 MIN_VERSION = (3, 9)
-SEARCH_MINORS = ["3.9", "3.10", "3.11", "3.12"]
+# When python3 is too old, try these minors in order
+SEARCH_MINORS = ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
 def _py_version_tuple(cmd: List[str]) -> Optional[Tuple[int, int]]:
     """Return (major, minor) for this Python command, or None on failure."""
@@ -64,12 +65,12 @@ def _meets_min(cmd: List[str], minver: Tuple[int, int] = MIN_VERSION) -> bool:
 
 def _target_python_cmd() -> List[str]:
     """
-    Choose a Python ≥3.9:
-      - ROUTER_BOOTSTRAP_PY if set (must be ≥3.9)
-      - On Windows, 'py -3.9', '-3.10', '-3.11', '-3.12' (first that exists)
-      - On POSIX, 'python3.9'…'python3.12' (and common absolute paths)
-      - Fallback: current sys.executable if it is ≥3.9
-      - Else: exit with a clear message
+    Choose a Python interpreter per rule:
+      1) If ROUTER_BOOTSTRAP_PY is set and >=3.9, use it.
+      2) Check 'python3' (or 'py -3' on Windows). If it's >=3.9, use it.
+         If it's <3.9, then sequentially try 3.9 → 3.10 → 3.11 → 3.12 → 3.13.
+      3) Fallback: if current sys.executable is >=3.9, use it.
+      4) Else: exit with a clear message.
     """
     env_override = os.environ.get("ROUTER_BOOTSTRAP_PY", "").strip()
     if env_override:
@@ -78,31 +79,62 @@ def _target_python_cmd() -> List[str]:
             return cmd
         raise SystemExit(f"ROUTER_BOOTSTRAP_PY must point to Python >= {MIN_VERSION[0]}.{MIN_VERSION[1]}: {env_override}")
 
-    # Windows py launcher attempts (3.9 → 3.12)
+    # Step 2a: Probe 'python3' concept (platform-specific)
+    # On Windows, prefer 'py -3' as the 'python3' umbrella.
+    python3_cmd: Optional[List[str]] = None
     if os.name == "nt" and shutil.which("py"):
-        for minor in SEARCH_MINORS:
-            cmd = ["py", f"-{minor}"]
-            if _meets_min(cmd):
-                return cmd
+        python3_cmd = ["py", "-3"]
+    else:
+        path = shutil.which("python3")
+        if path:
+            python3_cmd = [path]
 
-    # POSIX candidates by name & common absolute locations
-    posix_names = [f"python{m}" for m in SEARCH_MINORS]
-    abs_candidates = [f"/usr/local/bin/python{m}" for m in SEARCH_MINORS] + [f"/opt/homebrew/bin/python{m}" for m in SEARCH_MINORS]
-    for name in posix_names:
-        path = shutil.which(name)
-        if path and _meets_min([path]):
-            return [path]
-    for path in abs_candidates:
-        if Path(path).exists() and _meets_min([path]):
-            return [path]
+    # If a 'python3' exists and is >=3.9, use it immediately
+    if python3_cmd and _meets_min(python3_cmd):
+        return python3_cmd
 
-    # Fallback to current interpreter if it meets the minimum (handles newer like 3.13)
+    # If 'python3' exists but is too old (<3.9), try specific minors in order
+    def _try_minors() -> Optional[List[str]]:
+        if os.name == "nt" and shutil.which("py"):
+            # Try 'py -3.9', 'py -3.10', ...
+            for minor in SEARCH_MINORS:
+                cmd = ["py", f"-{minor}"]
+                if _meets_min(cmd):
+                    return cmd
+        else:
+            # POSIX name lookups
+            for minor in SEARCH_MINORS:
+                name = f"python{minor}"
+                path = shutil.which(name)
+                if path and _meets_min([path]):
+                    return [path]
+            # Common absolute locations (Homebrew, /usr/local)
+            abs_candidates = [f"/usr/local/bin/python{m}" for m in SEARCH_MINORS] + \
+                             [f"/opt/homebrew/bin/python{m}" for m in SEARCH_MINORS]
+            for path in abs_candidates:
+                if Path(path).exists() and _meets_min([path]):
+                    return [path]
+        return None
+
+    if python3_cmd:
+        # python3 was found but too old or failed; now try minors in sequence
+        candidate = _try_minors()
+        if candidate:
+            return candidate
+    else:
+        # No python3 umbrella; try minors anyway
+        candidate = _try_minors()
+        if candidate:
+            return candidate
+
+    # Step 3: Fallback to current interpreter if it meets the minimum
     if _meets_min([sys.executable]):
         return [sys.executable]
 
+    # Step 4: Give up with guidance
     raise SystemExit(
         f"Python >= {MIN_VERSION[0]}.{MIN_VERSION[1]} is required. "
-        "Install any of 3.9–3.12 (e.g., `py -3.11` on Windows; `brew install python@3.11` on macOS; "
+        "Install any of 3.9–3.13 (e.g., `py -3.11` on Windows; `brew install python@3.11` on macOS; "
         "`apt-get install python3.11` on Debian/Ubuntu) or set ROUTER_BOOTSTRAP_PY to a suitable interpreter."
     )
 
@@ -121,7 +153,10 @@ def _ensure_venv() -> None:
 
     py_cmd = _target_python_cmd()
     subprocess.check_call([*py_cmd, "-m", "venv", str(VENV_DIR)])
-    subprocess.check_call([str(PY_BIN), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=BASE_DIR)
+    subprocess.check_call(
+        [str(PY_BIN), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
+        cwd=BASE_DIR,
+    )
 
 def _ensure_deps() -> None:
     need = []
