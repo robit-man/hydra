@@ -346,6 +346,7 @@ function refreshNodeResolution(force = false) {
   };
   const pendingModelPrefetch = new Set();
   const MODEL_PROVIDERS = { LLM, TTS, ASR };
+  let settingsModelSubscription = null;
   const LLM_BASE_INPUTS = new Set(['prompt', 'image', 'system']);
   const LLM_CAPABILITY_PORT_SPECS = [
     {
@@ -2384,7 +2385,12 @@ function refreshNodeResolution(force = false) {
     FileTransfer: {
       title: 'File Transfer',
       inputs: [{ name: 'incoming', label: 'Incoming DM' }, { name: 'file', label: 'File Input' }],
-      outputs: [{ name: 'packet', label: 'DM Packet' }, { name: 'file', label: 'File' }, { name: 'status', label: 'Status' }],
+      outputs: [
+        { name: 'packet', label: 'DM Packet' },
+        { name: 'outgoing', label: 'DM Packet (legacy)' },
+        { name: 'file', label: 'File' },
+        { name: 'status', label: 'Status' }
+      ],
       schema: [
         { key: 'chunkSize', label: 'Chunk Size (bytes)', type: 'number', def: 1024 },
         { key: 'autoAccept', label: 'Auto-accept incoming', type: 'select', options: ['true', 'false'], def: 'true' },
@@ -3747,6 +3753,10 @@ function refreshNodeResolution(force = false) {
   function openSettings(nodeId) {
     const node = WS.nodes.get(nodeId);
     if (!node) return;
+    if (typeof settingsModelSubscription === 'function') {
+      try { settingsModelSubscription(); } catch (err) { /* ignore */ }
+      settingsModelSubscription = null;
+    }
     const rec = NodeStore.ensure(nodeId, node.type);
     const cfg = rec.config || {};
     const modal = qs('#settingsModal');
@@ -3891,6 +3901,27 @@ function refreshNodeResolution(force = false) {
           fields.appendChild(label);
           fields.appendChild(wrapper);
 
+          const baseInput = fields.querySelector('input[name="base"]');
+          const relayInput = fields.querySelector('input[name="relay"]');
+          const apiInput = fields.querySelector('input[name="api"]');
+
+          const buildOverrideConfig = ({ mutateRelay = false } = {}) => {
+            const override = {};
+            const baseVal = baseInput?.value?.trim?.() || '';
+            if (baseVal) override.base = baseVal;
+            const relayRaw = relayInput?.value?.trim?.() || '';
+            if (relayRaw) {
+              const parsedRelay = parseNknAddress(relayRaw);
+              if (parsedRelay) {
+                override.relay = parsedRelay;
+                if (mutateRelay && relayInput && relayInput.value !== parsedRelay) relayInput.value = parsedRelay;
+              }
+            }
+            const apiVal = apiInput?.value?.trim?.() || '';
+            if (apiVal) override.api = apiVal;
+            return override;
+          };
+
           const applyCapabilities = (caps) => {
             if (node.type !== 'LLM') return;
             const normalized = Array.isArray(caps)
@@ -3924,8 +3955,21 @@ function refreshNodeResolution(force = false) {
               }
 
               const requestToken = ++capsRequestToken;
+              const override = buildOverrideConfig();
+              const hasOverride = Object.keys(override).length > 0;
+              let fetchOptions = null;
+              if (hasOverride) {
+                fetchOptions = { override };
+                const cfgCurrent = (NodeStore.ensure(node.id, node.type)?.config) || {};
+                const differs = ['base', 'relay', 'api'].some((key) => {
+                  const oVal = String(override[key] || '').trim();
+                  if (!oVal) return false;
+                  return oVal !== String(cfgCurrent[key] || '').trim();
+                });
+                if (differs || !cfgCurrent.base) fetchOptions.force = true;
+              }
               const promise = typeof modelProvider.fetchModelInfo === 'function'
-                ? modelProvider.fetchModelInfo(node.id, meta.id)
+                ? modelProvider.fetchModelInfo(node.id, meta.id, fetchOptions || {})
                 : null;
               if (promise && typeof promise.then === 'function') {
                 promise
@@ -3946,16 +3990,21 @@ function refreshNodeResolution(force = false) {
             applyCapabilities(meta.capabilities);
           };
 
+          const showStatus = (text) => {
+            buttonRow.innerHTML = '';
+            const status = document.createElement('div');
+            status.className = 'model-picker-status';
+            status.textContent = text;
+            buttonRow.appendChild(status);
+          };
+
           const renderButtons = () => {
             const models = modelProvider.listModels?.(node.id) || [];
-            buttonRow.innerHTML = '';
             if (!models.length) {
-              const msg = document.createElement('div');
-              msg.className = 'model-picker-empty';
-              msg.textContent = 'No models found';
-              buttonRow.appendChild(msg);
+              showStatus('No models found');
               return;
             }
+            buttonRow.innerHTML = '';
             models.forEach((meta) => {
               const btn = document.createElement('button');
               btn.type = 'button';
@@ -3973,28 +4022,61 @@ function refreshNodeResolution(force = false) {
           };
 
           const cachedModels = modelProvider.listModels?.(node.id) || [];
-          if (cachedModels.length) {
-            renderButtons();
-          } else {
-            const status = document.createElement('div');
-            status.className = 'model-picker-status';
-            status.textContent = 'Loading models…';
-            buttonRow.appendChild(status);
+          if (cachedModels.length) renderButtons();
+          else showStatus('Loading models…');
+
+          const handleFetchError = (err) => {
+            const available = modelProvider.listModels?.(node.id) || [];
+            if (available.length) return;
+            showStatus(`Failed to load models: ${err?.message || err}`);
+          };
+
+          if (typeof modelProvider.subscribeModels === 'function') {
+            settingsModelSubscription = modelProvider.subscribeModels(node.id, () => {
+              const models = modelProvider.listModels?.(node.id) || [];
+              if (models.length) renderButtons();
+              else showStatus('No models found');
+            });
           }
 
-          modelProvider.ensureModels(node.id)
+          modelProvider.ensureModels(node.id, { force: true })
             .then(() => {
-              renderButtons();
+              const models = modelProvider.listModels?.(node.id) || [];
+              if (models.length) renderButtons();
             })
-            .catch((err) => {
-              const available = modelProvider.listModels?.(node.id) || [];
-              if (available.length) return;
-              buttonRow.innerHTML = '';
-              const status = document.createElement('div');
-              status.className = 'model-picker-status';
-              status.textContent = `Failed to load models: ${err?.message || err}`;
-              buttonRow.appendChild(status);
-            });
+            .catch(handleFetchError);
+          let pendingRelayFetch = null;
+          let lastRelayKey = '';
+
+          const runRelayFetch = ({ force = false } = {}) => {
+            const override = buildOverrideConfig({ mutateRelay: true });
+            const baseVal = override.base || '';
+            const relayVal = override.relay || '';
+            const apiVal = override.api || '';
+            if (!baseVal || !relayVal) return;
+            const key = `${baseVal}|${relayVal}|${apiVal}`;
+            if (!force && key === lastRelayKey) return;
+            lastRelayKey = key;
+            const existing = modelProvider.listModels?.(node.id) || [];
+            if (!existing.length) showStatus('Refreshing models…');
+            modelProvider.refreshModels?.(node.id, { base: baseVal, relay: relayVal, ...(apiVal ? { api: apiVal } : {}) }, { force: true })
+              ?.catch(handleFetchError);
+          };
+
+          const scheduleRelayFetch = () => {
+            if (pendingRelayFetch) clearTimeout(pendingRelayFetch);
+            pendingRelayFetch = setTimeout(() => runRelayFetch({ force: true }), 400);
+          };
+
+          if (relayInput) {
+            relayInput.addEventListener('input', scheduleRelayFetch);
+            relayInput.addEventListener('blur', () => runRelayFetch({ force: true }));
+          }
+          if (baseInput) baseInput.addEventListener('change', () => runRelayFetch({ force: true }));
+          if (apiInput) apiInput.addEventListener('change', () => runRelayFetch({ force: true }));
+
+          if (relayInput && relayInput.value && !cachedModels.length) runRelayFetch({ force: true });
+
           continue;
         }
         const select = document.createElement('select');
@@ -4161,6 +4243,10 @@ function refreshNodeResolution(force = false) {
     delete form.dataset.nodeId;
     modal.classList.add('hidden');
     modal.setAttribute('aria-hidden', 'true');
+    if (typeof settingsModelSubscription === 'function') {
+      try { settingsModelSubscription(); } catch (err) { /* ignore */ }
+      settingsModelSubscription = null;
+    }
     closeQrScanner();
   }
 
@@ -4324,6 +4410,9 @@ function refreshNodeResolution(force = false) {
         // ignore
       }
       delete node._mo;
+    }
+    if (MODEL_PROVIDERS[node.type]?.dispose) {
+      try { MODEL_PROVIDERS[node.type].dispose(nodeId); } catch (err) { /* ignore */ }
     }
     if (node.type === 'NknDM') {
       NknDM.dispose(nodeId);

@@ -249,6 +249,16 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
     if (ui.cancel) ui.cancel.classList.remove('hidden');
   }
 
+  const emitPacket = (id, payload) => {
+    Router.sendFrom(id, 'packet', payload);
+    try {
+      const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+      Router.sendFrom(id, 'outgoing', text);
+    } catch (err) {
+      Router.sendFrom(id, 'outgoing', payload);
+    }
+  };
+
   function updateReceiveUi(id, incoming) {
     const st = ensureState(id);
     const ui = st.ui;
@@ -422,7 +432,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ivBytes: DEFAULT_IV_BYTES
       };
     }
-    Router.sendFrom(id, 'packet', header);
+    emitPacket(id, header);
     await sleep(10);
   }
 
@@ -458,7 +468,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ts: Date.now()
       };
       if (encMeta) chunkMessage.encryption = encMeta;
-      Router.sendFrom(id, 'packet', chunkMessage);
+      emitPacket(id, chunkMessage);
       sending.sentChunks = seq;
       updateSendUi(id, sending);
       emitStatus(id, {
@@ -484,7 +494,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       route: sending.route,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'packet', message);
+    emitPacket(id, message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: sending.id,
@@ -505,7 +515,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       reason,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'packet', message);
+    emitPacket(id, message);
     emitStatus(id, {
       direction: 'outgoing',
       transferId: st.sending.id,
@@ -736,7 +746,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
         ts: Date.now()
       };
       if (chunk.enc) message.encryption = chunk.enc;
-      Router.sendFrom(id, 'packet', message);
+      emitPacket(id, message);
     });
     emitStatus(id, {
       direction: 'outgoing',
@@ -756,7 +766,7 @@ function createFileTransfer({ getNode, NodeStore, Router, log, setBadge }) {
       missing,
       ts: Date.now()
     };
-    Router.sendFrom(id, 'packet', message);
+    emitPacket(id, message);
     entry.missingTries += 1;
     emitStatus(id, {
       direction: 'incoming',

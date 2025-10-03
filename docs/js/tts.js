@@ -1,7 +1,10 @@
 function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayState = () => {}, Router }) {
   const state = new Map();
   const MODEL_PROMISE = new Map();
-  const MODEL_METADATA = new Map();
+  const MODEL_CACHE = new Map();
+  const MODEL_REFRESH_TIMER = new Map();
+  const MODEL_LISTENERS = new Map();
+  const MODEL_REFRESH_MS = 60 * 1000;
   const SIGNAL_TRUE_FALSE = 'true/false';
   const SIGNAL_TRUE_EMPTY = 'true/empty';
   const muteRequests = new Map();
@@ -110,6 +113,73 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     return { id, label, raw };
   }
 
+  const makeCacheKey = (nodeId, base, relay, api) => `${nodeId}::${base}::${relay}::${api}`;
+
+  const getCachedMeta = (nodeId) => MODEL_CACHE.get(nodeId) || null;
+
+  const setCachedMeta = (nodeId, meta) => {
+    if (!meta) {
+      MODEL_CACHE.delete(nodeId);
+      return;
+    }
+    MODEL_CACHE.set(nodeId, meta);
+    const subs = MODEL_LISTENERS.get(nodeId);
+    if (subs) {
+      const list = (meta.list || []).slice();
+      subs.forEach((fn) => {
+        try { fn(list); } catch (err) { /* noop */ }
+      });
+    }
+  };
+
+  const clearModelRefresh = (nodeId) => {
+    const timer = MODEL_REFRESH_TIMER.get(nodeId);
+    if (timer) {
+      clearTimeout(timer);
+      MODEL_REFRESH_TIMER.delete(nodeId);
+    }
+  };
+
+  const scheduleModelRefresh = (nodeId) => {
+    clearModelRefresh(nodeId);
+    const entry = getCachedMeta(nodeId);
+    if (!entry || !entry.base) return;
+    const timer = setTimeout(() => {
+      MODEL_REFRESH_TIMER.delete(nodeId);
+      try {
+        const rec = NodeStore.ensure(nodeId, 'TTS');
+        const cfg = rec?.config || {};
+        const cfgBase = String(cfg.base || '').trim();
+        const cfgRelay = String(cfg.relay || '').trim();
+        const cfgApi = String(cfg.api || '').trim();
+        const override = (entry.base !== cfgBase || entry.relay !== cfgRelay || entry.api !== cfgApi)
+          ? { base: entry.base, relay: entry.relay, api: entry.api }
+          : null;
+        const opts = override ? { force: true, override } : { force: true };
+        ensureModelMetadata(nodeId, cfg, opts).catch(() => {});
+      } catch (err) {
+        // ignore refresh issues
+      }
+    }, MODEL_REFRESH_MS);
+    MODEL_REFRESH_TIMER.set(nodeId, timer);
+  };
+
+  const subscribeModels = (nodeId, fn) => {
+    if (typeof fn !== 'function') return () => {};
+    let subs = MODEL_LISTENERS.get(nodeId);
+    if (!subs) {
+      subs = new Set();
+      MODEL_LISTENERS.set(nodeId, subs);
+    }
+    subs.add(fn);
+    return () => {
+      const set = MODEL_LISTENERS.get(nodeId);
+      if (!set) return;
+      set.delete(fn);
+      if (!set.size) MODEL_LISTENERS.delete(nodeId);
+    };
+  };
+
   async function fetchModelMetadata(base, api, viaNkn, relay) {
     const cleaned = (base || '').replace(/\/+$/, '');
     if (!cleaned) return [];
@@ -133,29 +203,37 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     }
   }
 
-  async function ensureModelMetadata(nodeId, cfg, { force = false } = {}) {
-    const base = (cfg.base || '').trim();
+  async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
+    const effective = Object.assign({}, cfg || {}, override || {});
+    const base = String(effective.base || '').trim();
+    const relay = String(effective.relay || '').trim();
+    const api = String(effective.api || '').trim();
     if (!base) {
-      MODEL_METADATA.set(nodeId, []);
+      setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now() });
+      clearModelRefresh(nodeId);
       return [];
     }
-    if (!force && MODEL_METADATA.has(nodeId)) return MODEL_METADATA.get(nodeId);
-    if (MODEL_PROMISE.has(nodeId)) {
-      return MODEL_PROMISE.get(nodeId);
-    }
-    const relay = (cfg.relay || '').trim();
     const viaNkn = !!relay;
-    const api = (cfg.api || '').trim();
+    const cache = getCachedMeta(nodeId);
+    const now = Date.now();
+    if (!force && cache && cache.base === base && cache.relay === relay && cache.api === api && (now - cache.fetchedAt) < MODEL_REFRESH_MS) {
+      return cache.list.slice();
+    }
+    const key = makeCacheKey(nodeId, base, relay, api);
+    if (MODEL_PROMISE.has(key)) return MODEL_PROMISE.get(key);
     const task = (async () => {
       const list = await fetchModelMetadata(base, api, viaNkn, relay);
-      MODEL_METADATA.set(nodeId, list);
-      return list;
+      setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now() });
+      return list.slice();
     })();
-    MODEL_PROMISE.set(nodeId, task);
+    MODEL_PROMISE.set(key, task);
     try {
       return await task;
     } finally {
-      MODEL_PROMISE.delete(nodeId);
+      MODEL_PROMISE.delete(key);
+      const entry = getCachedMeta(nodeId);
+      if (entry && entry.base) scheduleModelRefresh(nodeId);
+      else clearModelRefresh(nodeId);
     }
   }
 
@@ -177,12 +255,30 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   }
 
   function listModels(nodeId) {
-    return MODEL_METADATA.get(nodeId) || [];
+    const entry = getCachedMeta(nodeId);
+    return entry && Array.isArray(entry.list) ? entry.list.slice() : [];
   }
 
   function getModelInfo(nodeId, modelId) {
     const models = listModels(nodeId);
     return models.find((item) => item.id === modelId) || null;
+  }
+
+  function refreshModels(nodeId, override = null, options = {}) {
+    const rec = NodeStore.ensure(nodeId, 'TTS');
+    const cfg = rec?.config || {};
+    const merged = Object.assign({ force: true }, options || {});
+    if (override) merged.override = override;
+    return ensureModelMetadata(nodeId, cfg, merged);
+  }
+
+  function dispose(nodeId) {
+    clearModelRefresh(nodeId);
+    MODEL_CACHE.delete(nodeId);
+    MODEL_LISTENERS.delete(nodeId);
+    for (const key of Array.from(MODEL_PROMISE.keys())) {
+      if (key.startsWith(`${nodeId}::`)) MODEL_PROMISE.delete(key);
+    }
   }
 
   function ensure(nodeId) {
@@ -714,6 +810,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     ensureModels,
     listModels,
     getModelInfo,
+    refreshModels,
+    subscribeModels,
+    dispose,
     onMute,
     refreshConfig
   };
