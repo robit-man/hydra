@@ -1638,7 +1638,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   const AUTO_CHUNK_MAX_BYTES = 2048;
 
   function determineChunkBytes(cfg, text) {
-    const base = Math.max(512, Number(cfg.chunkBytes) || 1800);
+    const base = Math.max(512, Number(cfg.chunkBytes) || 50000);
     if (!cfg.autoChunk) return base;
     const hardCap = Math.max(512, Math.min(base, AUTO_CHUNK_MAX_BYTES));
     const bodyBytes = encoder.encode(text).length;

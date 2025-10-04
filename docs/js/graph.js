@@ -2468,7 +2468,7 @@ function refreshNodeResolution(force = false) {
       outputs: [{ name: 'incoming' }, { name: 'status' }, { name: 'raw' }],
       schema: [
         { key: 'address', label: 'Target Address', type: 'text', placeholder: 'nkn...' },
-        { key: 'chunkBytes', label: 'Chunk Size (bytes)', type: 'number', def: 1800 },
+        { key: 'chunkBytes', label: 'Chunk Size (bytes)', type: 'number', def: 50000 },
         { key: 'heartbeatInterval', label: 'Heartbeat (s)', type: 'number', def: 15 }
       ]
     },
