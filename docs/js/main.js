@@ -91,8 +91,10 @@ const Media = createMediaNode({
   getNode: (id) => graphAccess.getNode(id),
   Router,
   NodeStore,
+  Net,
   setBadge,
-  log
+  log,
+  setRelayState
 });
 
 const Orientation = createOrientationNode({

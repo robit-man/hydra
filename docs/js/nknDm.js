@@ -927,20 +927,37 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
     if (!client || listenerAttached) return;
     client.on('message', (src, payload) => {
       try {
-        debugLog('[nkndm] message:event', { src, payload });
         const normalized = normalizeIncomingEvent(src, payload);
         const actualSrc = normalized.src || (typeof src === 'string' ? src : '');
         const actualPayload = normalized.payload;
-        debugLog('[nkndm] message:normalized', { src: actualSrc, payload: actualPayload });
         const { text, object } = interpretIncomingPayload(actualPayload);
         const envelope = object && typeof object === 'object' ? object : safeParseJson(text);
         const unwrapped = unwrapNkndmMessage(envelope, text);
         const data = unwrapped?.message || envelope;
-        if (!data || typeof data.type !== 'string') {
+        const type = typeof data?.type === 'string' ? String(data.type).trim() : '';
+        const componentType = typeof data?.componentType === 'string' ? data.componentType.trim() : '';
+        const targetComponentType = typeof data?.targetComponentType === 'string' ? data.targetComponentType.trim() : '';
+        const channel = typeof data?.channel === 'string' ? data.channel.trim().toLowerCase() : '';
+        const envelopeComponentType = typeof envelope?.componentType === 'string' ? envelope.componentType.trim() : '';
+        const envelopeTargetComponentType = typeof envelope?.targetComponentType === 'string' ? envelope.targetComponentType.trim() : '';
+        const envelopeChannel = typeof envelope?.channel === 'string' ? envelope.channel.trim().toLowerCase() : '';
+        if (
+          type === 'nkndm.media' ||
+          componentType === 'MediaStream' ||
+          targetComponentType === 'MediaStream' ||
+          envelopeComponentType === 'MediaStream' ||
+          envelopeTargetComponentType === 'MediaStream' ||
+          channel === 'media' ||
+          envelopeChannel === 'media'
+        ) {
+          return;
+        }
+        debugLog('[nkndm] message:event', { src, payload });
+        debugLog('[nkndm] message:normalized', { src: actualSrc, payload: actualPayload });
+        if (!type) {
           logRawDm(actualSrc || src, envelope ?? text ?? '');
           return;
         }
-        const type = String(data.type || '').trim();
         if (!type.startsWith('nkndm.')) {
           logRawDm(actualSrc || src, envelope ?? text ?? '', data);
           return;
@@ -1299,6 +1316,7 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   function handleMessage(src, data) {
     if (typeof src !== 'string') return;
     debugLog('[nkndm] handleMessage:incoming', { src, data });
+    if (data.type === 'nkndm.media') return;
     if (data.type === 'nkndm.handshake') {
       handleHandshakeMessage(src, data);
       return;

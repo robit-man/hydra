@@ -1,0 +1,2624 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>NKN Mesh — Multi-Peer Video (Mobile-First, Click-to-Stream)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://unpkg.com/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <style>
+        :root {
+            --bg: #0b0b0b;
+            --fg: #eee;
+            --muted: #9aa0a6;
+            --line: #1b1b1b;
+            --ok: #30cf6b;
+            --warn: #f7b500;
+            --err: #e84d4d;
+            --card: #0f1011;
+            --chip: #0a0a0a;
+            --accent: #3b82f6;
+            --frame: #000;
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: var(--bg);
+            color: var(--fg);
+            font-family: "Rajdhani", sans-serif;
+            touch-action: manipulation;
+            user-select: none;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .bar {
+            position: sticky;
+            top: 0;
+            width: 100vw;
+            z-index: 30;
+            display: flex;
+            flex-flow: row;
+            overflow-x: auto;
+            align-items: center;
+            gap: 10px;
+            box-sizing: border-box;
+            padding: 10px 12px;
+            background: transparent;
+            color: white;
+            text-shadow: 0px 0px 3px black;
+            backdrop-filter: blur(150px) brightness(1.2);
+        }
+
+        .bar h1 {
+            margin: 0;
+            font-size: 16px
+        }
+
+        .grow {
+            flex: 1
+        }
+
+        .mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace
+        }
+
+        .tiny {
+            font-size: 12px;
+            color: var(--muted)
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #444;
+            border: 1px solid #222;
+            display: inline-block
+        }
+
+        .ok {
+            background: var(--ok)
+        }
+
+        .warn {
+            background: var(--warn)
+        }
+
+        .err {
+            background: var(--err)
+        }
+
+        @keyframes nknTxBlink {
+
+            0%,
+            55% {
+                opacity: 1
+            }
+
+            55%,
+            100% {
+                opacity: .35
+            }
+        }
+
+        .dot.ok.blink {
+            animation: nknTxBlink 1s linear infinite;
+        }
+
+        .kv {
+            display: inline-flex;
+            gap: 6px;
+            align-items: center;
+            border-radius: 8px;
+            padding: 3px 8px
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid #252525;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 12px;
+            background: #0a0a0a
+        }
+
+
+        /* Sidebar */
+        .sideToggle {
+            appearance: none;
+            border: 1px solid #333;
+            background: transparent;
+            color: #fff;
+            border-radius: 10px;
+            padding: 8px 10px;
+            cursor: pointer;
+            z-index: 2;
+        }
+
+        .sidebar {
+            position: fixed;
+            inset: 0 auto 0 0;
+            width: min(90vw, 360px);
+            transform: translateX(-100%);
+            transition: transform .25s ease;
+            background: var(--card);
+            border-right: 1px solid #1b1b1b;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px;
+            overflow-x: clip;
+            overflow-y: auto;
+            padding: 12px;
+            top: 54px;
+            max-height: calc(100vh - 54px);
+        }
+
+        .backToggle {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+            position: fixed;
+            z-index: 1;
+            backdrop-filter: blur(20px);
+            transform: translateX(-100%);
+        }
+
+        .backToggle.open {
+            transform: none;
+        }
+
+        .sidebar.open {
+            transform: none
+        }
+
+        .sideSection {
+            border: 1px solid #1d1d1d;
+            border-radius: 12px;
+            padding: 10px;
+            background: #101113
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+            margin: 8px 0 6px
+        }
+
+        input[type="text"],
+        select {
+            width: 100%;
+            height: 36px;
+            background: #000;
+            border: 1px solid #242424;
+            border-radius: 10px;
+            color: var(--fg);
+            padding: 8px 10px
+        }
+
+        input {
+
+            width: 100%;
+            height: 36px;
+            background: #000;
+            border: 1px solid #242424;
+            border-radius: 10px;
+            color: var(--fg);
+            padding: 8px 10px;
+        }
+
+        #ori-share #btn-orient,
+        #btn-calib {
+            min-width: max-content;
+            height: 36px;
+            background: #000;
+            border: 1px solid #242424;
+            border-radius: 10px;
+            color: var(--fg);
+            padding: 8px 10px;
+
+        }
+
+        #ori-share {}
+
+        input[type="range"] {
+            width: 100%
+        }
+
+        /* ——— Username modal ——— */
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            display: none;
+            /* toggled by .open */
+            place-items: center;
+            z-index: 9999;
+            background: rgba(0, 0, 0, .45);
+            backdrop-filter: blur(16px) saturate(1.15);
+        }
+
+        .modal-backdrop.open {
+            display: grid;
+        }
+
+        .modal-card {
+            width: min(92vw, 520px);
+            border: 1px solid #1d1d1d;
+            border-radius: 16px;
+            background: #0f1011;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, .45);
+            padding: 18px;
+        }
+
+        .modal-card h2 {
+            margin: 0 0 8px;
+            font-size: 20px;
+        }
+
+        .modal-card p {
+            margin: 0 0 12px;
+            color: var(--muted);
+        }
+
+        .modal-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .modal-row input {
+            flex: 1;
+            height: 40px;
+            border-radius: 10px;
+            border: 1px solid #242424;
+            background: #000;
+            color: var(--fg);
+            padding: 0 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .modal-row button {
+            height: 40px;
+            padding: 0 14px;
+            border-radius: 10px;
+            border: 1px solid #2a2a2a;
+            cursor: pointer;
+            background: var(--fg);
+            color: #000;
+            font-weight: 600;
+        }
+
+        .modal-row button.secondary {
+            background: #0a0a0a;
+            color: #fff;
+        }
+
+        .modal-help {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 6px;
+        }
+
+        .modal-err {
+            font-size: 12px;
+            color: var(--err);
+            margin-top: 6px;
+            min-height: 1em;
+        }
+
+
+        #localVideo {
+
+            max-height: unset !important;
+            object-fit: cover;
+            height: 100vh !important;
+            width: 100vw !important;
+            position: fixed;
+            top: 0px;
+            z-index: 0;
+            filter: contrast(0.2) blur(300px) saturate(20) brightness(1.5) opacity(0.2) blur(500px) brightness(0.5);
+            scale: 1.5;
+        }
+
+        /* Content */
+        .wrap {
+            max-width: 1800px;
+            margin: 0 auto;
+            padding: 10px
+        }
+
+        .wrap-bar {
+            display: flex;
+            flex-flow: row;
+            gap: 10px;
+        }
+
+        @media (min-width: 920px) {
+            #grid {
+                column-width: 600px;
+            }
+
+            .wrap {
+                max-width: 2800px;
+                margin: 0 auto;
+                padding: 10px
+            }
+        }
+
+        .peer {
+            break-inside: avoid;
+            display: inline-block;
+            width: 100%;
+        }
+
+
+        #grid {
+            gap: 12px;
+            /* keep your gap */
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            grid-auto-rows: 8px;
+            /* tiny row unit for spanning */
+            grid-auto-flow: dense;
+            /* fill holes */
+            align-items: start;
+            /* avoid stretching */
+        }
+
+        @media (min-width: 920px) {
+            #grid {
+                grid-template-columns: repeat(auto-fill, minmax(550px, 1fr));
+                gap: 12px;
+            }
+        }
+
+        /* Orientation gauges on peer tile bottom bar */
+        .ori {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            margin-right: 6px;
+        }
+
+        .gauge {
+            position: relative;
+            width: 28px;
+            height: 28px;
+            border: 1px solid #262626;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .gauge::after {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            background: #888;
+            opacity: .8;
+            transform: translate(-50%, -50%);
+        }
+
+        .gauge .arrow {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 2px;
+            height: 40%;
+            background: #ddd;
+            border-radius: 1px;
+            transform-origin: 50% 100%;
+            /* anchored at center; base at center; points outward */
+            transform: translate(-50%, -100%) rotate(0deg);
+        }
+
+        /* Peer tile */
+        .peer {
+            border-radius: 1rem;
+            overflow: clip;
+            background: transparent;
+            height: max-content;
+            backdrop-filter: blur(50px) brightness(2);
+            margin-bottom: 12px;
+
+        }
+
+        .self .overlay.top .addr::after {
+            content: "";
+        }
+
+        /* spinner + stalled state */
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .frame .loading {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 32px;
+            height: 32px;
+            margin: -18px 0 0 -18px;
+            border-radius: 50%;
+            border: 1px solid transparent;
+            border-top-color: var(--fg);
+            animation: spin 1s linear infinite;
+            z-index: 6;
+            pointer-events: none;
+            mix-blend-mode: soft-light;
+        }
+
+        .frame.stalled .preview {
+            transition: filter 2s ease-out;
+            transition: transform 5s ease-out;
+            transform: scale(1.5);
+            filter: blur(120px) brightness(2) grayscale(.2);
+            z-index: -1;
+        }
+
+
+        .frame .preview {
+            transition: filter 2s ease-out;
+            transition: transform 0.5s ease-out;
+            transform: scale(1);
+            filter: blur(0px) brightness(1) grayscale(0);
+            z-index: -2;
+        }
+
+
+        .frame {
+            position: relative;
+            background: transparent;
+            border-bottom: 1px solid #161616;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: clip;
+            cursor: pointer;
+            min-height: 80px;
+        }
+
+        .frame:active {}
+
+        .preview {
+            width: 100%;
+            height: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000
+        }
+
+        .preview canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            overflow: hidden;
+        }
+
+        .overlay {
+            position: absolute;
+            left: 8px;
+            right: 8px;
+            display: flex;
+            align-items: center;
+            pointer-events: none;
+            gap: 6px;
+            font-size: 12px;
+        }
+
+        .overlay.top {
+            top: 8px;
+            justify-content: space-between
+        }
+
+        .overlay.bottom {
+            bottom: 8px;
+            justify-content: space-between;
+            color: #ddd;
+            mix-blend-mode: plus-lighter;
+        }
+
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid #222;
+            background: #0a0a0a
+        }
+
+        .tx {
+            font-weight: 600;
+            border-color: #2a2a2a
+        }
+
+        .addr {
+            font-weight: 600
+        }
+
+        .meta {
+            font-size: 11px;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px
+        }
+
+        .row.head {
+            justify-content: space-between
+        }
+
+        .name {
+            font-weight: 600
+        }
+
+        .muted {
+            color: var(--muted)
+        }
+
+        /* Self tile (optional) */
+        .self .overlay.top .addr::after {
+            content: " (you)";
+            font-weight: 400;
+            color: var(--muted);
+        }
+
+        /* Status chips in header */
+        .status {
+            display: flex;
+            flex-flow: row;
+            overflow-x: auto;
+            gap: 8px;
+            align-items: center;
+            width: max-content;
+        }
+
+        .hideme {
+            display: none
+        }
+
+        @media (min-width: 920px) {
+            #grid {
+                grid-template-columns: repeat(auto-fill, minmax(550px, 1fr));
+                gap: 12px
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <video id="localVideo" muted playsinline autoplay
+        style="width:100%;border:1px solid #222;border-radius:10px;background:#000;max-height:180px;object-fit:cover"></video>
+    <!-- Header -->
+    <div class="bar">
+        <div class="wrap-bar">
+            <button id="btnSide" class="sideToggle">☰</button>
+            <div class="grow"></div>
+            <div class="status tiny">
+                <span class="kv"><span id="txtNkn">NKN: connecting…</span><span id="dotNkn" class="dot"></span></span>
+                <span class="kv"><span id="txtSig">Mesh: discovering…</span><span id="dotSig" class="dot"></span></span>
+                <span id="txtSigMeta" class="tiny">—</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sidebar (hidden controls) -->
+    <aside id="sidebar" class="sidebar">
+        <div class="sideSection">
+            <div class="row head">
+                <div class="tiny"><span id="myAddr" class="mono">—</span></div>
+            </div>
+
+            <div class="row" style="flex-wrap:wrap">
+                <span class="kv"><span>Src FPS</span><strong id="mFps">—</strong></span>
+                <span class="kv"><span>Avg KB</span><strong id="mSize">—</strong></span>
+                <span class="kv"><span>Sent</span><strong id="mSent">0</strong></span>
+                <span class="kv"><span>Dropped</span><strong id="mDrop">0</strong></span>
+            </div>
+        </div>
+
+        <div class="sideSection">
+            <label>Display name (prefix)</label>
+            <input id="nickInput" class="mono" placeholder="letters, numbers, _ or -" spellcheck="false" />
+            <div class="tiny">Used as your NKN identifier so others see this instead of your hex.</div>
+        </div>
+
+
+        <div class="sideSection">
+            <label>Primary Signaller Public Key (64-hex) — override</label>
+            <input id="hexSig" class="mono" placeholder="64-hex (blank = default)" spellcheck="false" />
+            <div class="tiny">Default: <code
+                    class="mono">8ad525942fc13bdf468a640a18716cbd91ba75d3bcb0ca198f73e9cd0cf34a88</code></div>
+        </div>
+        <div id="ori-share" style="display:flex;flex-flow:wrap;gap:.5rem;align-items:center">
+            <button id="btn-orient" type="button">Share Orientation: OFF</button>
+            <button id="btn-calib" type="button" title="Zero the current yaw">Calibrate Yaw</button>
+            <br>
+            <div id="ori-status" style="opacity:.7;font-size:12px">idle</div>
+
+        </div>
+        <div class="sideSection">
+            <div class="badge">Encoder & Delivery</div>
+            <label>Target FPS</label>
+            <input id="fpsSlider" type="range" min="4" max="30" step="1" value="25" />
+            <div class="tiny"><span id="fpsLbl">25</span> fps (global cadence)</div>
+
+            <label>Scale (downsize)</label>
+            <input id="sSlider" type="range" min="0.4" max="1.0" step="0.05" value="0.5" />
+            <div class="tiny">Lower = fewer pixels</div>
+
+            <label>Quality</label>
+            <select id="fmtQ">
+                <option value="jpeg:0.60" selected>JPEG 0.60</option>
+                <option value="jpeg:0.70">JPEG 0.70</option>
+                <option value="webp:0.60">WebP 0.60</option>
+                <option value="webp:0.70">WebP 0.70</option>
+            </select>
+
+            <label>Max KB / frame</label>
+            <input id="kbSlider" type="range" min="80" max="900" step="20" value="380" />
+            <div class="tiny"><span id="kbLbl">380</span> KB cap</div>
+
+            <label>Realtime Bias (latency ⇄ quality)</label>
+            <input id="biasSlider" type="range" min="0" max="1" step="0.05" value="0.7" />
+            <div class="tiny">Higher = prefer lower delay, pace per-peer when E2E rises</div>
+        </div>
+        <div class="sideSection" id="audioControls">
+            <div class="badge">Audio (PCM / μ-law / Opus)</div>
+
+            <label>Sample rate</label>
+            <select id="aRate">
+                <option value="8000">8 kHz (tiny)</option>
+                <option value="12000">12 kHz</option>
+                <option value="16000" selected>16 kHz (clear)</option>
+            </select>
+
+            <label>Frame size</label>
+            <select id="aMs">
+                <option value="20">20 ms</option>
+                <option value="40" selected>40 ms</option>
+                <option value="60">60 ms</option>
+                <option value="80">80 ms</option>
+            </select>
+
+            <label>Format</label>
+            <select id="aFmt">
+                <option value="mulaw8" selected>μ-law 8-bit</option>
+                <option value="pcm16le">PCM 16-bit</option>
+                <option value="opus">Opus (webm)</option>
+            </select>
+
+            <div class="tiny" id="aEstimate" style="margin-top:6px">—</div>
+            <div class="wrap" style="gap:10px;margin-top:6px;padding:0px;">
+                <span class="kv"><span>Src FPS</span><strong id="aFps">—</strong></span>
+                <span class="kv"><span>Avg KB</span><strong id="aSize">—</strong></span>
+                <span class="kv"><span>Sent</span><strong id="aSent">0</strong></span>
+                <span class="kv"><span>Dropped</span><strong id="aDrop">0</strong></span>
+            </div>
+        </div>
+
+    </aside>
+
+    </button>
+
+    <!-- Grid -->
+    <div class="wrap">
+        <div id="grid"></div>
+    </div>
+
+    <script>
+        /* ====== helpers ====== */
+        const onReady = (fn) => (
+            document.readyState === 'loading'
+                ? document.addEventListener('DOMContentLoaded', fn, { once: true })
+                : fn()
+        );
+
+        const $ = s => document.querySelector(s);
+        const shortHex = (s, a = 8, b = 6) => s ? (s.slice(0, a) + '…' + s.slice(-b)) : '—';
+        const isHex64 = s => /^[0-9a-f]{64}$/i.test((s || '').trim());
+        const now = () => Date.now();
+        const fmtAgo = ms => { if (ms < 1500) return 'now'; const s = Math.floor(ms / 1000); if (s < 60) return s + 's'; const m = Math.floor(s / 60); if (m < 60) return m + 'm'; const h = Math.floor(m / 60); if (h < 24) return h + 'h'; const d = Math.floor(h / 24); return d + 'd'; };
+        const setNkn = (t, cls) => { $('#txtNkn').textContent = t; $('#dotNkn').className = 'dot ' + (cls || ''); };
+        const setSig = (t, cls) => { $('#txtSig').textContent = t; $('#dotSig').className = 'dot ' + (cls || ''); };
+        const setSigMeta = t => { $('#txtSigMeta').textContent = t; };
+
+        const LS = { SEED: 'NKN_SEED_HEX_V1', SIGHEX: 'NKN_SIG_HEX', KNOWN_IDS: 'NKN_KNOWN_IDS_V2' };
+        const DEFAULT_SIG_HEX = '54c1d8.8ad525942fc13bdf468a640a18716cbd91ba75d3bcb0ca198f73e9cd0cf34a88';
+        const toHex = u8 => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
+        function getOrCreateSeed() { let hex = localStorage.getItem(LS.SEED); if (/^[0-9a-f]{64}$/i.test(hex || '')) return hex; const u = new Uint8Array(32); crypto.getRandomValues(u); hex = toHex(u); localStorage.setItem(LS.SEED, hex); return hex; }
+
+        /* ====== layout / sidebar ====== */
+        const sidebar = $('#sidebar');
+        const btnback = $('#btnBack');
+        $('#btnSide').addEventListener('click', () => sidebar.classList.toggle('open'));
+        $('#btnSide').addEventListener('click', () => btnback.classList.toggle('open'));
+
+        /* ====== mesh / peer state ====== */
+        let client = null, selfPub = null, selfAddr = null;
+        let signallerHex = '', signallerPrefix = 'signal';
+
+        const peers = new Map(); // pub -> {addr,lastTs,isVestigial}
+        const knownIdsByPub = new Map(); const idSet = (pub) => { let s = knownIdsByPub.get(pub); if (!s) { s = new Set(['peer', 'web', 'signal']); knownIdsByPub.set(pub, s); } return s; };
+        (function loadKnownIds() { try { const t = localStorage.getItem(LS.KNOWN_IDS); if (!t) return; const j = JSON.parse(t); for (const [k, arr] of Object.entries(j)) knownIdsByPub.set(k, new Set(arr)); } catch { } })();
+        const persistKnownIds = () => { const obj = {}; for (const [k, set] of knownIdsByPub.entries()) obj[k] = [...set]; localStorage.setItem(LS.KNOWN_IDS, JSON.stringify(obj)); };
+
+        // ── Display name (prefix) ─────────────────────────────────────────────────────
+        LS.NICK = 'NKN_NICK_V1'; // extend LS bag
+        const STALLED_AFTER_MS = 5000; // consider stalled if no frame for 5s
+        const RESERVED_IDS = new Set(['peer', 'web', 'signal']);
+        const displayNameByPub = new Map(); // pub -> display name (identifier)
+        // ── Aggregate filter helpers ───────────────────────────────────────────────────
+        function isAggregateId(id) {
+            return /^broadcastaggregate-[a-z0-9_-]*$/i.test((id || '').trim());
+        }
+        function shouldOmitPub(pub) {
+            const ids = idSet(pub);
+            for (const id of ids) if (isAggregateId(id)) return true;
+            return false;
+        }
+
+        function sanitizeNick(s) {
+            return (s || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24);
+        }
+
+        let MY_NICK = localStorage.getItem(LS.NICK) || '';
+        let MY_IDENT = sanitizeNick(MY_NICK) || 'web'; // the identifier we use in NKN
+
+        function isReservedId(id) {
+            if (!id) return true;
+            const s = String(id).toLowerCase();
+            if (RESERVED_IDS.has(s)) return true;
+            // Treat BROADCASTAGGREGATE and any BROADCASTAGGREGATE-* as reserved/hidden
+            if (s === 'broadcastaggregate' || s.startsWith('broadcastaggregate-')) return true;
+            return false;
+        }
+
+        // update helpers to use isReservedId
+        function niceIdFromSet(ids) {
+            for (const id of ids) if (!isReservedId(id)) return id;
+            return null;
+        }
+
+        function hasDisplayablePrefix(pub) {
+            const ids = idSet(pub);
+            for (const id of ids) if (!isReservedId(id)) return true;
+            return false;
+        }
+
+
+        function labelForPub(pub) {
+            // Prefer explicit mapping, else a non-reserved identifier from idSet, else short hex
+            const fromMap = displayNameByPub.get(pub);
+            if (fromMap) return fromMap;
+            const ids = idSet(pub);
+            const pretty = niceIdFromSet(ids);
+            return pretty || shortHex(pub, 8, 6);
+        }
+
+        function updateSelfTileLabels() {
+            const label = MY_IDENT || 'you';
+            const selfTile = document.querySelector('.peer.self');
+            if (!selfTile) return;
+            const topAddr = selfTile.querySelector('.overlay.top .addr');
+            if (topAddr) topAddr.textContent = label;
+            const rowName = selfTile.querySelector('.row .name');
+            if (rowName) rowName.textContent = label;
+        }
+
+
+        const addrPool = new Map(); // addr -> {lastSeen,lastAck,rttMs,updates,failures,lastProbe}
+        const lastLive = (m) => Math.max(m?.lastAck || 0, m?.lastSeen || 0);
+        function poolAdd(addr, when = now()) { if (!addr) return; const m = addrPool.get(addr) || { lastSeen: 0, lastAck: 0, rttMs: null, updates: 0, failures: 0, lastProbe: 0 }; m.lastSeen = Math.max(m.lastSeen, when); addrPool.set(addr, m); updateSigMeta(); }
+        function poolNoteAck(addr, rtt = null) { const m = addrPool.get(addr) || { lastSeen: 0, lastAck: 0, rttMs: null, updates: 0, failures: 0, lastProbe: 0 }; m.lastAck = now(); if (rtt != null) m.rttMs = rtt; addrPool.set(addr, m); updateSigMeta(); }
+        function poolNoteUpdate(addr) { const m = addrPool.get(addr) || { lastSeen: 0, lastAck: 0, rttMs: null, updates: 0, failures: 0, lastProbe: 0 }; m.lastSeen = now(); m.updates += 1; addrPool.set(addr, m); updateSigMeta(); }
+        function isPeerOnline(pub) { return addressesForPub(pub).some(a => (now() - (addrPool.get(a)?.lastAck || addrPool.get(a)?.lastSeen || 0)) < 45000); }
+        function onlineCount() { let n = 0; for (const [addr, m] of addrPool.entries()) if ((now() - (m.lastAck || m.lastSeen || 0)) < 15000) n++; return n; }
+        function updateSigMeta() {
+            let best = null, bRtt = Infinity, bSeen = 0;
+            for (const [addr, m] of addrPool.entries()) {
+                const r = m.rttMs == null ? Infinity : m.rttMs; const s = Math.max(m.lastAck || 0, m.lastSeen || 0);
+                if (r < bRtt || (r === bRtt && s > bSeen)) { best = addr; bRtt = r; bSeen = s; }
+            }
+            const live = onlineCount(), total = addrPool.size;
+            if (!best) { setSig('Mesh: discovering…', 'warn'); setSigMeta(`targets: ${total} • online: ${live} • latency: —`); }
+            else { const lastSeenStr = bSeen ? `${fmtAgo(now() - bSeen)} ago` : '—'; const rtt = (bRtt === Infinity) ? '—' : `${Math.round(bRtt)} ms`; setSig(`Mesh: ${shortHex(best, 7, 6)} • ${live}/${total} online`, 'ok'); setSigMeta(`last seen: ${lastSeenStr} • latency: ${rtt}`); }
+        }
+
+        function ensurePeer(pub, { addr = null, ts = now(), vestigial = false } = {}) { const p = (peers.get(pub) || { addr: null, lastTs: 0, isVestigial: false }); if (addr) p.addr = addr; if (ts > (p.lastTs || 0)) p.lastTs = ts; p.isVestigial = !!vestigial; peers.set(pub, p); ensurePeerTile(pub); updatePeerUI(pub); }
+
+        function addressesForPub(pub) { const ids = idSet(pub); const set = new Set(); const ent = peers.get(pub); if (ent?.addr) set.add(ent.addr); ids.forEach(id => set.add(`${id}.${pub}`)); return [...set]; }
+        function bestAddrForPub(pub) {
+            const list = addressesForPub(pub);
+            let best = null, bRtt = Infinity, bSeen = 0;
+            for (const a of list) { const m = addrPool.get(a) || {}; const r = (m.rttMs == null) ? Infinity : m.rttMs; const s = Math.max(m.lastAck || 0, m.lastSeen || 0); if (r < bRtt || (r === bRtt && s > bSeen)) { best = a; bRtt = r; bSeen = s; } }
+            return best || list[0];
+        }
+        // ───────────────────────────────── Audio capability detection
+        const opusSupported = (() => {
+            const mime = 'audio/webm; codecs=opus';
+            const mr = (window.MediaRecorder && window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(mime));
+            const mse = (window.MediaSource && window.MediaSource.isTypeSupported && window.MediaSource.isTypeSupported(mime));
+            return !!(mr && mse);
+        })();
+        (() => {
+            const fmtSel = document.querySelector('#aFmt');
+            if (fmtSel && !opusSupported) {
+                const opt = [...fmtSel.options].find(o => o.value === 'opus');
+                if (opt) opt.disabled = true;
+            }
+        })();
+
+        /* ====== HB / roster ====== */
+        let hbTimer = null, tickTimer = null;
+        function targets(max = 200) {
+            const set = new Set();
+            if (isHex64(signallerHex)) {
+                set.add(signallerHex);                 // raw hex
+                set.add(`signal.${signallerHex}`);     // ← this was missing
+            }
+            for (const a of addrPool.keys()) set.add(a);
+            for (const [pub, ent] of peers.entries()) {
+                if (ent.addr) set.add(ent.addr);
+                idSet(pub).forEach(id => set.add(`${id}.${pub}`));
+            }
+            const out = [];
+            for (const a of set.values()) { if (a !== selfAddr) out.push(a); if (out.length >= max) break; }
+            return out;
+        }
+
+
+        function probeAll() {
+            if (!client || !client.addr || !selfPub) return;
+            const list = targets(); const t0 = now();
+            for (const to of list) {
+                const id = `hb|${selfPub}|${t0}|${to}`;
+                const m = addrPool.get(to) || {}; m.lastProbe = t0; addrPool.set(to, m);
+                rawSend(to, JSON.stringify({ ver: 1, type: 'hb', id, from: selfPub, t_client: t0, caps: { relay: true, roster: true } })).catch(() => { });
+                rawSend(to, JSON.stringify({ ver: 1, type: 'peers_req', id: `peers_req|${selfPub}|${t0}`, from: selfPub, ts: t0 })).catch(() => { });
+            }
+        }
+        function scheduleHB() { if (hbTimer) clearInterval(hbTimer); hbTimer = setInterval(probeAll, 12000); }
+        function scheduleTicks() {
+            if (tickTimer) clearInterval(tickTimer); tickTimer = setInterval(() => {
+                const t = now(); for (const [addr, m] of addrPool.entries()) { if ((t - Math.max(m.lastSeen || 0, m.lastAck || 0)) < 60000) { rawSend(addr, JSON.stringify({ ver: 1, type: 'tick', id: `tick|${selfPub}|${t}|${addr}`, from: selfPub, ts: t })).catch(() => { }); } }
+            }, 5000);
+        }
+
+        /* ====== NKN send helpers ====== */
+        let SEND_OPTS = { noReply: true, maxHoldingSeconds: 0 }; // drop vs queue → lower latency
+        async function rawSend(to, payload) { try { return await client.send(to, payload, SEND_OPTS); } catch (e) { throw e; } }
+        async function sendToBest(pub, payload) {
+            // Prefer the lowest RTT / most recently seen address for this pub
+            const list = addressesForPub(pub)
+                .filter(Boolean)
+                .sort((a, b) => {
+                    const ma = addrPool.get(a) || {}, mb = addrPool.get(b) || {};
+                    const ra = ma.rttMs == null ? 1e12 : ma.rttMs;
+                    const rb = mb.rttMs == null ? 1e12 : mb.rttMs;
+                    if (ra !== rb) return ra - rb;
+                    // tie-break by freshness
+                    const sa = Math.max(ma.lastAck || 0, ma.lastSeen || 0);
+                    const sb = Math.max(mb.lastAck || 0, mb.lastSeen || 0);
+                    return sb - sa;
+                });
+
+            for (const to of list) {
+                try { await rawSend(to, payload); return true; } catch { }
+            }
+
+            // Fallbacks: try the signaller directly by bare hex, then its "signal." subclient
+            if (isHex64(signallerHex)) {
+                try { await rawSend(signallerHex, payload); return true; } catch { }
+                try { await rawSend(`signal.${signallerHex}`, payload); return true; } catch { }
+            }
+
+            return false;
+        }
+        /* ====== Masonry measurement (grid row spanning) ====== */
+        const gridEl = document.getElementById('grid');
+
+        function _gridNumbers() {
+            const cs = getComputedStyle(gridEl);
+            return {
+                row: parseFloat(cs.gridAutoRows) || 8,
+                gap: parseFloat(cs.rowGap) || 0,
+            };
+        }
+
+        function measureTile(tile) {
+            if (!tile || !gridEl) return;
+            const { row, gap } = _gridNumbers();
+            // Use offsetHeight for layout height, include one gap
+            const h = tile.getBoundingClientRect().height;
+            const span = Math.max(1, Math.ceil((h + gap) / (row + gap)));
+            tile.style.gridRowEnd = `span ${span}`;
+        }
+
+        function measurePub(pub) {
+            const tile = document.querySelector(`.peer[data-pub="${pub}"]`);
+            if (tile) measureTile(tile);
+        }
+
+        function measureAll() {
+            document.querySelectorAll('#grid .peer').forEach(measureTile);
+        }
+
+        let _recalcRaf = 0;
+        function scheduleMeasureAll() {
+            if (_recalcRaf) cancelAnimationFrame(_recalcRaf);
+            _recalcRaf = requestAnimationFrame(() => { _recalcRaf = 0; measureAll(); });
+        }
+
+        addEventListener('resize', scheduleMeasureAll);
+
+
+
+        /* ====== local camera + VF2 encoder ====== */
+        const localVideo = $('#localVideo'), fpsSlider = $('#fpsSlider'), sSlider = $('#sSlider'), fmtQ = $('#fmtQ'), kbSlider = $('#kbSlider'), biasSlider = $('#biasSlider');
+        const fpsLbl = $('#fpsLbl'), kbLbl = $('#kbLbl');
+        fpsSlider?.addEventListener('input', () => fpsLbl.textContent = fpsSlider.value);
+        kbSlider?.addEventListener('input', () => kbLbl.textContent = kbSlider.value);
+
+        const mFps = $('#mFps'), mSize = $('#mSize'), mSent = $('#mSent'), mDrop = $('#mDrop');
+        let srcFpsCount = 0, totalSent = 0, totalDropped = 0, sizeEMA = null;
+        setInterval(() => { if (mFps) mFps.textContent = String(srcFpsCount); srcFpsCount = 0; if (mSize) mSize.textContent = sizeEMA ? Math.round(sizeEMA / 1024) + ' KB' : '—'; if (mSent) mSent.textContent = String(totalSent); if (mDrop) mDrop.textContent = String(totalDropped); }, 1000);
+
+        // --- Camera facing toggle (front/back) ---------------------------------------
+        let CAM_FACING = localStorage.getItem('NKN_CAM_FACING') || 'user';
+
+        async function restartLocalCamera() {
+            // stop old tracks (if any)
+            try {
+                const old = localVideo?.srcObject;
+                if (old) [...old.getVideoTracks(), ...old.getAudioTracks()].forEach(t => t.stop());
+            } catch { }
+
+            // try exact, then ideal, then fallback without facingMode
+            const base = { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } };
+            const tries = [
+                { video: { ...base, facingMode: { exact: CAM_FACING } }, audio: false },
+                { video: { ...base, facingMode: CAM_FACING }, audio: false },
+                { video: { ...base }, audio: false }
+            ];
+
+            let stream = null, lastErr = null;
+            for (const c of tries) {
+                try { stream = await navigator.mediaDevices.getUserMedia(c); break; }
+                catch (e) { lastErr = e; }
+            }
+            if (!stream) throw lastErr || new Error('getUserMedia failed');
+
+            if (localVideo) {
+                localVideo.srcObject = stream;
+                try { await localVideo.play(); } catch { }
+            }
+
+            // keep self-tile preview in sync
+            const ghost = document.querySelector('.peer.self .preview video');
+            if (ghost) {
+                ghost.srcObject = stream;
+                try { await ghost.play(); } catch { }
+            }
+        }
+
+        async function toggleFacing() {
+            CAM_FACING = (CAM_FACING === 'user') ? 'environment' : 'user';
+            localStorage.setItem('NKN_CAM_FACING', CAM_FACING);
+            await restartLocalCamera();  // encoder keeps running; canvas picks up new frames
+        }
+
+
+        // ── Screen share as camera source ─────────────────────────────────────────────
+        let SCREEN_ACTIVE = false;
+        let screenStream = null, screenVideo = null;
+        let ssCanvas = null, ssCtx = null, ssRAF = null, lastSSEncAt = 0;
+        let latestVF2_SS = null; // parallel to latestVF2 (camera)
+
+        function setLocalPreviewStream(stream) {
+            // point encoder source
+            if (localVideo) {
+                localVideo.srcObject = stream;
+                try { localVideo.play(); } catch { }
+            }
+            // keep self-tile ghost in sync (if present)
+            const ghost = document.querySelector('.peer.self .preview video');
+            if (ghost) {
+                ghost.srcObject = stream;
+                try { ghost.play(); } catch { }
+            }
+        }
+
+        function setSelfTilePreview(stream) {
+            const ghost = document.querySelector('.peer.self .preview video');
+            if (!ghost) return;
+            try { ghost.srcObject = stream; ghost.play().catch(() => { }); } catch { }
+        }
+
+        async function startScreenShare() {
+            if (screenStream) return true;
+            try {
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { frameRate: { ideal: 30, max: 30 } },
+                    audio: false
+                });
+            } catch (e) { console.warn('getDisplayMedia failed', e); return false; }
+
+            screenVideo = document.createElement('video');
+            screenVideo.muted = true; screenVideo.playsInline = true; screenVideo.autoplay = true;
+            screenVideo.style.display = 'none';
+            document.body.appendChild(screenVideo);
+            screenVideo.srcObject = screenStream;
+            try { await screenVideo.play(); } catch { }
+
+            // If user stops from browser UI, clean up + restore camera preview
+            const vt = screenStream.getVideoTracks()[0];
+            vt && vt.addEventListener('ended', () => stopScreenShare());
+
+            // ✅ Show screen in the self tile (without touching #localVideo / camera encoder)
+            SCREEN_ACTIVE = true;
+            setSelfTilePreview(screenStream);
+
+            startScreenEncoder();
+            return true;
+        }
+
+        function stopScreenShare() {
+            try { screenStream?.getTracks().forEach(t => t.stop()); } catch { }
+            screenStream = null; latestVF2_SS = null;
+
+            if (screenVideo) { try { screenVideo.remove(); } catch { } screenVideo = null; }
+            if (ssRAF) { cancelAnimationFrame(ssRAF); ssRAF = null; }
+
+            // ✅ Restore the self tile preview back to camera
+            SCREEN_ACTIVE = false;
+            setSelfTilePreview(localVideo?.srcObject || null);
+        }
+
+        function stopScreenShare() {
+            try { screenStream?.getTracks().forEach(t => t.stop()); } catch { }
+            screenStream = null; latestVF2_SS = null;
+
+            if (screenVideo) { try { screenVideo.remove(); } catch { } screenVideo = null; }
+            if (ssRAF) { cancelAnimationFrame(ssRAF); ssRAF = null; }
+        }
+
+        function maybeStopScreenWhenUnused() {
+            for (const [, st] of streamsOut) { if (st?.preferredSrc === 'screen') return; }
+            stopScreenShare();
+        }
+
+        function startScreenEncoder() {
+            if (ssRAF) return;
+            ssCanvas = document.createElement('canvas');
+            ssCtx = ssCanvas.getContext('2d', { alpha: false, desynchronized: true });
+
+            const encodeOnce = async () => {
+                if (!screenVideo || screenVideo.videoWidth <= 0) return null;
+                const scale = parseFloat(sSlider?.value || '0.7');
+                const w = Math.max(2, Math.round(screenVideo.videoWidth * scale));
+                const h = Math.max(2, Math.round(screenVideo.videoHeight * scale));
+                if (ssCanvas.width !== w || ssCanvas.height !== h) { ssCanvas.width = w; ssCanvas.height = h; }
+                ssCtx.drawImage(screenVideo, 0, 0, w, h);
+
+                const [fmt, qStr] = (fmtQ?.value || 'jpeg:0.6').split(':'); const q = parseFloat(qStr || '0.6');
+                const mime = (fmt === 'webp') ? 'image/webp' : 'image/jpeg';
+                let blob = await new Promise(res => ssCanvas.toBlob(res, mime, q));
+                const targetKB = parseInt(kbSlider?.value || '380', 10);
+                if (blob && blob.size > targetKB * 1024 && q > 0.4) {
+                    blob = await new Promise(res => ssCanvas.toBlob(res, mime, Math.max(0.4, q - 0.1)));
+                }
+                if (!blob) return null;
+                const u8 = new Uint8Array(await blob.arrayBuffer());
+                const ts = now(), seq = ts | 0;
+                const fmtCode = (mime === 'image/jpeg') ? VF2.FMT_JPEG : VF2.FMT_WEBP;
+                return {
+                    ts, seq, w, h, bytes: u8.byteLength,
+                    packed: VF2.pack({ fmtCode, w, h, ts, seq, bytesU8: u8 })
+                };
+            };
+
+            const step = async (t) => {
+                const targetMs = 1000 / parseInt(fpsSlider?.value || '18', 10);
+                if ((t - lastSSEncAt) >= targetMs) {
+                    lastSSEncAt = t;
+                    const vf2 = await encodeOnce();
+                    if (vf2) {
+                        latestVF2_SS = vf2;
+                        // nudge only peers that requested screen
+                        for (const [pub, st] of streamsOut) {
+                            if (st?.preferredSrc === 'screen') sendLatestToPeer(pub);
+                        }
+                    }
+                }
+                ssRAF = requestAnimationFrame(step);
+            };
+            ssRAF = requestAnimationFrame(step);
+        }
+
+
+
+        async function ensureCamStream() {
+            if (localVideo?.srcObject) return localVideo.srcObject;
+            await restartLocalCamera();        // respects CAM_FACING from step 1
+            startGlobalEncoder();              // kick encoder once
+            return localVideo.srcObject;
+        }
+
+        let encCanvas = null, encCtx = null, encRAF = null, lastEncAt = 0, latestVF2 = null;
+        // VF2 header: 18 bytes (MAGIC + meta) + payload
+        const VF2 = {
+            MAGIC0: 0x56, MAGIC1: 0x46, MAGIC2: 0x32, VER: 1,
+            FMT_JPEG: 1, FMT_WEBP: 2,
+            pack({ fmtCode, w, h, ts, seq, bytesU8 }) {
+                const out = new Uint8Array(18 + bytesU8.byteLength);
+                out[0] = this.MAGIC0; out[1] = this.MAGIC1; out[2] = this.MAGIC2; out[3] = this.VER;
+                out[4] = fmtCode; out[5] = 0; // flags
+                const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+                dv.setUint16(6, w, false); dv.setUint16(8, h, false);
+                dv.setUint32(10, ts >>> 0, false);
+                dv.setUint32(14, seq >>> 0, false);
+                out.set(bytesU8, 18);
+                return out;
+            },
+            parse(u8) {
+                if (!u8 || u8.length < 18) return null;
+                if (u8[0] !== this.MAGIC0 || u8[1] !== this.MAGIC1 || u8[2] !== this.MAGIC2) return null;
+                const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+                const ver = u8[3]; if (ver !== this.VER) return null;
+                const fmtCode = u8[4];
+                const w = dv.getUint16(6, false), h = dv.getUint16(8, false);
+                const ts = dv.getUint32(10, false), seq = dv.getUint32(14, false);
+                const payload = u8.subarray(18);
+                return { fmtCode, w, h, ts, seq, payload };
+            },
+            mimeFromCode(c) { return c === 1 ? 'image/jpeg' : (c === 2 ? 'image/webp' : 'application/octet-stream'); }
+        };
+
+        function startGlobalEncoder() {
+            if (encRAF) return;
+            encCanvas = document.createElement('canvas');
+            encCtx = encCanvas.getContext('2d', { alpha: false, desynchronized: true });
+
+            const encodeOnce = async () => {
+                if (!localVideo || localVideo.videoWidth <= 0) return null;
+                const scale = parseFloat(sSlider?.value || '0.7');
+                const w = Math.max(2, Math.round(localVideo.videoWidth * scale));
+                const h = Math.max(2, Math.round(localVideo.videoHeight * scale));
+                if (encCanvas.width !== w || encCanvas.height !== h) { encCanvas.width = w; encCanvas.height = h; }
+                encCtx.drawImage(localVideo, 0, 0, w, h);
+
+                const [fmt, qStr] = (fmtQ?.value || 'jpeg:0.6').split(':'); const q = parseFloat(qStr || '0.6');
+                const mime = (fmt === 'webp') ? 'image/webp' : 'image/jpeg';
+                let blob = await new Promise(res => encCanvas.toBlob(res, mime, q));
+                const targetKB = parseInt(kbSlider?.value || '380', 10);
+                if (blob && blob.size > targetKB * 1024 && q > 0.4) {
+                    blob = await new Promise(res => encCanvas.toBlob(res, mime, Math.max(0.4, q - 0.1)));
+                }
+                if (!blob) return null;
+                const u8 = new Uint8Array(await blob.arrayBuffer());
+                sizeEMA = sizeEMA == null ? u8.byteLength : (0.8 * sizeEMA + 0.2 * u8.byteLength);
+                const ts = now(), seq = ts | 0;
+                const fmtCode = (mime === 'image/jpeg') ? VF2.FMT_JPEG : VF2.FMT_WEBP;
+                const packed = VF2.pack({ fmtCode, w, h, ts, seq, bytesU8: u8 });
+                srcFpsCount++;
+                return { ts, seq, w, h, bytes: u8.byteLength, packed };
+            };
+
+            // Align to real camera frame cadence when available
+            const useRVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+            const stepRAF = async (t) => {
+                const targetMs = 1000 / parseInt(fpsSlider?.value || '18', 10);
+                if ((t - lastEncAt) >= targetMs) {
+                    lastEncAt = t;
+                    const vf2 = await encodeOnce();
+                    if (vf2) { latestVF2 = vf2; for (const [pub] of streamsOut) sendLatestToPeer(pub); }
+                }
+                encRAF = requestAnimationFrame(stepRAF);
+            };
+            const stepRVFC = async () => {
+                if (!localVideo?.requestVideoFrameCallback) { stepRAF(0); return; }
+                localVideo.requestVideoFrameCallback(async () => {
+                    const targetMs = 1000 / parseInt(fpsSlider?.value || '18', 10);
+                    const t = performance.now();
+                    if ((t - lastEncAt) >= targetMs) {
+                        lastEncAt = t;
+                        const vf2 = await encodeOnce();
+                        if (vf2) { latestVF2 = vf2; for (const [pub] of streamsOut) sendLatestToPeer(pub); }
+                    }
+                    stepRVFC();
+                });
+            };
+
+            if (useRVFC) stepRVFC(); else encRAF = requestAnimationFrame(stepRAF);
+        }
+
+        // ───────────────────────────────── Audio controls refs & metrics
+        const aRate = $('#aRate'), aMs = $('#aMs'), aFmt = $('#aFmt'), aEstimate = $('#aEstimate');
+        const aFps = $('#aFps'), aSize = $('#aSize'), aSent = $('#aSent'), aDrop = $('#aDrop');
+
+        let audioCtx = null, micStream = null, micSource = null, procNode = null;
+        let latestAudio = null, latestOpus = null; // current frame objects
+        let a_srcFps = 0, a_sizeEMA = null, a_totalSent = 0, a_totalDrop = 0;
+
+        function ensureAudioCtx() { if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } }
+        function updateAudioEstimate() {
+            if (!aRate || !aMs || !aFmt || !aEstimate) return;
+            const fmt = aFmt.value;
+            if (fmt === 'opus') { aEstimate.textContent = 'Opus (WebM) • variable bitrate • timeslice = frame size'; return; }
+            const sr = parseInt(aRate.value, 10), ms = parseInt(aMs.value, 10);
+            const samples = Math.round(sr * ms / 1000);
+            const bytes = (fmt === 'mulaw8') ? samples * 1 : samples * 2;
+            const kb = Math.round(bytes / 1024);
+            aEstimate.textContent = `~${samples} samples / frame • ~${kb} KB per frame (base64 +33%)`;
+        }
+        [aRate, aMs, aFmt].forEach(el => el && el.addEventListener('change', () => { stopPcmPipeline(); stopOpusPipeline(); latestAudio = null; latestOpus = null; a_sizeEMA = null; a_srcFps = 0; updateAudioEstimate(); }));
+        updateAudioEstimate();
+        setInterval(() => { if (aFps) aFps.textContent = String(a_srcFps); a_srcFps = 0; if (aSize) aSize.textContent = a_sizeEMA ? Math.round(a_sizeEMA / 1024) + ' KB' : '—'; if (aSent) aSent.textContent = String(a_totalSent); if (aDrop) aDrop.textContent = String(a_totalDrop); }, 1000);
+
+        // ── μ-law helpers
+        function muLawEncodeSample(x) { const MU = 255; const s = Math.max(-1, Math.min(1, x)); const sign = s < 0 ? 0x80 : 0x00; const mag = Math.log1p(MU * Math.abs(s)) / Math.log1p(MU); return (sign | Math.floor(mag * 127)) & 0xFF; }
+        function muLawDecodeByte(b) { const MU = 255; const sign = (b & 0x80) ? -1 : 1; const y = (b & 0x7F) / 127; const mag = (Math.pow(1 + MU, y) - 1) / MU; return sign * mag; }
+
+        // ── PCM/μ-law capture via ScriptProcessor (resample to selected sr)
+        let pcmActive = false, pcmState = null;
+        function configPcmState() {
+            const sr = parseInt(aRate?.value || '16000', 10), ms = parseInt(aMs?.value || '40', 10);
+            return { outRate: sr, frameSamples: Math.max(80, Math.round(sr * ms / 1000)), acc: [], resPos: 0 };
+        }
+        async function startPcmPipeline() {
+            if (pcmActive) return true;
+            try { if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }); }
+            catch { alert('Microphone access denied'); return false; }
+            ensureAudioCtx(); try { await audioCtx.resume(); } catch { }
+            micSource = audioCtx.createMediaStreamSource(micStream);
+            const bufSize = 2048;
+            const node = audioCtx.createScriptProcessor(bufSize, 1, 1);
+            pcmState = configPcmState();
+            node.onaudioprocess = (ev) => {
+                const inBuf = ev.inputBuffer.getChannelData(0), inRate = audioCtx.sampleRate;
+                const step = inRate / pcmState.outRate;
+                let pos = pcmState.resPos || 0;
+                const out = [];
+                for (; pos < inBuf.length; pos += step) {
+                    const idx = Math.floor(pos), frac = pos - idx;
+                    const s0 = inBuf[idx] || 0, s1 = inBuf[idx + 1] || s0;
+                    out.push(s0 + (s1 - s0) * frac);
+                }
+                pcmState.resPos = pos - inBuf.length;
+                pcmState.acc.push(...out);
+                while (pcmState.acc.length >= pcmState.frameSamples) {
+                    const frame = pcmState.acc.splice(0, pcmState.frameSamples);
+                    const fmt = aFmt?.value || 'mulaw8';
+                    let bytes;
+                    if (fmt === 'mulaw8') {
+                        const u8 = new Uint8Array(frame.length);
+                        for (let i = 0; i < frame.length; i++) u8[i] = muLawEncodeSample(frame[i]);
+                        bytes = u8;
+                    } else { // pcm16
+                        const u8 = new Uint8Array(frame.length * 2);
+                        let o = 0;
+                        for (let i = 0; i < frame.length; i++) {
+                            let s = Math.max(-1, Math.min(1, frame[i]));
+                            s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            const v = s | 0;
+                            u8[o++] = v & 0xFF; u8[o++] = (v >> 8) & 0xFF;
+                        }
+                        bytes = u8;
+                    }
+                    const b64 = btoa(String.fromCharCode(...bytes));
+                    latestAudio = { fmt, sr: pcmState.outRate, bytes: bytes.byteLength, b64, ts: now() };
+                    a_sizeEMA = a_sizeEMA == null ? bytes.byteLength : 0.85 * a_sizeEMA + 0.15 * bytes.byteLength;
+                    a_srcFps++;
+                }
+            };
+            micSource.connect(node); node.connect(audioCtx.destination);
+            procNode = node; pcmActive = true; return true;
+        }
+        function stopPcmPipeline() { if (procNode) { try { procNode.disconnect(); } catch { } procNode = null; } pcmActive = false; pcmState = null; }
+
+        // ── Opus capture via MediaRecorder
+        let opusActive = false, opusRec = null;
+        async function startOpusPipeline() {
+            if (opusActive) return true;
+            if (!opusSupported) { alert('Opus not supported in this browser'); return false; }
+            try { if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }); }
+            catch { alert('Microphone access denied'); return false; }
+            const timeslice = parseInt(aMs?.value || '40', 10);
+            opusRec = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 32000 });
+            opusRec.ondataavailable = async (ev) => {
+                if (!ev.data || !ev.data.size) return;
+                const buf = new Uint8Array(await ev.data.arrayBuffer());
+                latestOpus = { fmt: 'opus', sr: 48000, bytes: buf.byteLength, bin: buf, ts: now() };
+                a_sizeEMA = a_sizeEMA == null ? buf.byteLength : 0.85 * a_sizeEMA + 0.15 * buf.byteLength;
+                a_srcFps++;
+            };
+            opusRec.start(timeslice); opusActive = true; return true;
+        }
+        function stopOpusPipeline() { if (opusRec && opusRec.state !== 'inactive') { try { opusRec.stop(); } catch { } } opusRec = null; opusActive = false; latestOpus = null; }
+
+        // ── Start / ensure local audio
+        async function ensureLocalAudio() {
+            const fmt = aFmt?.value || 'mulaw8';
+            if (fmt === 'opus') return startOpusPipeline();
+            return startPcmPipeline();
+        }
+
+        // ── Per-peer audio TX (JSON, base64 payload)
+        const streamsOutA = new Map(); // pub -> {inFlight,pending,lastTsSent,sent,sizeEMA,timer}
+        function ensureSenderA(pub) { if (streamsOutA.has(pub)) return streamsOutA.get(pub); const s = { inFlight: false, pending: false, lastTsSent: 0, sent: 0, sizeEMA: null, timer: null }; streamsOutA.set(pub, s); return s; }
+        async function pumpPeerA(pub) {
+            const st = streamsOutA.get(pub); if (!st) return;
+            const fmt = aFmt?.value || 'mulaw8';
+            let frameObj = null;
+            if (fmt === 'opus') {
+                if (!latestOpus || latestOpus.ts <= st.lastTsSent) return;
+                frameObj = latestOpus;
+            } else {
+                if (!latestAudio || latestAudio.ts <= st.lastTsSent) return;
+                frameObj = latestAudio;
+            }
+            if (st.inFlight) { st.pending = true; return; }
+            st.inFlight = true; st.pending = false;
+
+            let payload;
+            if (fmt === 'opus') {
+                const b64 = btoa(String.fromCharCode(...frameObj.bin));
+                payload = JSON.stringify({ ver: 1, type: 'audio_frame', id: `af|${selfPub}|${frameObj.ts}`, from: selfPub, to: pub, ts: frameObj.ts, sr: 48000, fmt: 'opus', b64 });
+            } else {
+                payload = JSON.stringify({ ver: 1, type: 'audio_frame', id: `af|${selfPub}|${frameObj.ts}`, from: selfPub, to: pub, ts: frameObj.ts, sr: frameObj.sr, fmt: frameObj.fmt, b64: frameObj.b64 });
+            }
+            const ok = await sendToBest(pub, payload).catch(() => false);
+            st.inFlight = false;
+            if (ok) {
+                st.lastTsSent = frameObj.ts;
+                st.sent = (st.sent || 0) + 1;
+                const sz = frameObj.bytes;
+                st.sizeEMA = st.sizeEMA == null ? sz : 0.85 * st.sizeEMA + 0.15 * sz;
+                a_totalSent++;
+            } else {
+                a_totalDrop++;
+            }
+            if (st.pending) pumpPeerA(pub);
+        }
+        function startAudioTo(pub) {
+            if (streamsOutA.has(pub)) return;
+            ensureSenderA(pub);
+            sendToBest(pub, JSON.stringify({ ver: 1, type: 'audio_offer', id: `aof|${selfPub}|${now()}`, from: selfPub, to: pub, ts: now() })).catch(() => { });
+            streamsOutA.get(pub).timer = setInterval(() => pumpPeerA(pub), 15);
+        }
+        function stopAudioTo(pub) {
+            const st = streamsOutA.get(pub); if (!st) return;
+            clearInterval(st.timer); streamsOutA.delete(pub);
+        }
+
+
+
+        // ───────────────────────────────── Incoming audio playback
+        // PCM/μ-law path
+        const rxAudioPCM = new Map(); // pub -> {nextTime}
+        function playPcmFrame(pub, sr, fmt, u8) {
+            ensureAudioCtx();
+            const n = fmt === 'mulaw8' ? u8.length : (u8.length >> 1);
+            const buf = audioCtx.createBuffer(1, n, sr);
+            const ch = buf.getChannelData(0);
+            if (fmt === 'mulaw8') {
+                for (let i = 0; i < n; i++) ch[i] = muLawDecodeByte(u8[i]);
+            } else { // pcm16le
+                for (let i = 0, o = 0; i < n; i++, o += 2) {
+                    const v = (u8[o] | (u8[o + 1] << 8));
+                    const s = (v & 0x8000) ? v - 0x10000 : v;
+                    ch[i] = s / 0x8000;
+                }
+            }
+            const st = rxAudioPCM.get(pub) || { nextTime: audioCtx.currentTime + 0.08 };
+            const when = Math.max(audioCtx.currentTime + 0.04, st.nextTime);
+            const src = audioCtx.createBufferSource(); src.buffer = buf; src.connect(audioCtx.destination); src.start(when);
+            st.nextTime = when + (n / sr);
+            rxAudioPCM.set(pub, st);
+        }
+
+        // Opus path via MediaSource
+        const rxOpus = new Map(); // pub -> {audio, mse, sb, queue:[], open:boolean}
+        function ensureOpusSink(pub) {
+            if (rxOpus.has(pub)) return rxOpus.get(pub);
+            const audio = new Audio(); audio.autoplay = true; audio.controls = false; audio.muted = false; audio.style.display = 'none';
+            document.body.appendChild(audio);
+            const mse = new MediaSource();
+            const sink = { audio, mse, sb: null, queue: [], open: false };
+            audio.src = URL.createObjectURL(mse);
+            mse.addEventListener('sourceopen', () => {
+                try {
+                    sink.sb = mse.addSourceBuffer('audio/webm; codecs=opus');
+                    sink.open = true; sink.sb.mode = 'sequence';
+                    sink.sb.addEventListener('updateend', () => {
+                        if (sink.queue.length && !sink.sb.updating) {
+                            const chunk = sink.queue.shift();
+                            sink.sb.appendBuffer(chunk);
+                        }
+                    });
+                } catch (e) { console.warn('Opus SB error:', e); }
+            });
+            rxOpus.set(pub, sink);
+            audio.play().catch(() => { });
+            return sink;
+        }
+        function playOpusChunk(pub, u8) {
+            if (!opusSupported) return;
+            const sink = ensureOpusSink(pub);
+            if (!sink.open || !sink.sb) return;
+            if (sink.sb.updating || sink.queue.length) { sink.queue.push(u8); }
+            else { try { sink.sb.appendBuffer(u8); } catch { } }
+        }
+
+
+
+        /* ====== per-peer TX state + adaptive pacing ====== */
+        const streamsOut = new Map(); // pub -> {inFlight,pending,sent,sizeEMA,ack{winSent,winAck,lastAckAt,e2eEma},fpsTick,txCountSec,txFps,lastSentAt}
+        function startStreamingTo(pub) {
+            if (streamsOut.has(pub)) return;
+            streamsOut.set(pub, {
+                inFlight: false, pending: false, sent: 0, sizeEMA: null,
+                ack: { winSent: 0, winAck: 0, lastAckAt: 0, e2eEma: null },
+                fpsTick: now(), txCountSec: 0, txFps: 0, lastSentAt: 0,
+                lastFrameTs: 0,                 // ← new: prevent duplicate sends
+                preferredSrc: 'cam'             // ← new: per-peer source
+            });
+            sendToBest(pub, JSON.stringify({ ver: 1, type: 'video_offer', id: `vof|${selfPub}|${now()}`, from: selfPub, to: pub, ts: now() })).catch(() => { });
+            sendLatestToPeer(pub); updatePeerUI(pub);
+        }
+
+        function stopStreamingTo(pub) { streamsOut.delete(pub); updatePeerUI(pub); }
+
+        function perPeerIntervalMs(pub) {
+            const st = streamsOut.get(pub);
+            const baseMs = 1000 / parseInt(fpsSlider?.value || '18', 10);
+            if (!st || !st.ack) return baseMs;
+            const bias = parseFloat(biasSlider?.value || '0.7'); // 0 = ignore e2e, 1 = strongly pace
+            const e2e = st.ack.e2eEma ?? 120; // ms
+            // Normalize e2e into [0..~1.5] (90ms → 0, 600ms → 1)
+            const norm = Math.max(0, Math.min(1.5, (e2e - 90) / 510));
+            const factor = 1 + bias * norm; // 1..2.5x
+            return baseMs * factor;
+        }
+
+        async function sendLatestToPeer(pub) {
+            const st = streamsOut.get(pub); if (!st) return;
+
+            // choose per-peer source
+            const L = (st.preferredSrc === 'screen' && latestVF2_SS) ? latestVF2_SS : latestVF2;
+            if (!L) return;
+
+            // prevent resending identical frame when other encoder ticks
+            if (st.lastFrameTs === (L.ts | 0)) { st.pending = false; return; }
+
+            const nowMs = now();
+            if (nowMs - st.lastSentAt < perPeerIntervalMs(pub)) { st.pending = true; return; }
+            if (st.inFlight) { st.pending = true; return; }
+            st.inFlight = true; st.pending = false;
+
+            const ok = await sendToBest(pub, L.packed).catch(() => false);
+            st.inFlight = false; st.lastSentAt = nowMs;
+
+            if (ok) {
+                st.lastFrameTs = L.ts | 0;
+                st.sent++; st.ack.winSent++; totalSent++;
+                st.sizeEMA = st.sizeEMA == null ? L.bytes : 0.85 * st.sizeEMA + 0.15 * L.bytes;
+                st.txCountSec++; const t = now(); if (t - st.fpsTick >= 1000) { st.txFps = st.txCountSec; st.txCountSec = 0; st.fpsTick = t; }
+            } else {
+                totalDropped++;
+            }
+            if (st.pending) sendLatestToPeer(pub);
+            updatePeerUI(pub);
+        }
+
+
+        /* ====== RX sinks + fast decode + ACK ====== */
+        const incomingSinks = new Map(); // pub -> {holder,canvas,ctx,w,h}
+        function ensureSink(pub) {
+            let s = incomingSinks.get(pub);
+            const tile = document.querySelector(`.peer[data-pub="${pub}"]`);
+            if (!tile) return null;
+            let holder = tile.querySelector('.preview');
+            if (!holder) { return null; }
+            if (s && s.canvas && s.canvas.isConnected) { return s; }
+            const c = document.createElement('canvas'); c.width = 320; c.height = 240; const ctx = c.getContext('2d', { alpha: false });
+            holder.replaceChildren(c);
+            s = { holder, canvas: c, ctx, w: 320, h: 240 }; incomingSinks.set(pub, s); return s;
+        }
+        function setAspect(holder, w, h) {
+            if (!holder) return;
+            const ratio = `${w} / ${h}`;
+
+            if ('aspectRatio' in holder.style) holder.style.aspectRatio = ratio;
+            const frame = holder.closest('.frame') || holder.parentElement;
+            if (frame && 'aspectRatio' in frame.style) frame.style.aspectRatio = ratio;
+
+            const tile = holder.closest('.peer');
+            if (tile) measureTile(tile);   // <-- re-span this tile
+        }
+
+
+        async function decodeU8ToDrawable(u8, mime) {
+            try {
+                if ('ImageDecoder' in window) {
+                    const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+                    const dec = new ImageDecoder({ data: ab, type: mime });
+                    const { image } = await dec.decode();
+                    return { type: 'bitmap', bmp: image, w: image.codedWidth || image.displayWidth, h: image.codedHeight || image.displayHeight, close: () => image.close() };
+                }
+            } catch { }
+            try {
+                if ('createImageBitmap' in window) {
+                    const bmp = await createImageBitmap(new Blob([u8], { type: mime }));
+                    return { type: 'bitmap', bmp, w: bmp.width, h: bmp.height, close: () => bmp.close && bmp.close() };
+                }
+            } catch { }
+            const url = URL.createObjectURL(new Blob([u8], { type: mime }));
+            const img = new Image(); img.src = url; await img.decode(); URL.revokeObjectURL(url);
+            return { type: 'img', img, w: img.naturalWidth, h: img.naturalHeight, close: () => { } };
+        }
+
+        const rxState = new Map(); // pub -> {decoding,queued,lastAckSent,lastSeenSeq,rxFps,rxTick,rxCount}
+        async function processQueue(pub) {
+            const st = rxState.get(pub) || { decoding: false, queued: null, lastAckSent: 0, lastSeenSeq: 0, rxFps: 0, rxTick: now(), rxCount: 0 };
+            if (st.decoding || !st.queued) return;
+            st.decoding = true; rxState.set(pub, st);
+            const job = st.queued; st.queued = null;
+            try {
+                const mime = VF2.mimeFromCode(job.fmtCode);
+                const drawable = await decodeU8ToDrawable(job.u8, mime);
+                const w = job.w || drawable.w, h = job.h || drawable.h;
+                const sink = ensureSink(pub); if (!sink) { drawable.close(); st.decoding = false; rxState.set(pub, st); return; }
+                setAspect(sink.holder, w, h);
+                if (sink.canvas.width !== w || sink.canvas.height !== h) { sink.canvas.width = w; sink.canvas.height = h; }
+                if (drawable.type === 'bitmap') sink.ctx.drawImage(drawable.bmp, 0, 0, w, h); else sink.ctx.drawImage(drawable.img, 0, 0, w, h);
+                drawable.close();
+
+                st.rxCount++; st.lastFrameAt = now(); const t = now(); if (t - st.rxTick >= 1000) { st.rxFps = st.rxCount; st.rxCount = 0; st.rxTick = t; }
+            } catch { } finally {
+                st.decoding = false; rxState.set(pub, st);
+                if (st.queued) processQueue(pub);
+            }
+            // coalesced ACK by time/seq (tighter for latency)
+            st.lastSeenSeq = Math.max(st.lastSeenSeq, job.seq | 0);
+            const nowMs = now();
+            if (nowMs - (st.lastAckSent || 0) > 120) {
+                st.lastAckSent = nowMs;
+                sendToBest(pub, JSON.stringify({ ver: 1, type: 'video_ack', id: `vack|${selfPub}|${st.lastSeenSeq}`, from: selfPub, to: pub, ts: nowMs, ackSeq: st.lastSeenSeq })).catch(() => { });
+            }
+            updatePeerUI(pub);
+        }
+
+        function onBinaryFrame(fromPub, u8) {
+            const f = VF2.parse(u8); if (!f) return;
+            const pub = fromPub.toLowerCase();
+            ensurePeer(pub, { ts: now(), vestigial: false, addr: bestAddrForPub(pub) || `web.${pub}` });
+            let st = rxState.get(pub);
+            if (!st) {
+                st = { decoding: false, queued: null, lastAckSent: 0, lastSeenSeq: 0, rxFps: 0, rxTick: now(), rxCount: 0, lastFrameAt: 0 };
+                rxState.set(pub, st);
+            }
+            st.queued = { fmtCode: f.fmtCode, u8: f.payload, w: f.w | 0, h: f.h | 0, ts: f.ts | 0, seq: f.seq | 0 };
+            processQueue(pub);
+        }
+
+        /* ====== Peer tiles (grid) ====== */
+        const grid = $('#grid');
+        function ensurePeerTile(pub) {
+            // Omit peers with no non-reserved prefix from the UI
+            if (!hasDisplayablePrefix(pub)) {
+                const existing = document.querySelector(`.peer[data-pub="${pub}"]`);
+                if (existing) existing.remove();
+                return null;
+            }
+            // ensure styles exist (green=on, red=off)
+            if (!document.getElementById('avToggleStyles')) {
+                const st = document.createElement('style');
+                st.id = 'avToggleStyles';
+                st.textContent = `
+      .avToggles{display:flex;gap:8px}
+      .iconBtn{
+        height:32px;padding:0 10px;border:1px solid #333;border-radius:8px;
+        background: var(--bg); color:#fff; cursor:pointer
+      }
+      .iconBtn.on{ background: var(--fg); color:#000; }
+    `;
+                document.head.appendChild(st);
+            }
+
+            let tile = document.querySelector(`.peer[data-pub="${pub}"]`);
+            if (tile) return tile;
+
+            tile = document.createElement('div');
+            tile.className = 'peer';
+            tile.dataset.pub = pub;
+
+            // Frame + overlays
+            const frame = document.createElement('div');
+            frame.className = 'frame';
+            frame.title = 'Click to start/stop sending your stream';
+
+            const overlayTop = document.createElement('div');
+            overlayTop.className = 'overlay top';
+
+            const leftTop = document.createElement('div');
+            leftTop.style.display = 'flex';
+            leftTop.style.alignItems = 'center';
+            leftTop.style.gap = '6px';
+
+            const dot = document.createElement('span');
+            dot.className = 'dot warn';
+
+            const addr = document.createElement('span');
+            addr.className = 'addr mono';
+            addr.textContent = labelForPub(pub); // instead of shortHex(pub, 8, 6)
+
+            leftTop.appendChild(dot);
+            leftTop.appendChild(addr);
+
+            const rightTop = document.createElement('div');
+            rightTop.style.display = 'flex';
+            rightTop.style.gap = '6px';
+            rightTop.style.alignItems = 'center';
+
+            const txBadge = document.createElement('span');
+            txBadge.className = 'chip tx';
+            txBadge.textContent = 'TX';
+            txBadge.hidden = true;
+
+            const preview = document.createElement('div');
+            preview.className = 'preview';
+
+            const overlayBottom = document.createElement('div');
+            overlayBottom.className = 'overlay bottom';
+
+            const meta = document.createElement('div');
+            meta.className = 'meta tiny';
+            meta.textContent = '—';
+
+            const spinner = document.createElement('div');
+            spinner.className = 'loading hideme';
+            frame.appendChild(spinner);
+            // ===== Bottom row (controls)
+            const row = document.createElement('div');
+            row.className = 'row';
+
+            const avTog = document.createElement('div');
+            avTog.className = 'avToggles';
+
+            const btnMic = document.createElement('button');
+            btnMic.className = 'iconBtn';
+            btnMic.title = 'Toggle audio TX';
+            btnMic.textContent = '🎤';
+
+            const btnCam = document.createElement('button');
+            btnCam.className = 'iconBtn';
+            btnCam.title = 'Toggle video TX';
+            btnCam.textContent = '📷';
+
+            const btnShare = document.createElement('button');
+            btnShare.className = 'iconBtn ss';
+            btnShare.title = 'Use screen share instead of camera';
+            btnShare.textContent = '🖥️';
+
+            // Initial on/off color
+            btnMic.classList.toggle('on', streamsOutA.has(pub));
+            btnCam.classList.toggle('on', streamsOut.has(pub));
+            btnShare.classList.toggle('on', (streamsOut.get(pub)?.preferredSrc === 'screen'));
+
+            // NEW: Per-peer screen share toggle
+            btnShare.addEventListener('click', async (e) => {
+                e.stopPropagation();
+
+                // ensure there's a video TX state to attach source to
+                if (!streamsOut.has(pub)) {
+                    await ensureCamStream();
+                    startStreamingTo(pub);
+                }
+                const st = streamsOut.get(pub);
+
+                if (st.preferredSrc !== 'screen') {
+                    const ok = await startScreenShare();
+                    if (!ok) return;
+                    st.preferredSrc = 'screen';
+                    btnShare.classList.add('on');
+                } else {
+                    st.preferredSrc = 'cam';
+                    btnShare.classList.remove('on');
+                    maybeStopScreenWhenUnused(); // shuts screen capture if nobody uses it
+                }
+                updatePeerUI(pub);
+            });
+
+
+
+
+            rightTop.appendChild(txBadge);
+            overlayTop.appendChild(leftTop);
+            overlayTop.appendChild(rightTop);
+
+            avTog.appendChild(btnMic);
+            avTog.appendChild(btnCam);
+            avTog.appendChild(btnShare);
+            row.appendChild(avTog);
+
+            overlayBottom.appendChild(meta);
+            //overlayBottom.appendChild(avTog);
+
+            frame.appendChild(overlayTop);
+            frame.appendChild(preview);
+            frame.appendChild(overlayBottom);
+
+            //row.appendChild(avTog);
+
+            // Add to grid
+            tile.appendChild(frame);
+            tile.appendChild(row);
+            grid.appendChild(tile);
+
+            measurePub(pub);
+            // ===== Click handlers =====
+
+            // Default click: toggle BOTH audio+video together
+            frame.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const sendingV = streamsOut.has(pub);
+                const sendingA = streamsOutA.has(pub);
+                if (!sendingV && !sendingA) {
+                    await ensureCamStream();
+                    await ensureLocalAudio(); try { if (audioCtx) await audioCtx.resume(); } catch { }
+                    startStreamingTo(pub);
+                    startAudioTo(pub);
+                    btnCam.classList.add('on');
+                    btnMic.classList.add('on');
+                    txBadge.hidden = false;
+                } else {
+                    if (sendingV) { stopStreamingTo(pub); btnCam.classList.remove('on'); }
+                    if (sendingA) { stopAudioTo(pub); btnMic.classList.remove('on'); }
+                    txBadge.hidden = !streamsOut.has(pub);
+                }
+                updatePeerUI(pub);
+            });
+
+            // Mini toggles (independent)
+            btnMic.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!streamsOutA.has(pub)) {
+                    await ensureLocalAudio(); try { if (audioCtx) await audioCtx.resume(); } catch { }
+                    startAudioTo(pub);
+                    btnMic.classList.add('on');
+                } else {
+                    stopAudioTo(pub);
+                    btnMic.classList.remove('on');
+                }
+                updatePeerUI(pub);
+            });
+
+            btnCam.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!streamsOut.has(pub)) {
+                    await ensureCamStream();
+                    startStreamingTo(pub);
+                    btnCam.classList.add('on');
+                    txBadge.hidden = false;
+                } else {
+                    stopStreamingTo(pub);
+                    btnCam.classList.remove('on');
+                    txBadge.hidden = true;
+                }
+                updatePeerUI(pub);
+            });
+
+            return tile;
+        }
+
+
+
+        function peerMetaText(pub) { const ent = peers.get(pub) || {}; const ago = ent.lastTs ? fmtAgo(now() - ent.lastTs) + ' ago' : '—'; return ent.isVestigial ? `last seen ${ago}` : `active • ${ago}`; }
+        function updatePeerUI(pub) {
+            if (!hasDisplayablePrefix(pub)) {
+                const existing = document.querySelector(`.peer[data-pub="${pub}"]`);
+                if (existing) existing.remove();
+                return;
+            }
+            const tile = document.querySelector(`.peer[data-pub="${pub}"]`); if (!tile) return;
+            const addrEl = tile.querySelector('.addr'); if (addrEl) addrEl.textContent = labelForPub(pub);
+            const nameEl = tile.querySelector('.name'); if (nameEl) nameEl.textContent = labelForPub(pub);
+
+
+            const st = streamsOut.get(pub) || null;
+            const rx = rxState.get(pub) || null;
+            const isOnlineNow = isPeerOnline(pub);
+
+            // dots (keep your blink-on-video if you added it)
+            const dotEls = tile.querySelectorAll('.dot');
+            const baseClass = 'dot ' + (isOnlineNow ? 'ok' : (peers.get(pub)?.isVestigial ? 'err' : 'warn'));
+            const blink = st ? ' blink' : '';
+            dotEls.forEach(d => d.className = baseClass + blink);
+
+            const txFps = st ? (st.txFps || 0) : 0;
+            const rxFps = rx ? (rx.rxFps || 0) : 0;
+            const avgKB = st?.sizeEMA != null ? Math.round(st.sizeEMA / 1024) : 0;
+            const ackPct = st && st.ack ? (st.ack.winSent ? Math.round((st.ack.winAck / st.ack.winSent) * 100) : 0) : 0;
+
+            const meta = tile.querySelector('.meta');
+            if (meta) meta.textContent = `${peerMetaText(pub)} • tx ${txFps}fps • rx ${rxFps}fps • ~${avgKB}KB • ack ${ackPct}%`;
+
+            const txBadge = tile.querySelector('.tx'); if (txBadge) txBadge.hidden = !st;
+            // Stall detection UI: blur + spinner when no frames for a while
+            const frameEl = tile.querySelector('.frame');
+            const spinEl = tile.querySelector('.loading');
+            const lastFrameAt = rx ? (rx.lastFrameAt || 0) : 0;
+
+            // Only show "stalled" if we had ever drawn a frame and then it stopped
+            const stalled = lastFrameAt > 0 && (now() - lastFrameAt) > STALLED_AFTER_MS;
+
+            if (frameEl) frameEl.classList.toggle('stalled', stalled);
+            if (spinEl) spinEl.classList.toggle('hideme', !stalled);
+
+            // ── NEW: reflect buttons
+            const btnMic = tile.querySelector('.iconBtn:nth-child(1)');
+            const btnCam = tile.querySelector('.iconBtn:nth-child(2)');
+            if (btnMic) btnMic.classList.toggle('on', streamsOutA.has(pub));
+            if (btnCam) btnCam.classList.toggle('on', streamsOut.has(pub));
+            const btnShare = tile.querySelector('.iconBtn.ss');
+            if (btnShare) btnShare.classList.toggle('on', streamsOut.get(pub)?.preferredSrc === 'screen');
+
+        }
+
+
+        setInterval(() => { for (const [pub] of peers.entries()) updatePeerUI(pub); }, 1200);
+
+
+
+        /* ====== Orientation UI + math ====== */
+        const oriUIByPub = new Map();
+
+        /** Quaternion -> yaw/pitch/roll in degrees (ZYX / yaw(Z), pitch(Y), roll(X)) */
+        function quatToEulerYPR(qx, qy, qz, qw) {
+            // roll (x)
+            const sinr_cosp = 2 * (qw * qx + qy * qz);
+            const cosr_cosp = 1 - 2 * (qx * qx + qy * qy);
+            const roll = Math.atan2(sinr_cosp, cosr_cosp);
+
+            // pitch (y)
+            const sinp = 2 * (qw * qy - qz * qx);
+            const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp) * (Math.PI / 2) : Math.asin(sinp);
+
+            // yaw (z)
+            const siny_cosp = 2 * (qw * qz + qx * qy);
+            const cosy_cosp = 1 - 2 * (qy * qy + qz * qz);
+            const yaw = Math.atan2(siny_cosp, cosy_cosp);
+
+            const d = 180 / Math.PI;
+            return { yaw: yaw * d, pitch: pitch * d, roll: roll * d };
+        }
+
+        function _ensureOriUI(pub) {
+            const tile = document.querySelector(`.peer[data-pub="${pub}"]`);
+            if (!tile) return null;
+            const bot = tile.querySelector('.overlay.bottom');
+            if (!bot) return null;
+
+            let wrap = bot.querySelector('.ori');
+            if (!wrap) {
+                wrap = document.createElement('div');
+                wrap.className = 'ori';
+
+                const make = (cls, title) => {
+                    const g = document.createElement('div');
+                    g.className = `gauge ${cls}`;
+                    g.title = title;
+                    const a = document.createElement('div');
+                    a.className = 'arrow';
+                    g.appendChild(a);
+                    return { g, a };
+                };
+
+                const gy = make('y', 'Yaw');    // index 0
+                const gp = make('p', 'Pitch');  // index 1
+                const gr = make('r', 'Roll');   // index 2
+                const gc = make('c', 'Compass'); // index 3
+
+                wrap.appendChild(gy.g);
+                wrap.appendChild(gp.g);
+                wrap.appendChild(gr.g);
+                wrap.appendChild(gc.g);
+
+                // place BEFORE meta text
+                bot.insertBefore(wrap, bot.firstChild);
+                measurePub(pub);
+            }
+
+            let ui = oriUIByPub.get(pub);
+            if (!ui) {
+                ui = {
+                    wrap,
+                    yawEl: wrap.children[0].querySelector('.arrow'),
+                    pitchEl: wrap.children[1].querySelector('.arrow'),
+                    rollEl: wrap.children[2].querySelector('.arrow'),
+                    compEl: wrap.children[3].querySelector('.arrow'),
+                };
+                oriUIByPub.set(pub, ui);
+            }
+            return ui;
+        }
+
+        function _rot(el, deg) {
+            if (!el) return;
+            const ang = ((deg % 360) + 360) % 360;
+            el.style.transform = `translate(-50%, -100%) rotate(${ang}deg)`;
+        }
+
+        /** Update a peer's YPR + compass UI (compass falls back to yaw if not provided). */
+        function setPeerOrientation(pub, quat, compassDeg = null) {
+            const ui = _ensureOriUI(pub);
+            if (!ui || !Array.isArray(quat) || quat.length !== 4) return;
+
+            const { yaw, pitch, roll } = quatToEulerYPR(quat[0], quat[1], quat[2], quat[3]);
+            const comp = (typeof compassDeg === 'number' && isFinite(compassDeg))
+                ? compassDeg
+                : (((yaw % 360) + 360) % 360);
+
+            _rot(ui.yawEl, yaw);
+            _rot(ui.pitchEl, pitch);
+            _rot(ui.rollEl, roll);
+            _rot(ui.compEl, comp);
+        }
+
+
+
+        /* ====== Orientation share (quaternion) ====== */
+        (() => {
+            const btnEl = document.getElementById('btn-orient');
+            const calibEl = document.getElementById('btn-calib');
+            const statusEl = document.getElementById('ori-status');
+            if (!btnEl || !calibEl || !statusEl) return;
+
+            // Rate & thresholds
+            const HZ = 30;                  // send rate
+            const PREC = 4;                 // quantize payload
+            const CHANGE_DOT_EPS = 1e-3;    // skip if |dot(q,last)| ~ 1
+
+            // Quaternion helpers [x,y,z,w]
+            const q = {
+                id: () => [0, 0, 0, 1],
+                mul: (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+                a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+                a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+                a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]],
+                conj: (a) => [-a[0], -a[1], -a[2], a[3]],
+                norm: (a) => { const s = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]; if (!s) return [0, 0, 0, 1]; const k = 1 / Math.sqrt(s); return [a[0] * k, a[1] * k, a[2] * k, a[3] * k]; },
+                dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3],
+                fromAxis: (ax, rad) => { const s = Math.sin(rad / 2), c = Math.cos(rad / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, c]; },
+                // DeviceOrientation (alpha Z, beta X', gamma Y'') → quat, intrinsic Z*X*Y
+                fromDeviceEuler: (alphaDeg, betaDeg, gammaDeg) => {
+                    const z = alphaDeg * Math.PI / 180, x = betaDeg * Math.PI / 180, y = gammaDeg * Math.PI / 180;
+                    const qz = q.fromAxis([0, 0, 1], z), qx = q.fromAxis([1, 0, 0], x), qy = q.fromAxis([0, 1, 0], y);
+                    return q.norm(q.mul(q.mul(qz, qx), qy));
+                },
+            };
+
+            // Undo screen rotation so "world up" stays up
+            const screenRotQ = () => {
+                const ang = (screen.orientation && screen.orientation.angle) ? screen.orientation.angle : (window.orientation || 0);
+                return q.fromAxis([0, 0, 1], -(ang * Math.PI / 180));
+            };
+
+            // State
+            let yawCalib = q.id();      // user zero around Z
+            let running = false;
+            let lastSent = 0;
+            let lastQuat = null;        // last sent
+            let latestQuat = null;      // most recent sample
+            let latestHeadingDeg = null; // 0..360, derived from pre-calibration orientation
+            let rafId = 0;
+            let sensor = null;
+            let onDevOrient = null;
+
+            function setStatus(t) { statusEl.textContent = t; }
+            function setBtn(on) {
+                btnEl.textContent = `Share Orientation: ${on ? 'ON' : 'OFF'}`;
+                btnEl.style.background = on ? '#1f7a1f' : '';
+            }
+
+            // Peers we are currently transmitting to (video and/or audio)
+            function activePubs() {
+                const s = new Set();
+                for (const [pub] of streamsOut) s.add(pub);
+                for (const [pub] of streamsOutA) s.add(pub);
+                return [...s];
+            }
+
+            async function sendPoseIfDue() {
+                if (!running || !client || !selfPub) return;
+                const t = performance.now();
+                const minDt = 1000 / HZ;
+                if (!latestQuat || (t - lastSent) < minDt) { rafId = requestAnimationFrame(sendPoseIfDue); return; }
+
+                // dedupe minor changes
+                if (lastQuat && Math.abs(q.dot(latestQuat, lastQuat)) > (1 - CHANGE_DOT_EPS)) {
+                    rafId = requestAnimationFrame(sendPoseIfDue); return;
+                }
+
+                const pubs = activePubs();
+                if (!pubs.length) { setStatus('no active peers'); rafId = requestAnimationFrame(sendPoseIfDue); return; }
+
+                const out = latestQuat.map(v => +v.toFixed(PREC));
+                const pkt = JSON.stringify({
+                    ver: 1, type: 'pose', mode: 'quat',
+                    id: `pose|${selfPub}|${Date.now()}`,
+                    from: selfPub, ts: Date.now(), quat: out,
+                    heading: (typeof latestHeadingDeg === 'number') ? +latestHeadingDeg.toFixed(1) : undefined
+                });
+
+                // fire to all active peers without blocking UI loop
+                try {
+                    await Promise.allSettled(pubs.map(pub => sendToBest(pub, pkt)));
+                    lastSent = t; lastQuat = latestQuat;
+                    setStatus(`sent → ${pubs.length} peer${pubs.length > 1 ? 's' : ''} • q=${out.map(n => n.toFixed(2)).join(',')}`);
+                } catch (e) {
+                    setStatus(`send err: ${(e && (e.message || e))}`);
+                }
+                rafId = requestAnimationFrame(sendPoseIfDue);
+            }
+
+            function stopSensors() {
+                running = false;
+                if (sensor) { try { sensor.stop(); } catch { } sensor = null; }
+                if (onDevOrient) { window.removeEventListener('deviceorientation', onDevOrient); onDevOrient = null; }
+                if (rafId) cancelAnimationFrame(rafId), rafId = 0;
+                setBtn(false); setStatus('stopped');
+            }
+            async function startSensors() {
+                // Prefer AbsoluteOrientationSensor when available
+                try {
+                    if ('AbsoluteOrientationSensor' in window) {
+                        sensor = new window.AbsoluteOrientationSensor({ frequency: 60, referenceFrame: 'device' });
+                        sensor.addEventListener('reading', () => {
+                            let dq = [sensor.quaternion[0], sensor.quaternion[1], sensor.quaternion[2], sensor.quaternion[3]];
+                            dq = q.norm(dq);
+                            // pre-calibration (screen-rotation only) for heading
+                            const pre = q.norm(q.mul(screenRotQ(), dq));
+                            // post-calibration for shared orientation
+                            latestQuat = q.norm(q.mul(pre, yawCalib));
+
+                            // derive heading from 'pre' (yaw angle)
+                            const { yaw } = quatToEulerYPR(pre[0], pre[1], pre[2], pre[3]);
+                            latestHeadingDeg = ((yaw % 360) + 360) % 360;
+                        });
+
+                        sensor.addEventListener('error', ev => setStatus(`sensor err: ${ev.error?.message || ev.message || ev}`));
+                        sensor.start();
+                        setStatus('sensor: AbsoluteOrientationSensor');
+                        return true;
+                    }
+                } catch { /* fall through */ }
+
+                // Fallback: DeviceOrientationEvent (iOS permission)
+                async function ensureDOMPermission() {
+                    const D = window.DeviceOrientationEvent;
+                    if (D && typeof D.requestPermission === 'function') {
+                        const res = await D.requestPermission();
+                        if (res !== 'granted') throw new Error('motion/orientation permission denied');
+                    }
+                }
+                await ensureDOMPermission();
+
+                onDevOrient = (ev) => {
+                    const { alpha, beta, gamma } = ev;
+                    if (alpha == null || beta == null || gamma == null) return;
+                    let dq = q.fromDeviceEuler(alpha, beta, gamma);
+                    const pre = q.norm(q.mul(screenRotQ(), dq));
+                    latestQuat = q.norm(q.mul(pre, yawCalib));
+
+                    const { yaw } = quatToEulerYPR(pre[0], pre[1], pre[2], pre[3]);
+                    latestHeadingDeg = ((yaw % 360) + 360) % 360;
+                };
+                window.addEventListener('deviceorientation', onDevOrient, { passive: true });
+                setStatus('sensor: DeviceOrientationEvent');
+                return true;
+            }
+
+            btnEl.addEventListener('click', async () => {
+                if (running) { stopSensors(); return; }
+                if (!client || !client.addr) { setStatus('connect NKN first'); return; }
+                try {
+                    const ok = await startSensors();
+                    if (!ok) { setStatus('no orientation sensor'); return; }
+                    running = true; setBtn(true);
+                    yawCalib = q.id();  // clear previous zero
+                    lastQuat = null; latestQuat = null; lastSent = 0;
+                    rafId = requestAnimationFrame(sendPoseIfDue);
+                } catch (e) {
+                    setStatus(`start err: ${(e && (e.message || e))}`);
+                }
+            });
+
+            calibEl.addEventListener('click', () => {
+                if (!latestQuat) { setStatus('nothing to calibrate yet'); return; }
+                // keep only Z (yaw) part of current quat → inverse as calibration
+                const [x, y, z, w] = latestQuat;
+                const n = Math.hypot(z, w) || 1;
+                const zOnly = [0, 0, z / n, w / n];
+                yawCalib = q.conj(zOnly);
+                setStatus('yaw calibrated');
+            });
+
+            // auto-stop when tab goes background
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && running) stopSensors();
+            });
+        })();
+
+        /* ====== NKN wiring (binary aware) ====== */
+        let SEND_GUARD = true; // simple guard to avoid send before connected
+        async function connectNkn() {
+            try {
+                setNkn('NKN: connecting…', 'warn');
+                const seed = getOrCreateSeed();
+                client = new window.nkn.MultiClient({ seed, identifier: MY_IDENT, numSubClients: 8, originalClient: true });
+
+                client.onConnect(() => {
+                    selfAddr = client.addr || null; selfPub = client.getPublicKey() || null;
+                    idSet(selfPub).add(MY_IDENT); persistKnownIds();
+                    displayNameByPub.set(selfPub, MY_IDENT);
+                    updateSelfTileLabels();
+
+                    $('#myAddr') && ($('#myAddr').textContent = selfAddr || '—');
+                    setNkn('NKN: connected', 'ok'); scheduleHB(); scheduleTicks(); probeAll();
+                    for (const to of targets()) rawSend(to, JSON.stringify({ ver: 1, type: 'peers_req', id: `peers_req|${selfPub}|${now()}`, from: selfPub, ts: now() })).catch(() => { });
+                    ensureCamStream().catch(() => { });
+                    SEND_GUARD = false;
+                });
+
+                client.onMessage(async ({ src, payload }) => {
+                    if (src) {
+                        const m = /^([a-z0-9_-]+)\.([0-9a-f]{64})$/i.exec(src);
+                        if (m) {
+                            const identRaw = m[1];
+                            const ident = identRaw.toLowerCase();
+                            const pub = m[2].toLowerCase();
+
+                            // Record addr for RTT/UI either way
+                            poolAdd(src, now());
+                            if (!isReservedId(ident)) { displayNameByPub.set(pub, ident); updatePeerUI(pub); }
+                            if (isAggregateId(ident)) {
+                                // DO NOT add this pub to peers; still keep addrPool metrics
+                            } else {
+                                idSet(pub).add(ident);
+                                persistKnownIds();
+                                ensurePeer(pub, { addr: src, ts: now() });
+                            }
+                        } else {
+                            poolAdd(src, now());
+                        }
+                    }
+
+                    // BINARY (VF2)
+                    if (payload instanceof Uint8Array && payload.length >= 3 && payload[0] === VF2.MAGIC0 && payload[1] === VF2.MAGIC1 && payload[2] === VF2.MAGIC2) {
+                        const pub = (src?.split('.')?.pop() || '').toLowerCase();
+                        if (pub) onBinaryFrame(pub, payload);
+                        return;
+                    }
+
+                    // JSON path
+                    let text = payload;
+                    if (payload instanceof Uint8Array) {
+                        try { text = new TextDecoder().decode(payload); } catch { return; }
+                    }
+                    if (typeof text !== 'string') return;
+                    let msg = null; if (text.trim().startsWith('{')) { try { msg = JSON.parse(text); } catch { } }
+                    const tsNow = now(); if (!msg) return; if (markSeen(msg)) return;
+
+                    if (msg.type === 'hb') {
+                        rawSend(src, JSON.stringify({ ver: 1, type: 'hb_ack', id: msg.id || `hb_ack|${selfPub}|${tsNow}`, from: selfPub, t_client: msg.t_client })).catch(() => { });
+                        if (msg.from) {
+                            const fp = msg.from.toLowerCase();
+                            if (!shouldOmitPub(fp)) ensurePeer(fp, { ts: tsNow });
+                        }
+                        return;
+                    }
+                    if (msg.type === 'hb_ack' && typeof msg.t_client === 'number') {
+                        const rtt = Math.max(0, tsNow - (msg.t_client || tsNow));
+                        poolNoteAck(src, rtt);
+                        if (msg.from) {
+                            const fp = msg.from.toLowerCase();
+                            if (!shouldOmitPub(fp)) ensurePeer(fp, { ts: tsNow });
+                        }
+                        return;
+                    }
+                    if (msg.type === 'tick') {
+                        if (msg.from) {
+                            const fp = msg.from.toLowerCase();
+                            if (!shouldOmitPub(fp)) ensurePeer(fp, { ts: tsNow });
+                        }
+                        return;
+                    }
+                    if (msg.type === 'pose' && msg.mode === 'quat' && Array.isArray(msg.quat) && msg.quat.length === 4) {
+                        const from = (msg.from || (src?.split('.')?.pop()) || '').toLowerCase();
+                        if (from) {
+                            ensurePeer(from, { ts: tsNow });
+                            // Use msg.heading if provided, else we'll render compass from yaw
+                            const heading = (typeof msg.heading === 'number') ? msg.heading : null;
+                            setPeerOrientation(from, msg.quat, heading);
+                        }
+                        return;
+                    }
+
+
+                    if (msg.type === 'peers') {
+                        const arr = Array.isArray(msg.items) ? msg.items : [];
+                        for (const it of arr) {
+                            const pub = (it.pub || '').toLowerCase();
+                            if (!pub || pub === (selfPub || '').toLowerCase()) continue;
+
+                            // Merge identifiers we learned
+                            const ids = idSet(pub);
+                            (Array.isArray(it.ids) ? it.ids : []).forEach(id => ids.add(String(id || '').toLowerCase()));
+
+                            // Omit aggregate peers entirely
+                            const hasAggregate = [...ids].some(isAggregateId);
+                            if (hasAggregate) {
+                                // still record addresses for RTT if you like
+                                ids.forEach(id => poolAdd(`${id}.${pub}`, tsNow));
+                                continue;
+                            }
+
+                            // Optional: choose a friendly name and remember it
+                            const pretty = niceIdFromSet(ids);
+                            if (pretty) displayNameByPub.set(pub, pretty);
+
+                            // Keep RTT/address book fresh
+                            ids.forEach(id => poolAdd(`${id}.${pub}`, tsNow));
+                            const addrGuess = it.addr || (ids.size ? `${[...ids][0]}.${pub}` : `${MY_IDENT || 'web'}.${pub}`);
+                            poolAdd(addrGuess, tsNow);
+
+                            ensurePeer(pub, {
+                                addr: addrGuess,
+                                ts: typeof it.last === 'number' ? it.last : tsNow,
+                                vestigial: !!it.vestigial
+                            });
+                        }
+                        persistKnownIds();
+                        return;
+                    }
+
+
+                    if (msg.type === 'peers_req') { const roster = { ver: 1, type: 'peers', id: `peers|${selfPub}|${now()}`, ts: now(), items: [...peers.entries()].map(([pub, ent]) => ({ pub, ids: [...idSet(pub)], addr: ent.addr || `web.${pub}`, last: ent.lastTs || 0, vestigial: !!ent.isVestigial })) }; rawSend(src, JSON.stringify(roster)).catch(() => { }); return; }
+
+                    if (msg.type === 'join') {
+                        const ack = {
+                            ver: 1, type: 'joined', id: `joined|${selfPub}|${tsNow}`, ts: tsNow,
+                            addr: selfAddr, prefix: 'peer', nick: MY_IDENT
+                        };
+                        sendToBest(msg.from, JSON.stringify(ack)).catch(() => { });
+                        const from = msg.from?.toLowerCase();
+                        if (from) {
+                            ensurePeer(from, { ts: tsNow });
+                            if (msg.nick) {
+                                const n = sanitizeNick(msg.nick);
+                                if (n) { displayNameByPub.set(from, n); updatePeerUI(from); }
+                            }
+                        }
+                        return;
+                    }
+
+                    if (msg.type === 'joined') {
+                        poolNoteAck(src, null);
+                        if (msg.from && msg.nick) {
+                            const from = msg.from.toLowerCase();
+                            const n = sanitizeNick(msg.nick);
+                            if (n) { displayNameByPub.set(from, n); updatePeerUI(from); }
+                        }
+                        return;
+                    }
+                    if (msg.type === 'leave' && msg.from) {
+                        const from = msg.from.toLowerCase();
+                        if (!shouldOmitPub(from)) {
+                            const ent = peers.get(from) || {};
+                            ensurePeer(from, { ts: tsNow, vestigial: true, addr: ent.addr || `web.${from}` });
+                        }
+                        return;
+                    }
+                    if (msg.type === 'video_offer' && msg.from && (!msg.to || msg.to === selfPub)) { const ack = { ver: 1, type: 'video_accept', id: `vack|${selfPub}|${tsNow}`, from: selfPub, to: msg.from, ts: tsNow }; sendToBest(msg.from, JSON.stringify(ack)).catch(() => { }); return; }
+                    if (msg.type === 'video_accept' && msg.from && msg.to === selfPub) { return; }
+
+                    // Legacy JSON frame path (compat)
+                    if (msg.type === 'video_frame' && msg.from && msg.b64 && (msg.fmt === 'jpeg' || msg.fmt === 'webp')) {
+                        const mime = (msg.fmt === 'webp') ? 'image/webp' : 'image/jpeg';
+                        const bin = atob(msg.b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+                        const pub = msg.from.toLowerCase();
+                        ensurePeer(pub, { ts: now(), vestigial: false, addr: bestAddrForPub(pub) || `web.${pub}` });
+                        let st = rxState.get(pub); if (!st) { st = { decoding: false, queued: null, lastAckSent: 0, lastSeenSeq: 0, rxFps: 0, rxTick: now(), rxCount: 0 }; rxState.set(pub, st); }
+                        st.queued = { fmtCode: (mime === 'image/jpeg') ? VF2.FMT_JPEG : VF2.FMT_WEBP, u8, w: msg.w | 0, h: msg.h | 0, ts: msg.ts | 0, seq: (msg.seq | 0) || 0 };
+                        processQueue(pub);
+                        return;
+                    }
+
+                    if (msg.type === 'video_ack' && msg.from && msg.to === selfPub) {
+                        const from = msg.from.toLowerCase();
+                        const st = streamsOut.get(from); if (!st) return;
+                        const ackSeq = (msg.ackSeq | 0) || 0;
+                        if (ackSeq > 0) {
+                            st.ack.winAck++; st.ack.lastAckAt = now();
+                            const e2e = now() - ackSeq;
+                            st.ack.e2eEma = st.ack.e2eEma == null ? e2e : 0.8 * st.ack.e2eEma + 0.2 * e2e;
+                            updatePeerUI(from);
+                        } else if (typeof msg.srcTs === 'number') { // legacy
+                            st.ack.winAck++; st.ack.lastAckAt = now(); const e2e = now() - msg.srcTs; st.ack.e2eEma = st.ack.e2eEma == null ? e2e : 0.8 * st.ack.e2eEma + 0.2 * e2e; updatePeerUI(from);
+                        }
+                        return;
+                    }
+                    // ── Audio handshakes / frames (JSON, base64)
+                    if (msg.type === 'audio_offer' && msg.from && (!msg.to || msg.to === selfPub)) {
+                        const ack = { ver: 1, type: 'audio_accept', id: `aack|${selfPub}|${now()}`, from: selfPub, to: msg.from, ts: now() };
+                        sendToBest(msg.from, JSON.stringify(ack)).catch(() => { });
+                        // optionally auto-start capture on accept path
+                        return;
+                    }
+                    if (msg.type === 'audio_accept' && msg.from && msg.to === selfPub) {
+                        const ok = await ensureLocalAudio(); if (ok) { try { if (audioCtx) await audioCtx.resume(); } catch { } startAudioTo(msg.from); }
+                        return;
+                    }
+                    if (msg.type === 'audio_frame' && msg.from && msg.b64 && msg.fmt) {
+                        const from = msg.from.toLowerCase();
+                        ensurePeer(from, { ts: now() });
+                        if (msg.fmt === 'opus') {
+                            if (opusSupported) {
+                                const u8 = Uint8Array.from(atob(msg.b64), c => c.charCodeAt(0));
+                                playOpusChunk(from, u8);
+                            }
+                        } else {
+                            const u8 = Uint8Array.from(atob(msg.b64), c => c.charCodeAt(0));
+                            playPcmFrame(from, msg.sr | 0, msg.fmt, u8);
+                        }
+                        return;
+                    }
+
+                });
+
+                client.on('error', () => setNkn('NKN: error', 'err'));
+                client.on('connectFailed', () => setNkn('NKN: connect failed (retrying)', 'warn'));
+                client.on('willreconnect', () => setNkn('NKN: reconnecting…', 'warn'));
+                client.on('close', () => setNkn('NKN: disconnected', 'err'));
+            } catch { setNkn('NKN: init failed', 'err'); }
+        }
+
+        /* ====== dedupe for JSON msgs ====== */
+        const seenIds = new Map(); setInterval(() => { const cut = now() - 120000; for (const [id, ts] of seenIds.entries()) if (ts < cut) seenIds.delete(id); }, 15000);
+        function markSeen(msg) { const id = (msg && typeof msg.id === 'string') ? msg.id : `${msg?.type || '?'}|${msg?.from || '?'}|${msg?.ts || 0}`; const t = now(); const prev = seenIds.get(id); if (prev && (t - prev) < 60000) return true; seenIds.set(id, t); return false; }
+
+        /* ====== signaller override + start ====== */
+        function applySignallerHex(raw) {
+            const m = /([0-9a-f]{64})$/i.exec((raw || '').trim());
+            signallerHex = m ? m[1].toLowerCase() : DEFAULT_SIG_HEX;
+            if (m && isHex64(signallerHex)) localStorage.setItem(LS.SIGHEX, signallerHex);
+
+            // seed BOTH: raw hex and the signaller ident so roster replies can reach us
+            poolAdd(signallerHex, now());
+            poolAdd(`signal.${signallerHex}`, now());   // ← this was missing
+
+            setSig(`Mesh: ${shortHex(signallerHex, 7, 6)} + peers`, 'warn');
+            setSigMeta('probing…');
+            probeAll();
+        }
+
+
+        const hexInput = $('#hexSig'); if (hexInput) { hexInput.value = localStorage.getItem(LS.SIGHEX) || ''; hexInput.addEventListener('input', () => applySignallerHex(hexInput.value)); }
+        applySignallerHex(hexInput?.value || DEFAULT_SIG_HEX);
+
+        /* ⬇️ PASTE THE NICKNAME INPUT BLOCK HERE */
+        const nickInput = $('#nickInput');
+        if (nickInput) {
+            nickInput.value = MY_NICK;
+            nickInput.addEventListener('input', (e) => {
+                localStorage.setItem(LS.NICK, e.target.value || '');
+            });
+            nickInput.addEventListener('change', () => {
+                MY_NICK = nickInput.value || '';
+                const newIdent = sanitizeNick(MY_NICK) || 'web';
+                if (newIdent !== MY_IDENT) {
+                    MY_IDENT = newIdent;
+                    try { client && client.close(); } catch { }
+                    client = null; selfAddr = null; selfPub = null; SEND_GUARD = true;
+                    connectNkn(); // reconnect using the new identifier
+                }
+                updateSelfTileLabels();
+            });
+        }
+        /* ====== join/leave pulses ====== */
+        function periodicJoin() {
+            if (!client || !client.addr || !selfPub) return;
+            const pkt = {
+                ver: 1, type: 'join', id: `join|${selfPub}|${now()}`, from: selfPub, addr: selfAddr,
+                ts: now(), caps: { relay: true, roster: true }, nick: MY_IDENT
+            };
+
+            for (const to of targets()) rawSend(to, JSON.stringify(pkt)).catch(() => { });
+        }
+        setInterval(periodicJoin, 15000);
+        addEventListener('beforeunload', () => { try { const pkt = { ver: 1, type: 'leave', id: `leave|${selfPub}|${now()}`, from: selfPub, addr: selfAddr, ts: now() }; for (const to of targets()) rawSend(to, JSON.stringify(pkt)).catch(() => { }); } catch { } });
+
+        /* ====== boot (gated on username) ====== */
+        function randomNick() {
+            const A = ['neo', 'quant', 'nova', 'zen', 'ember', 'orbit', 'pixel', 'lyra', 'atlas', 'rune', 'vanta', 'lumen'];
+            const B = ['otter', 'lynx', 'sparrow', 'badger', 'gecko', 'orca', 'tiger', 'eagle', 'whale', 'manta', 'ibis', 'fox'];
+            const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+            return sanitizeNick(`${pick(A)}-${pick(B)}-${(Math.random() * 99 | 0)}`);
+        }
+
+        function showNickModal() {
+            const modal = document.getElementById('nickModal');
+            const input = document.getElementById('nickModalInput');
+            const useBtn = document.getElementById('nickModalUse');
+            const suggBtn = document.getElementById('nickModalSuggest');
+            const skipBtn = document.getElementById('nickModalSkip');
+            const errEl = document.getElementById('nickModalErr');
+
+            if (!modal || !input || !useBtn || !suggBtn || !skipBtn || !errEl) {
+                // Wait for the DOM, then try again — do NOT connect yet
+                onReady(showNickModal);
+                return;
+            }
+
+            const setError = (t) => { errEl.textContent = t || ''; };
+
+            const suggestion = randomNick();
+            input.value = suggestion;
+
+            function applyNick(nickRaw) {
+                const nick = sanitizeNick(nickRaw || '');
+                if (nick.length < 2) { setError('Please enter at least 2 valid characters.'); return; }
+                if (RESERVED_IDS.has(nick)) { setError(`'${nick}' is reserved — pick another.`); return; }
+
+                // persist + apply
+                localStorage.setItem(LS.NICK, nick);
+                MY_NICK = nick;
+                const newIdent = nick; // already sanitized
+                if (newIdent !== MY_IDENT) {
+                    MY_IDENT = newIdent;
+                    updateSelfTileLabels();
+                    const sidebarInput = document.getElementById('nickInput');
+                    if (sidebarInput) sidebarInput.value = nick;
+
+                    try { client && client.close(); } catch { }
+                    client = null; selfAddr = null; selfPub = null; SEND_GUARD = true;
+                }
+
+                // hide modal + connect
+                modal.classList.remove('open');
+                connectNkn();
+                ensureCamStream().catch(() => { });
+                scheduleHB(); scheduleTicks();
+            }
+
+            useBtn.onclick = () => applyNick(input.value);
+            suggBtn.onclick = () => { input.value = randomNick(); setError(''); input.focus(); };
+            skipBtn.onclick = () => {
+                // Allow "web" only as temporary (we still connect)
+                modal.classList.remove('open');
+                connectNkn();
+                ensureCamStream().catch(() => { });
+                scheduleHB(); scheduleTicks();
+            };
+            input.onkeydown = (e) => { if (e.key === 'Enter') useBtn.click(); };
+
+            modal.classList.add('open');
+            setTimeout(() => input.focus(), 0);
+        }
+
+        function bootAfterNick() {
+            // If a valid, non-reserved nick exists, use it. Otherwise prompt.
+            const saved = (localStorage.getItem(LS.NICK) || '').trim();
+            const sn = sanitizeNick(saved);
+            if (sn && !RESERVED_IDS.has(sn)) {
+                MY_NICK = sn;
+                MY_IDENT = sn;
+                connectNkn();
+                ensureCamStream().catch(() => { });
+                scheduleHB(); scheduleTicks();
+                updateSelfTileLabels();
+            } else {
+                // Defer connection until user chooses a nick (no silent 'web')
+                showNickModal();
+            }
+        }
+
+        bootAfterNick();
+        onReady(bootAfterNick);
+
+        /* ====== optional: self tile for visual consistency ====== */
+        // You can comment this out if you don't want a self tile.
+        (function addSelfTile() {
+            const pub = 'SELF_' + Math.random().toString(36).slice(2, 7);
+            const tile = document.createElement('div'); tile.className = 'peer self'; tile.dataset.pub = pub;
+
+            const frame = document.createElement('div'); frame.className = 'frame';
+            frame.style.cursor = 'pointer';
+            frame.title = 'Tap to toggle front/back camera';
+            frame.addEventListener('click', () => toggleFacing());
+
+            const overlayTop = document.createElement('div'); overlayTop.className = 'overlay top';
+            overlayTop.innerHTML = `<span class="chip"><span class="addr mono">${MY_IDENT || 'you'}</span></span>`;
+            const preview = document.createElement('div'); preview.className = 'preview';
+            const video = document.querySelector('#localVideo');
+            if (video) {
+                const ghost = document.createElement('video');
+                ghost.muted = true; ghost.playsInline = true; ghost.autoplay = true;
+                ghost.style.width = '100%'; ghost.style.height = '100%'; ghost.style.objectFit = 'cover';
+                const setSrc = () => { if (video.srcObject) { ghost.srcObject = video.srcObject; ghost.play().catch(() => { }); } else setTimeout(setSrc, 400); };
+                setSrc();
+                preview.appendChild(ghost);
+            }
+
+            const overlayBottom = document.createElement('div'); overlayBottom.className = 'overlay bottom';
+            overlayBottom.innerHTML = `<div class="meta tiny">local preview — click to flip camera</div>`;
+
+            frame.appendChild(overlayTop); frame.appendChild(preview); frame.appendChild(overlayBottom);
+            const row = document.createElement('div'); row.className = 'row';
+            row.innerHTML = `<div class="name mono">${MY_IDENT || 'you'}</div>`;
+            tile.appendChild(frame);
+            tile.appendChild(row);
+            grid.prepend(tile);
+            measureAll();
+        })();
+
+    </script>
+    <!-- Username Modal -->
+    <div id="nickModal" class="modal-backdrop" aria-modal="true" role="dialog">
+        <div class="modal-card">
+            <h2>Choose your username</h2>
+            <p>This name is used as your NKN identifier (so peers see this instead of your hex).</p>
+
+            <div class="modal-row">
+                <input id="nickModalInput" maxlength="24" placeholder="letters, numbers, _ or - only"
+                    spellcheck="false" />
+                <button id="nickModalUse" type="button">Use</button>
+            </div>
+            <div class="modal-row" style="margin-top:8px">
+                <button id="nickModalSuggest" class="secondary" type="button">Suggest</button>
+                <button id="nickModalSkip" class="secondary" type="button"
+                    title="Use temporary 'web' (not recommended)">Skip</button>
+            </div>
+
+            <div id="nickModalErr" class="modal-err"></div>
+            <div class="modal-help">Allowed: <code>a–z 0–9 _ -</code>, 2–24 chars. Reserved: <code>peer</code>,
+                <code>web</code>, <code>signal</code>.
+            </div>
+        </div>
+    </div>
+
+</body>
+
+</html>

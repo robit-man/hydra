@@ -947,9 +947,6 @@ function refreshNodeResolution(force = false) {
     if (!info?.supportsNkn) return;
     const btn = node.el?.querySelector('.node-transport');
     if (!btn) return;
-    const rec = NodeStore.ensure(node.id, node.type);
-    const cfg = rec.config || {};
-    const relay = getRelayValueFromConfig(cfg, info);
     btn.innerHTML = '';
     btn.classList.remove('active');
     btn.removeAttribute('data-relay-state');
@@ -958,6 +955,43 @@ function refreshNodeResolution(force = false) {
     const label = document.createElement('span');
     label.className = 'label';
     label.textContent = 'NKN';
+    if (node.type === 'MediaStream') {
+      const targets = Media.getTargets(node.id);
+      const peerMeta = Media.getPeerMeta(node.id);
+      const activeTargets = new Set(Media.getActiveTargets(node.id));
+      let accepted = 0;
+      let pending = 0;
+      let viewing = 0;
+      for (const addr of targets) {
+        const meta = peerMeta[addr] || {};
+        const handshakeStatus = meta.handshake?.status || 'idle';
+        if (handshakeStatus === 'accepted') {
+          accepted += 1;
+          if (meta.viewing) viewing += 1;
+        } else if (handshakeStatus === 'pending') {
+          pending += 1;
+        }
+      }
+      let stateClass = 'warn';
+      if (!targets.length) stateClass = 'warn';
+      else if (accepted) stateClass = 'ok';
+      else if (!pending) stateClass = 'err';
+      dot.classList.add(stateClass === 'ok' ? 'ok' : stateClass === 'err' ? 'err' : 'warn');
+      btn.classList.toggle('active', targets.length > 0);
+      btn.dataset.relayState = stateClass;
+      const summary = [];
+      summary.push(`Targets: ${targets.length}`);
+      if (accepted) summary.push(`Accepted: ${accepted}`);
+      if (pending) summary.push(`Pending: ${pending}`);
+      if (viewing) summary.push(`Viewing: ${viewing}`);
+      if (activeTargets.size) summary.push(`Active: ${activeTargets.size}`);
+      btn.title = summary.join('\n');
+      btn.append(dot, label);
+      return;
+    }
+    const rec = NodeStore.ensure(node.id, node.type);
+    const cfg = rec.config || {};
+    const relay = getRelayValueFromConfig(cfg, info);
     if (relay) {
       btn.classList.add('active');
       let entry = relayStates.get(node.id);
@@ -1154,11 +1188,23 @@ function refreshNodeResolution(force = false) {
         ` : ''}
         ${node.type === 'MediaStream' ? `
           <div class="muted" style="margin-top:6px;">Local Preview</div>
-          <video class="media-preview" data-media-local autoplay playsinline muted></video>
-          <div class="muted" style="margin-top:6px;">Remote Feed</div>
-          <img class="media-remote" data-media-remote data-empty="true" alt="Remote video" />
-          <div class="tiny" data-media-remote-info style="margin-top:4px;">(no remote frames)</div>
-          <audio data-media-audio hidden></audio>
+          <div class="media-preview-wrap" data-media-local-wrap>
+            <video class="media-preview" data-media-local autoplay playsinline muted></video>
+            <button type="button" class="ghost media-flash hidden" data-media-flash title="Toggle flashlight">🔦</button>
+          </div>
+          <div class="tiny" data-media-local-hint style="margin-top:4px;">Tap preview to switch cameras</div>
+          <div class="muted" style="margin-top:10px;">Send Targets</div>
+          <div class="media-targets">
+            <div class="media-target-entry">
+              <input data-media-target-input type="text" placeholder="graph.peer" autocapitalize="none" autocomplete="off" spellcheck="false" />
+              <button type="button" class="ghost" data-media-target-add title="Add target">＋</button>
+            </div>
+            <div class="media-target-chips" data-media-target-chips></div>
+          </div>
+          <div class="muted" style="margin-top:10px;">Remote Feeds</div>
+          <div class="media-remote-grid" data-media-remote-grid>
+            <div class="tiny media-remote-empty" data-media-remote-empty>(no remote streams)</div>
+          </div>
           <div class="muted" data-media-status style="margin-top:6px;">Ready</div>
         ` : ''}
         ${node.type === 'Orientation' ? `
@@ -1177,8 +1223,8 @@ function refreshNodeResolution(force = false) {
             <span class="dm-indicator offline" data-nkndm-indicator title="Offline"></span>
           </div>
           <div class="row" style="margin-top:6px;align-items:center;gap:8px;flex-wrap:wrap;">
-            <span class="tiny" data-nkndm-chunk-note>Chunk Size</span>
             <button type="button" class="ghost" data-nkndm-autochunk>Auto chunk: off</button>
+            <span class="tiny" data-nkndm-chunk-note>Chunk Size</span>
           </div>
           <div class="muted" style="margin-top:6px;">Peer</div>
           <div class="dm-peer-row">
@@ -1373,6 +1419,20 @@ function refreshNodeResolution(force = false) {
     if (transportBtn && t.supportsNkn) {
       transportBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
+        if (node.type === 'MediaStream') {
+          openQrScanner(null, (txt) => {
+            if (!txt) return;
+            const { added, address } = Media.addTarget(node.id, txt, { auto: true, handshake: true });
+            if (!address) {
+              setBadge('Invalid NKN address', false);
+              return;
+            }
+            if (added) setBadge(`Added media peer ${Media.formatAddress(address)}`);
+            else setBadge('Target already added');
+            refreshNodeTransport(node.id);
+          });
+          return;
+        }
         const rec = NodeStore.ensure(node.id, node.type);
         const cfg = rec.config || {};
         const info = t;
@@ -2414,6 +2474,7 @@ function refreshNodeResolution(force = false) {
     },
     MediaStream: {
       title: 'Media Stream',
+      supportsNkn: true,
       inputs: [{ name: 'media' }],
       outputs: [{ name: 'packet', label: 'DM Packet' }, { name: 'media', label: 'Media' }],
       schema: [
@@ -4397,6 +4458,240 @@ function refreshNodeResolution(force = false) {
         fields.appendChild(control);
       }
     }
+    if (node.type === 'MediaStream') {
+      const mediaSection = document.createElement('div');
+      mediaSection.className = 'media-settings';
+
+      const heading = document.createElement('div');
+      heading.className = 'muted';
+      heading.textContent = 'Media Targets';
+      mediaSection.appendChild(heading);
+
+      const addRow = document.createElement('div');
+      addRow.className = 'media-settings-add';
+
+      const addInput = document.createElement('input');
+      addInput.type = 'text';
+      addInput.placeholder = 'graph.peer';
+      addInput.autocomplete = 'off';
+      addInput.spellcheck = false;
+      addInput.className = 'media-settings-input';
+      addRow.appendChild(addInput);
+
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button';
+      addBtn.className = 'secondary';
+      addBtn.textContent = 'Add';
+      addRow.appendChild(addBtn);
+
+      const scanBtn = document.createElement('button');
+      scanBtn.type = 'button';
+      scanBtn.className = 'ghost';
+      scanBtn.textContent = 'Scan QR';
+      addRow.appendChild(scanBtn);
+
+      mediaSection.appendChild(addRow);
+
+      const list = document.createElement('div');
+      list.className = 'media-settings-list';
+      mediaSection.appendChild(list);
+
+      fields.appendChild(mediaSection);
+
+      const handleAdd = (value) => {
+        const text = String(value || '').trim();
+        if (!text) {
+          setBadge('Enter a NKN address', false);
+          return;
+        }
+        const { added, address } = Media.addTarget(node.id, text, { auto: true, handshake: true });
+        if (!address) {
+          setBadge('Invalid NKN address', false);
+          return;
+        }
+        if (added) setBadge(`Added media peer ${Media.formatAddress(address)}`);
+        else setBadge('Target already added');
+        addInput.value = '';
+        renderTargets();
+        refreshNodeTransport(node.id);
+      };
+
+      addBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        handleAdd(addInput.value);
+      });
+
+      addInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          handleAdd(addInput.value);
+        }
+      });
+
+      scanBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        openQrScanner(addInput, (txt) => {
+          if (!txt) return;
+          handleAdd(txt);
+        });
+      });
+
+      const renderTargets = () => {
+        const targets = Media.getTargets(node.id);
+        const activeSet = new Set(Media.getActiveTargets(node.id));
+        const metaMap = Media.getPeerMeta(node.id);
+        list.innerHTML = '';
+        if (!targets.length) {
+          const empty = document.createElement('div');
+          empty.className = 'media-settings-empty';
+          empty.textContent = 'No NKN targets configured.';
+          list.appendChild(empty);
+          return;
+        }
+        targets.forEach((addr) => {
+          const row = document.createElement('div');
+          row.className = 'media-settings-item';
+          row.dataset.address = addr;
+
+          const info = document.createElement('div');
+          info.className = 'media-settings-item-info';
+
+          const labelEl = document.createElement('div');
+          labelEl.className = 'media-settings-item-address';
+          labelEl.textContent = Media.formatAddress(addr);
+          labelEl.title = addr;
+          info.appendChild(labelEl);
+
+          const meta = metaMap[addr] || {};
+          const handshake = meta.handshake || {};
+          const status = handshake.status || 'idle';
+          const direction = handshake.direction || 'idle';
+          let statusText = 'Idle';
+          if (status === 'accepted') {
+            statusText = meta.viewing ? 'Streaming (viewing)' : 'Connected';
+          } else if (status === 'pending') {
+            statusText = direction === 'incoming' ? 'Awaiting your response' : 'Awaiting peer';
+          } else if (status === 'declined') {
+            statusText = 'Declined';
+          } else if (meta.remoteActive) {
+            statusText = 'Remote ready';
+          }
+          if (meta.latency != null && status === 'accepted') {
+            statusText += ` • ${Math.round(meta.latency)} ms`;
+          }
+          const statusEl = document.createElement('div');
+          statusEl.className = `media-settings-status status-${status}`;
+          statusEl.textContent = statusText;
+          info.appendChild(statusEl);
+
+          if (activeSet.has(addr)) {
+            const activeBadge = document.createElement('span');
+            activeBadge.className = 'media-settings-active';
+            activeBadge.textContent = 'Active';
+            info.appendChild(activeBadge);
+          }
+
+          row.appendChild(info);
+
+          const actions = document.createElement('div');
+          actions.className = 'media-settings-item-actions';
+
+          const handshakeBtn = document.createElement('button');
+          handshakeBtn.type = 'button';
+          handshakeBtn.className = 'ghost';
+          handshakeBtn.textContent = status === 'accepted' ? 'Sync' : 'Request';
+          handshakeBtn.disabled = status === 'pending' && direction === 'incoming';
+          handshakeBtn.title = 'Send handshake to this peer';
+          handshakeBtn.addEventListener('click', () => {
+            Media.requestHandshake(node.id, addr, { wantActive: activeSet.has(addr) });
+          });
+          actions.appendChild(handshakeBtn);
+
+          const pingBtn = document.createElement('button');
+          pingBtn.type = 'button';
+          pingBtn.className = 'ghost';
+          pingBtn.textContent = 'Ping';
+          pingBtn.disabled = status !== 'accepted';
+          pingBtn.title = 'Send heartbeat ping';
+          pingBtn.addEventListener('click', async () => {
+            await Media.sendPing(node.id, addr);
+          });
+          actions.appendChild(pingBtn);
+
+          const acceptBtn = document.createElement('button');
+          acceptBtn.type = 'button';
+          acceptBtn.className = 'ghost';
+          acceptBtn.textContent = '✔';
+          acceptBtn.title = 'Accept incoming offer';
+          acceptBtn.disabled = !(status === 'pending' && direction === 'incoming');
+          acceptBtn.addEventListener('click', async () => {
+            await Media.acceptHandshake(node.id, addr);
+            renderTargets();
+            refreshNodeTransport(node.id);
+          });
+          actions.appendChild(acceptBtn);
+
+          const declineBtn = document.createElement('button');
+          declineBtn.type = 'button';
+          declineBtn.className = 'ghost';
+          declineBtn.textContent = '✖';
+          declineBtn.title = 'Decline incoming offer';
+          declineBtn.disabled = !(status === 'pending' && direction === 'incoming');
+          declineBtn.addEventListener('click', async () => {
+            await Media.declineHandshake(node.id, addr);
+            renderTargets();
+            refreshNodeTransport(node.id);
+          });
+          actions.appendChild(declineBtn);
+
+          const activeBtn = document.createElement('button');
+          activeBtn.type = 'button';
+          activeBtn.className = activeSet.has(addr) ? 'secondary' : 'ghost';
+          activeBtn.textContent = activeSet.has(addr) ? 'Deactivate' : 'Activate';
+          activeBtn.title = 'Toggle streaming to this peer';
+          activeBtn.disabled = status !== 'accepted';
+          activeBtn.addEventListener('click', () => {
+            Media.setTargetActive(node.id, addr, !activeSet.has(addr));
+            renderTargets();
+            refreshNodeTransport(node.id);
+          });
+          actions.appendChild(activeBtn);
+
+          const removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'ghost';
+          removeBtn.textContent = '🗑';
+          removeBtn.title = 'Remove target';
+          removeBtn.addEventListener('click', async () => {
+            await Media.removeTarget(node.id, addr);
+            renderTargets();
+            refreshNodeTransport(node.id);
+          });
+          actions.appendChild(removeBtn);
+
+          row.appendChild(actions);
+          list.appendChild(row);
+        });
+      };
+
+      const unsubscribeMedia = Media.subscribe(node.id, () => {
+        renderTargets();
+        refreshNodeTransport(node.id);
+      });
+
+      const previousSubscription = settingsModelSubscription;
+      settingsModelSubscription = () => {
+        if (typeof unsubscribeMedia === 'function') {
+          try { unsubscribeMedia(); } catch (err) { /* ignore */ }
+        }
+        if (typeof previousSubscription === 'function') {
+          try { previousSubscription(); } catch (err) { /* ignore */ }
+        }
+      };
+
+      renderTargets();
+    }
+
     convertBooleanSelectsIn(fields);
     if (!fields._boolToggleObserver) {
       const observer = new MutationObserver((mutations) => {
@@ -4627,7 +4922,16 @@ function refreshNodeResolution(force = false) {
     if (type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
     if (type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
     if (type === 'MCP') requestAnimationFrame(() => MCP.init(id));
-    if (type === 'MediaStream') requestAnimationFrame(() => Media.init(id));
+    if (type === 'MediaStream') {
+      requestAnimationFrame(() => Media.init(id));
+      try {
+        node._mediaSubscription = Media.subscribe(id, () => {
+          refreshNodeTransport(id);
+        });
+      } catch (err) {
+        // ignore subscription errors
+      }
+    }
     if (type === 'Orientation') requestAnimationFrame(() => Orientation.init(id));
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
     if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
@@ -4659,6 +4963,10 @@ function refreshNodeResolution(force = false) {
     }
     if (MODEL_PROVIDERS[node.type]?.dispose) {
       try { MODEL_PROVIDERS[node.type].dispose(nodeId); } catch (err) { /* ignore */ }
+    }
+    if (typeof node._mediaSubscription === 'function') {
+      try { node._mediaSubscription(); } catch (err) { /* ignore */ }
+      delete node._mediaSubscription;
     }
     if (node.type === 'NknDM') {
       NknDM.dispose(nodeId);

@@ -109,6 +109,23 @@
         </div>
     </div>
 
+    <div id="mediaInviteModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="mediaInviteBackdrop"></div>
+        <div class="modal-panel" style="max-width:360px;">
+            <div class="modal-head">
+                <div class="modal-title">Media Stream Request</div>
+                <button class="ghost" id="mediaInviteClose">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="help" data-media-invite-text>—</div>
+                <div class="row" style="margin-top:12px;">
+                    <button id="mediaInviteAccept" class="secondary">Accept</button>
+                    <button id="mediaInviteDecline" class="ghost">Decline</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="syncQrModal" class="modal hidden" aria-hidden="true">
         <div class="modal-backdrop" id="syncQrBackdrop"></div>
         <div class="modal-panel" style="max-width:380px;">

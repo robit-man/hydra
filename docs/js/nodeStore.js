@@ -142,7 +142,14 @@ const NodeStore = {
       audioBitsPerSecond: 32000,
       running: false,
       lastRemoteFrame: '',
-      lastRemoteFrom: ''
+      lastRemoteFrom: '',
+      componentId: '',
+      targets: [],
+      pendingAddress: '',
+      lastFacingMode: 'user',
+      torchEnabled: false,
+      activeTargets: [],
+      peerMeta: {}
     },
     Orientation: {
       format: 'raw',
