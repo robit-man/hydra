@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
 :root {
   --bg: #000000;
   --panel: rgba(255, 255, 255, .07);
@@ -27,6 +29,8 @@
 }
 
 * {
+  font-family: "Rajdhani", sans-serif !important;
+  letter-spacing: 0.04em;
   scrollbar-width: none;
   /* Hides the scrollbar in Firefox */
 }
@@ -979,7 +983,7 @@ input.relay-disabled {
 }
 
 .model-fetch-button {
-  min-width: 120px;
+  text-transform: capitalize;
 }
 
 .model-picker-status,
@@ -1055,7 +1059,7 @@ input.relay-disabled {
   align-items: center;
 }
 
-.model-fetch-row{
+.model-fetch-row {
   justify-content: flex-start;
 }
 
