@@ -146,6 +146,7 @@ graphAccess.getNode = (id) => Graph.getNode(id);
 applyRelayState = (...args) => Graph.setRelayState(...args);
 
 const Flows = createFlowsLibrary({ Graph, log });
+Graph.setFlowSaveHandler(() => Flows.openCreate());
 
 const WorkspaceSync = createWorkspaceSync({
   Graph,

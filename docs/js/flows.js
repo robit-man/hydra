@@ -159,6 +159,20 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
     }
   }
 
+  function openCreateModal({ presetName = '' } = {}) {
+    ensureElements();
+    flows = loadFlows();
+    state.selectedFlowId = null;
+    state.editorError = '';
+    state.editorText = '';
+    state.pendingName = typeof presetName === 'string' ? presetName : '';
+    renderCreate();
+    if (elements.modal) {
+      elements.modal.classList.remove('hidden');
+      elements.modal.setAttribute('aria-hidden', 'false');
+    }
+  }
+
   function closeModal() {
     if (elements.modal) {
       elements.modal.classList.add('hidden');
@@ -592,6 +606,7 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
 
   return {
     open: openModal,
+    openCreate: openCreateModal,
     list: () => flows.slice(),
     saveSnapshot: (name, snapshot) => {
       if (!snapshot || typeof snapshot !== 'object') return null;

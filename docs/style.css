@@ -32,6 +32,7 @@
   font-family: "Rajdhani", sans-serif !important;
   letter-spacing: 0.04em;
   scrollbar-width: none;
+  line-height: normal;
   /* Hides the scrollbar in Firefox */
 }
 
@@ -246,7 +247,7 @@ header {
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  z-index: 1;
+  z-index: 2;
   pointer-events: none;
   user-select: none;
 }
@@ -277,11 +278,10 @@ header {
 .logdata .log-controls {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 4px 10px;
-  background: rgba(10, 12, 18, 0.7);
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  width: 100%;
+  padding: 0.5rem;
   pointer-events: auto;
 }
 
@@ -655,6 +655,7 @@ header {
   color: var(--text);
   font-weight: 600;
   cursor: pointer;
+  z-index: 1001;
   transition: background .2s ease, color .2s ease, border .2s ease, box-shadow .2s ease;
 }
 
@@ -700,7 +701,6 @@ header {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    z-index: 1;
   }
 
   .logdata::after {
@@ -726,7 +726,7 @@ header {
   }
 
   .logdata .log-controls {
-    margin: 0 12px;
+    margin: 0px;
   }
 
   .logdata #wiresBox {}
@@ -964,7 +964,8 @@ textarea {
 .input-with-btn {
   display: flex;
   gap: 8px;
-  align-items: center
+  align-items: center;
+  flex-flow:wrap;
 }
 
 .input-with-btn> :first-child {
@@ -2377,7 +2378,7 @@ button.danger {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 1000
+  z-index: 1
 }
 
 .modal-backdrop {
@@ -2397,7 +2398,7 @@ button.danger {
   border: 1px solid rgba(255, 255, 255, .18);
   border-radius: 16px;
   padding: 14px;
-  max-height: calc(100vh - 80px);
+  max-height: calc(100vh - 10rem);
   overflow: auto
 }
 
