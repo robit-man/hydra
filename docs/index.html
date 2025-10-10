@@ -36,9 +36,18 @@
                 <div id="workspace">
                     <div id="wsCanvas"  class="dot-bg"></div>
                 </div>
-                <div class="logdata">
-                    <div id="wiresBox" class="code" style="min-height:54px;"></div>
-                    <div id="logBox" class="code" style="min-height:120px;">(logs)</div>
+                <div class="logdata" id="logdata">
+                    <div class="log-controls">
+                        <button type="button" id="logToggleBtn" class="ghost"><img src="img/chevron-down.svg" alt="" class="icon inverted"></button>
+                        <div class="history-buttons">
+                            <button type="button" id="undoBtn" class="ghost" disabled><img src="img/chevron-left-double.svg" alt="" class="icon inverted"></button>
+                            <button type="button" id="redoBtn" class="ghost" disabled><img src="img/chevron-right-double.svg" alt="" class="icon inverted"></button>
+                        </div>
+                    </div>
+                    <div class="log-panels" id="logPanels">
+                        <div id="wiresBox" class="code" style="min-height:54px;"></div>
+                        <div id="logBox" class="code" style="min-height:120px;">(logs)</div>
+                    </div>
                 </div>
             </div>
         </section>

@@ -37,6 +37,186 @@ function createGraph({
     lastPointer: null
   };
 
+  const HISTORY_KEY = 'graph.history.v1';
+  const LOG_COLLAPSED_KEY = 'graph.logCollapsed';
+  const HISTORY_MAX = 50;
+
+  const cloneWireForHistory = (wireLike) => {
+    if (!wireLike) return null;
+    const from = wireLike.from || {};
+    const to = wireLike.to || {};
+    const fromNode = String(from.node || '');
+    const toNode = String(to.node || '');
+    const fromPort = String(from.port || '');
+    const toPort = String(to.port || '');
+    if (!fromNode || !toNode || !fromPort || !toPort) return null;
+    return {
+      from: { node: fromNode, port: fromPort },
+      to: { node: toNode, port: toPort }
+    };
+  };
+
+  const sanitizeHistoryNode = (data) => {
+    if (!data || typeof data !== 'object') return null;
+    const id = String(data.id || data.sourceId || '');
+    const type = String(data.type || '');
+    if (!id || !type) return null;
+    return {
+      id,
+      type,
+      x: Number.isFinite(data.x) ? data.x : 0,
+      y: Number.isFinite(data.y) ? data.y : 0,
+      w: Number.isFinite(data.w) ? data.w : 0,
+      h: Number.isFinite(data.h) ? data.h : 0,
+      sizeLocked: Boolean(data.sizeLocked),
+      config: data.config && typeof data.config === 'object' ? deepClone(data.config) : {}
+    };
+  };
+
+  const History = (() => {
+    let entries = [];
+    let index = -1;
+    let silent = 0;
+    let updateUi = null;
+
+    const notify = () => {
+      updateUi?.({ canUndo: index >= 0, canRedo: index + 1 < entries.length });
+    };
+
+    const persist = () => {
+      try {
+        LS.set(HISTORY_KEY, { entries, index });
+      } catch (_) {
+        /* ignore storage failures */
+      }
+    };
+
+    const sanitizeEntry = (raw) => {
+      if (!raw || typeof raw !== 'object') return null;
+      const type = String(raw.type || '');
+      if (!type) return null;
+      if (type === 'node.add' || type === 'node.remove') {
+        const node = sanitizeHistoryNode(raw.node);
+        if (!node) return null;
+        const wires = Array.isArray(raw.wires)
+          ? raw.wires.map((w) => cloneWireForHistory(w)).filter(Boolean)
+          : [];
+        return { type, node, wires };
+      }
+      if (type === 'wire.add' || type === 'wire.remove') {
+        const wire = cloneWireForHistory(raw.wire);
+        if (!wire) return null;
+        return { type, wire };
+      }
+      if (type === 'node.config') {
+        const nodeId = String(raw.nodeId || (raw.node && raw.node.id) || '');
+        const nodeType = String(raw.nodeType || (raw.node && raw.node.type) || '');
+        if (!nodeId || !nodeType) return null;
+        const before = raw.before && typeof raw.before === 'object' ? deepClone(raw.before) : {};
+        const after = raw.after && typeof raw.after === 'object' ? deepClone(raw.after) : {};
+        return { type, nodeId, nodeType, before, after };
+      }
+      return null;
+    };
+
+    const load = () => {
+      const stored = LS.get(HISTORY_KEY, null);
+      if (!stored || typeof stored !== 'object') {
+        entries = [];
+        index = -1;
+        notify();
+        return;
+      }
+      const rawEntries = Array.isArray(stored.entries) ? stored.entries : [];
+      entries = rawEntries
+        .map((entry) => sanitizeEntry(entry))
+        .filter(Boolean)
+        .slice(-HISTORY_MAX);
+      if (typeof stored.index === 'number') {
+        index = Math.min(Math.max(Math.floor(stored.index), -1), entries.length - 1);
+      } else {
+        index = entries.length - 1;
+      }
+      if (entries.length && index < 0) index = entries.length - 1;
+      persist();
+      notify();
+    };
+
+    const push = (entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      if (silent) return;
+      const sanitized = sanitizeEntry(entry);
+      if (!sanitized) return;
+      if (index + 1 < entries.length) {
+        entries = entries.slice(0, index + 1);
+      }
+      entries.push(sanitized);
+      if (entries.length > HISTORY_MAX) {
+        const excess = entries.length - HISTORY_MAX;
+        entries.splice(0, excess);
+        index = Math.max(index - excess, -1);
+      }
+      index = entries.length - 1;
+      persist();
+      notify();
+    };
+
+    const runSilent = (fn) => {
+      silent += 1;
+      try {
+        return fn();
+      } finally {
+        silent -= 1;
+      }
+    };
+
+    const undo = () => {
+      if (index < 0) return false;
+      const entry = entries[index];
+      runSilent(() => applyHistoryUndo(entry));
+      index -= 1;
+      persist();
+      notify();
+      return true;
+    };
+
+    const redo = () => {
+      if (index + 1 >= entries.length) return false;
+      const entry = entries[index + 1];
+      runSilent(() => applyHistoryRedo(entry));
+      index += 1;
+      persist();
+      notify();
+      return true;
+    };
+
+    const clear = () => {
+      entries = [];
+      index = -1;
+      persist();
+      notify();
+    };
+
+    const setUpdate = (fn) => {
+      updateUi = typeof fn === 'function' ? fn : null;
+      notify();
+    };
+
+    return {
+      push,
+      undo,
+      redo,
+      clear,
+      load,
+      silence: runSilent,
+      isSilent: () => silent > 0,
+      setUpdate,
+      canUndo: () => index >= 0,
+      canRedo: () => index + 1 < entries.length,
+      emit: notify
+    };
+  })();
+
   const deepClone = (value) => {
     if (value == null) return value;
     try {
@@ -156,6 +336,154 @@ function createGraph({
     if (!container) return;
     container.querySelectorAll('select').forEach((sel) => convertBooleanSelect(sel));
   };
+
+  function historySnapshotNode(nodeId) {
+    const node = WS.nodes.get(nodeId);
+    if (!node) return null;
+    const width = Math.round(node.el?.offsetWidth || node.w || 0);
+    const height = Math.round(node.el?.offsetHeight || node.h || 0);
+    node.w = width;
+    node.h = height;
+    const rec = NodeStore.load(nodeId);
+    const config = rec?.config ? deepClone(rec.config) : {};
+    return {
+      id: node.id,
+      type: node.type,
+      x: Number.isFinite(node.x) ? node.x : 0,
+      y: Number.isFinite(node.y) ? node.y : 0,
+      w: width,
+      h: height,
+      sizeLocked: Boolean(node.sizeLocked),
+      config
+    };
+  }
+
+  function restoreNodeFromHistory(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    const options = {
+      id: snapshot.id,
+      config: snapshot.config,
+      sizeLocked: Boolean(snapshot.sizeLocked),
+      width: snapshot.w,
+      height: snapshot.h
+    };
+    const node = addNode(snapshot.type, snapshot.x, snapshot.y, options);
+    if (node) {
+      node.x = snapshot.x;
+      node.y = snapshot.y;
+      if (node.el) {
+        node.el.style.left = `${snapshot.x}px`;
+        node.el.style.top = `${snapshot.y}px`;
+      }
+    }
+    return node;
+  }
+
+  function removeWireByEndpoints(fromNodeId, fromPort, toNodeId, toPort, { skipHistory = false, suppressBadge = false } = {}) {
+    const wire = WS.wires.find(
+      (w) =>
+        w.from.node === fromNodeId &&
+        w.from.port === fromPort &&
+        w.to.node === toNodeId &&
+        w.to.port === toPort
+    );
+    if (!wire) return false;
+    const payload = cloneWireForHistory(wire);
+    detachWire(wire);
+    flushWireMutations();
+    if (!skipHistory && !History.isSilent() && payload) {
+      History.push({ type: 'wire.remove', wire: payload });
+    }
+    if (!suppressBadge) setBadge('Wire removed');
+    return true;
+  }
+
+  function applyHistoryUndo(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    switch (entry.type) {
+      case 'node.add': {
+        removeNode(entry.node?.id);
+        setBadge('Undo node add');
+        break;
+      }
+      case 'node.remove': {
+        const restored = restoreNodeFromHistory(entry.node);
+        if (restored && Array.isArray(entry.wires)) {
+          entry.wires.forEach((wire) => {
+            if (!wire) return;
+            const fromNodeId = wire.from?.node;
+            const toNodeId = wire.to?.node;
+            if (!WS.nodes.has(fromNodeId) || !WS.nodes.has(toNodeId)) return;
+            addLink(fromNodeId, wire.from.port, toNodeId, wire.to.port);
+          });
+        }
+        setBadge('Undo node removal');
+        break;
+      }
+      case 'wire.add': {
+        const wire = entry.wire;
+        if (!wire) break;
+        removeWireByEndpoints(wire.from.node, wire.from.port, wire.to.node, wire.to.port, { skipHistory: true, suppressBadge: true });
+        setBadge('Undo wire add');
+        break;
+      }
+      case 'wire.remove': {
+        const wire = entry.wire;
+        if (!wire) break;
+        if (WS.nodes.has(wire.from.node) && WS.nodes.has(wire.to.node)) {
+          addLink(wire.from.node, wire.from.port, wire.to.node, wire.to.port);
+        }
+        setBadge('Undo wire removal');
+        break;
+      }
+      case 'node.config': {
+        applyNodeConfigSnapshot(entry.nodeId, entry.nodeType, entry.before, { quiet: true });
+        setBadge('Undo node settings');
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  function applyHistoryRedo(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    switch (entry.type) {
+      case 'node.add': {
+        restoreNodeFromHistory(entry.node);
+        setBadge('Redo node add');
+        break;
+      }
+      case 'node.remove': {
+        removeNode(entry.node?.id);
+        setBadge('Redo node removal');
+        break;
+      }
+      case 'wire.add': {
+        const wire = entry.wire;
+        if (!wire) break;
+        if (WS.nodes.has(wire.from.node) && WS.nodes.has(wire.to.node)) {
+          addLink(wire.from.node, wire.from.port, wire.to.node, wire.to.port);
+        }
+        setBadge('Redo wire add');
+        break;
+      }
+      case 'wire.remove': {
+        const wire = entry.wire;
+        if (!wire) break;
+        removeWireByEndpoints(wire.from.node, wire.from.port, wire.to.node, wire.to.port, { skipHistory: true, suppressBadge: true });
+        setBadge('Redo wire removal');
+        break;
+      }
+      case 'node.config': {
+        applyNodeConfigSnapshot(entry.nodeId, entry.nodeType, entry.after, { quiet: true });
+        setBadge('Redo node settings');
+        break;
+      }
+      default:
+        break;
+    }
+  }
 
   function ensureSvgLayer() {
     if (!WS.svg) return;
@@ -1870,6 +2198,11 @@ function refreshNodeResolution(force = false) {
       pullLlmSystemInput(toNodeId);
     }
 
+    if (!History.isSilent()) {
+      const historyWire = cloneWireForHistory(w);
+      if (historyWire) History.push({ type: 'wire.add', wire: historyWire });
+    }
+
     requestRedraw();
     saveGraph();
   }
@@ -2083,18 +2416,32 @@ function refreshNodeResolution(force = false) {
     for (const w of WS.wires) drawLink(w);
   }
 
-  function removeWireById(id) {
-    const w = WS.wires.find((x) => x.id === id);
-    if (!w) return;
-    if (w._activeTimer) {
-      clearTimeout(w._activeTimer);
-      w._activeTimer = null;
+  function detachWire(wire) {
+    if (!wire) return false;
+    if (wire._activeTimer) {
+      clearTimeout(wire._activeTimer);
+      wire._activeTimer = null;
     }
-    w.path?.remove();
-    WS.wires = WS.wires.filter((x) => x !== w);
+    wire.path?.remove();
+    WS.wires = WS.wires.filter((x) => x !== wire);
+    return true;
+  }
+
+  function flushWireMutations() {
     syncRouterFromWS();
     saveGraph();
     requestRedraw();
+  }
+
+  function removeWireById(id) {
+    const w = WS.wires.find((x) => x.id === id);
+    if (!w) return;
+    const payload = cloneWireForHistory(w);
+    detachWire(w);
+    flushWireMutations();
+    if (!History.isSilent() && payload) {
+      History.push({ type: 'wire.remove', wire: payload });
+    }
     setBadge('Wire removed');
   }
 
@@ -2103,17 +2450,13 @@ function refreshNodeResolution(force = false) {
       (side === 'out' && w.from.node === nodeId && w.from.port === portName) ||
       (side === 'in' && w.to.node === nodeId && w.to.port === portName)
     );
-    rm.forEach((w) => {
-      if (w._activeTimer) {
-        clearTimeout(w._activeTimer);
-        w._activeTimer = null;
-      }
-      w.path?.remove();
-    });
-    WS.wires = WS.wires.filter((w) => !rm.includes(w));
-    syncRouterFromWS();
-    saveGraph();
-    requestRedraw();
+    if (!rm.length) return;
+    const payloads = History.isSilent() ? [] : rm.map((w) => cloneWireForHistory(w)).filter(Boolean);
+    rm.forEach((w) => detachWire(w));
+    flushWireMutations();
+    if (!History.isSilent() && payloads.length) {
+      payloads.forEach((wire) => History.push({ type: 'wire.remove', wire }));
+    }
   }
 
   function syncRouterFromWS() {
@@ -2158,85 +2501,88 @@ function refreshNodeResolution(force = false) {
   }
 
   function loadGraph() {
-    const data = LS.get('graph.workspace', null);
-    WS.canvas.innerHTML = '';
-    WS.svg.innerHTML = '';
-    ensureSvgLayer();
-    // reapply current transform after recreating the <g> layer
-    applyViewTransform();
-
-    WS.nodes.clear();
-    WS.wires = [];
-    clearSelectedNode();
-    WS.clipboard = null;
-    if (!data) {
-      const a = addNode('ASR', 90, 200);
-      const l = addNode('LLM', 380, 180);
-      const t = addNode('TTS', 680, 200);
-      addLink(a.id, 'final', l.id, 'prompt');
-      addLink(l.id, 'final', t.id, 'text');
-      requestRedraw();
-      saveGraph();
-      return;
-    }
-    if (data.nodeConfigs) {
-      for (const [id, obj] of Object.entries(data.nodeConfigs)) {
-        if (obj && obj.type && obj.config) NodeStore.saveObj(id, obj);
-      }
-    }
-    if (data.viewport && typeof data.viewport === 'object') {
-      const vx = Number(data.viewport.x);
-      const vy = Number(data.viewport.y);
-      const vs = Number(data.viewport.scale);
-      if (Number.isFinite(vx)) WS.view.x = vx;
-      if (Number.isFinite(vy)) WS.view.y = vy;
-      if (Number.isFinite(vs) && vs > 0.1 && vs < 8) WS.view.scale = vs;
+    const performLoad = () => {
+      const data = LS.get('graph.workspace', null);
+      WS.canvas.innerHTML = '';
+      WS.svg.innerHTML = '';
+      ensureSvgLayer();
+      // reapply current transform after recreating the <g> layer
       applyViewTransform();
-    }
 
-    if (CFG.transport !== 'nkn') {
-      CFG.transport = 'nkn';
-      saveCFG();
-    }
-    Net.ensureNkn();
-    updateTransportButton();
+      WS.nodes.clear();
+      WS.wires = [];
+      clearSelectedNode();
+      WS.clipboard = null;
+      if (!data) {
+        const a = addNode('ASR', 90, 200);
+        const l = addNode('LLM', 380, 180);
+        const t = addNode('TTS', 680, 200);
+        addLink(a.id, 'final', l.id, 'prompt');
+        addLink(l.id, 'final', t.id, 'text');
+        requestRedraw();
+        saveGraph();
+        return;
+      }
+      if (data.nodeConfigs) {
+        for (const [id, obj] of Object.entries(data.nodeConfigs)) {
+          if (obj && obj.type && obj.config) NodeStore.saveObj(id, obj);
+        }
+      }
+      if (data.viewport && typeof data.viewport === 'object') {
+        const vx = Number(data.viewport.x);
+        const vy = Number(data.viewport.y);
+        const vs = Number(data.viewport.scale);
+        if (Number.isFinite(vx)) WS.view.x = vx;
+        if (Number.isFinite(vy)) WS.view.y = vy;
+        if (Number.isFinite(vs) && vs > 0.1 && vs < 8) WS.view.scale = vs;
+        applyViewTransform();
+      }
 
-    for (const n of (data.nodes || [])) {
-      const node = {
-        id: n.id,
-        type: n.type,
-        x: n.x,
-        y: n.y,
-        w: n.w,
-        h: n.h,
-        sizeLocked: Boolean(n.sizeLocked)
-      };
-      NodeStore.ensure(node.id, node.type);
-      node.el = makeNodeEl(node);
-      WS.canvas.appendChild(node.el);
-      WS.nodes.set(node.id, node);
-      scheduleModelPrefetch(node.id, node.type, 400);
-      if (node.type === 'TTS') requestAnimationFrame(() => TTS.refreshUI(node.id));
-      if (node.type === 'TextInput') requestAnimationFrame(() => initTextInputNode(node));
-      if (node.type === 'TextDisplay') requestAnimationFrame(() => initTextDisplayNode(node));
-      if (node.type === 'Template') requestAnimationFrame(() => {
-        const leftSide = node.el?.querySelector('.side.left');
-        setupTemplateNode(node, leftSide);
-        pullTemplateInputs(node.id);
-      });
-      if (node.type === 'LogicGate') requestAnimationFrame(() => {
-        const leftSide = node.el?.querySelector('.side.left');
-        setupLogicGateNode(node, leftSide);
-      });
-      if (node.type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
-      if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
-      if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
-      if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
-      if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
-      if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
-    }
-    for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
-    requestRedraw();
+      if (CFG.transport !== 'nkn') {
+        CFG.transport = 'nkn';
+        saveCFG();
+      }
+      Net.ensureNkn();
+      updateTransportButton();
+
+      for (const n of (data.nodes || [])) {
+        const node = {
+          id: n.id,
+          type: n.type,
+          x: n.x,
+          y: n.y,
+          w: n.w,
+          h: n.h,
+          sizeLocked: Boolean(n.sizeLocked)
+        };
+        NodeStore.ensure(node.id, node.type);
+        node.el = makeNodeEl(node);
+        WS.canvas.appendChild(node.el);
+        WS.nodes.set(node.id, node);
+        scheduleModelPrefetch(node.id, node.type, 400);
+        if (node.type === 'TTS') requestAnimationFrame(() => TTS.refreshUI(node.id));
+        if (node.type === 'TextInput') requestAnimationFrame(() => initTextInputNode(node));
+        if (node.type === 'TextDisplay') requestAnimationFrame(() => initTextDisplayNode(node));
+        if (node.type === 'Template') requestAnimationFrame(() => {
+          const leftSide = node.el?.querySelector('.side.left');
+          setupTemplateNode(node, leftSide);
+          pullTemplateInputs(node.id);
+        });
+        if (node.type === 'LogicGate') requestAnimationFrame(() => {
+          const leftSide = node.el?.querySelector('.side.left');
+          setupLogicGateNode(node, leftSide);
+        });
+        if (node.type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
+        if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
+        if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
+        if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
+        if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
+        if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
+      }
+      for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
+      requestRedraw();
+    };
+    History.silence(performLoad);
   }
 
   function exportWorkspaceSnapshot() {
@@ -4791,6 +5137,120 @@ function refreshNodeResolution(force = false) {
     closeQrScanner();
   }
 
+  function runNodeConfigSideEffects(node, cfg, { quiet = false } = {}) {
+    if (!node) return;
+    const nodeId = node.id;
+    const nodeType = node.type;
+    const config = cfg && typeof cfg === 'object' ? cfg : {};
+    const typeInfo = GraphTypes[nodeType];
+    if (typeInfo?.supportsNkn) {
+      const relayValue = getRelayValueFromConfig(config, typeInfo);
+      if (relayValue) ensurePendingRelayState(nodeId, DEFAULT_PENDING_MESSAGE);
+      else clearNodeRelayState(nodeId);
+      if (typeInfo.relayKey === 'relay') updateTransportButton();
+      refreshNodeTransport(nodeId);
+    }
+    if (nodeType === 'ASR') {
+      ASR.refreshConfig?.(nodeId);
+    }
+    if (nodeType === 'TTS') {
+      TTS.refreshUI(nodeId);
+      TTS.refreshConfig?.(nodeId);
+    }
+    if (nodeType === 'TextInput') {
+      initTextInputNode(node);
+    }
+    if (nodeType === 'Template') {
+      const leftSide = node.el?.querySelector('.side.left');
+      setupTemplateNode(node, leftSide);
+      pullTemplateInputs(nodeId);
+    }
+    if (nodeType === 'LogicGate') {
+      const leftSide = node.el?.querySelector('.side.left');
+      setupLogicGateNode(node, leftSide);
+    }
+    if (nodeType === 'NknDM') {
+      initNknDmNode(node);
+    }
+    if (nodeType === 'MCP') {
+      const res = MCP.refresh(nodeId, { quiet: true });
+      if (res && typeof res.catch === 'function') res.catch(() => { });
+    }
+    if (nodeType === 'MediaStream') {
+      Media.refresh(nodeId);
+    }
+    if (nodeType === 'LLM') {
+      refreshLlmControls(nodeId);
+    }
+    scheduleModelPrefetch(nodeId, nodeType, quiet ? 0 : 150);
+  }
+
+  function applyNodeConfigSnapshot(nodeId, nodeType, config, { quiet = false } = {}) {
+    if (!nodeId || !nodeType) return;
+    const normalized = config && typeof config === 'object' ? deepClone(config) : {};
+    NodeStore.saveCfg(nodeId, nodeType, normalized);
+    const node = WS.nodes.get(nodeId);
+    if (node) {
+      runNodeConfigSideEffects(node, normalized, { quiet: true });
+    }
+    if (!quiet) setBadge('Settings applied');
+  }
+
+  function bindLogControls() {
+    const toggleBtn = qs('#logToggleBtn');
+    const logWrap = qs('#logdata');
+    const undoBtn = qs('#undoBtn');
+    const redoBtn = qs('#redoBtn');
+    if (!logWrap || !toggleBtn) {
+      History.setUpdate(() => {});
+      return;
+    }
+const showLogsIcon = '<img src="img/chevron-up.svg" alt="" class="icon inverted">';
+const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverted">';
+    const applyCollapsed = (collapsed, { persist = true } = {}) => {
+      if (collapsed) {
+        logWrap.classList.add('collapsed');
+        toggleBtn.innerHTML = showLogsIcon;
+        toggleBtn.setAttribute('aria-pressed', 'false');
+      } else {
+        logWrap.classList.remove('collapsed');
+        toggleBtn.innerHTML = hideLogsIcon;
+        toggleBtn.setAttribute('aria-pressed', 'true');
+      }
+      if (persist) {
+        try { LS.set(LOG_COLLAPSED_KEY, collapsed); } catch (_) { /* ignore */ }
+      }
+    };
+
+    const storedCollapsed = LS.get(LOG_COLLAPSED_KEY, false);
+    applyCollapsed(Boolean(storedCollapsed), { persist: false });
+
+    toggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const next = !logWrap.classList.contains('collapsed');
+      applyCollapsed(next);
+    });
+
+    if (undoBtn) {
+      undoBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        History.undo();
+      });
+    }
+
+    if (redoBtn) {
+      redoBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        History.redo();
+      });
+    }
+
+    History.setUpdate(({ canUndo, canRedo }) => {
+      if (undoBtn) undoBtn.disabled = !canUndo;
+      if (redoBtn) redoBtn.disabled = !canRedo;
+    });
+  }
+
   function bindModal() {
     qs('#closeSettings')?.addEventListener('click', closeSettings);
     qs('#cancelSettings')?.addEventListener('click', closeSettings);
@@ -4838,50 +5298,34 @@ function refreshNodeResolution(force = false) {
         }
       }
       patch.type = node.type;
-      const updatedCfg = NodeStore.update(nodeId, patch);
-      const typeInfo = GraphTypes[node.type];
-      if (typeInfo?.supportsNkn) {
-        const relayValue = getRelayValueFromConfig(updatedCfg, typeInfo);
-        if (relayValue) ensurePendingRelayState(nodeId, DEFAULT_PENDING_MESSAGE);
-        else clearNodeRelayState(nodeId);
-        if (typeInfo.relayKey === 'relay') updateTransportButton();
-        refreshNodeTransport(nodeId);
+      const prevConfigObj = NodeStore.load(nodeId);
+      const beforeCfg = prevConfigObj?.config ? deepClone(prevConfigObj.config) : {};
+      const updatedCfgRaw = NodeStore.update(nodeId, patch);
+      const updatedCfg = deepClone(updatedCfgRaw);
+      runNodeConfigSideEffects(node, updatedCfg, { quiet: false });
+      if (!History.isSilent()) {
+        try {
+          const beforeJson = JSON.stringify(beforeCfg ?? {});
+          const afterJson = JSON.stringify(updatedCfg ?? {});
+          if (beforeJson !== afterJson) {
+            History.push({
+              type: 'node.config',
+              nodeId,
+              nodeType: node.type,
+              before: beforeCfg,
+              after: updatedCfg
+            });
+          }
+        } catch (_) {
+          History.push({
+            type: 'node.config',
+            nodeId,
+            nodeType: node.type,
+            before: beforeCfg,
+            after: updatedCfg
+          });
+        }
       }
-      if (node.type === 'ASR') {
-        ASR.refreshConfig?.(node.id);
-      }
-      if (node.type === 'TTS') {
-        TTS.refreshUI(node.id);
-        TTS.refreshConfig?.(node.id);
-      }
-      if (node.type === 'TextInput') {
-        initTextInputNode(node);
-      }
-      if (node.type === 'Template') {
-        const leftSide = node.el?.querySelector('.side.left');
-        setupTemplateNode(node, leftSide);
-      }
-      if (node.type === 'LogicGate') {
-        const leftSide = node.el?.querySelector('.side.left');
-        setupLogicGateNode(node, leftSide);
-      }
-      if (node.type === 'NknDM') {
-        initNknDmNode(node);
-      }
-      if (node.type === 'MCP') {
-        const res = MCP.refresh(nodeId, { quiet: true });
-        if (res && typeof res.catch === 'function') res.catch(() => { });
-      }
-      if (node.type === 'MediaStream') {
-        Media.refresh(nodeId);
-      }
-      if (node.type === 'Template') {
-        pullTemplateInputs(nodeId);
-      }
-      if (node.type === 'LLM') {
-        refreshLlmControls(nodeId);
-      }
-      scheduleModelPrefetch(nodeId, node.type, 150);
       setBadge('Settings saved');
       closeSettings();
     });
@@ -4936,6 +5380,10 @@ function refreshNodeResolution(force = false) {
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
     if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
     if (opts.select) setSelectedNode(id, { focus: true });
+    if (!History.isSilent()) {
+      const snapshot = historySnapshotNode(id);
+      if (snapshot) History.push({ type: 'node.add', node: snapshot });
+    }
     saveGraph();
     requestRedraw();
     return node;
@@ -4944,6 +5392,11 @@ function refreshNodeResolution(force = false) {
   function removeNode(nodeId) {
     const node = WS.nodes.get(nodeId);
     if (!node) return;
+    const nodeSnapshot = History.isSilent() ? null : historySnapshotNode(nodeId);
+    const connectedWires = WS.wires.filter((w) => w.from.node === nodeId || w.to.node === nodeId);
+    const wireSnapshots = (!History.isSilent() && connectedWires.length)
+      ? connectedWires.map((w) => cloneWireForHistory(w)).filter(Boolean)
+      : [];
     if (WS.selectedNodeId === nodeId) clearSelectedNode();
     if (node._ro) {
       try {
@@ -4987,17 +5440,15 @@ function refreshNodeResolution(force = false) {
       Location.dispose(nodeId);
     }
 
-    WS.wires.slice().forEach((w) => {
-      if (w.from.node === nodeId || w.to.node === nodeId) {
-        w.path?.remove();
-        WS.wires = WS.wires.filter((x) => x !== w);
-      }
-    });
+    connectedWires.forEach((w) => detachWire(w));
     node.el.remove();
     WS.nodes.delete(nodeId);
     NodeStore.erase(nodeId);
     syncRouterFromWS();
     saveGraph();
+    if (!History.isSilent() && nodeSnapshot) {
+      History.push({ type: 'node.remove', node: nodeSnapshot, wires: wireSnapshots });
+    }
     requestRedraw();
     if (ASR.ownerId === nodeId) ASR.stop();
   }
@@ -5439,6 +5890,8 @@ function refreshNodeResolution(force = false) {
     ensureSvgLayer();
     bindToolbar();
     bindModal();
+    bindLogControls();
+    History.load();
     bindWorkspaceCancels();
     bindNodeSelectionControls();
     bindViewportControls();
@@ -5458,7 +5911,11 @@ function refreshNodeResolution(force = false) {
     getNode: (id) => WS.nodes.get(id),
     refreshTransportButtons: refreshAllNodeTransport,
     setRelayState: setNodeRelayState,
-    getRelayState: getNodeRelayState
+    getRelayState: getNodeRelayState,
+    undo: () => History.undo(),
+    redo: () => History.redo(),
+    canUndo: () => History.canUndo(),
+    canRedo: () => History.canRedo()
   };
 }
 
