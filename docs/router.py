@@ -35,6 +35,7 @@ from collections import deque
 # ──────────────────────────────────────────────────────────────
 # Lightweight venv bootstrap so the router stays self-contained
 # ──────────────────────────────────────────────────────────────
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 BASE_DIR = Path(__file__).resolve().parent
 VENV_DIR = BASE_DIR / ".venv_router"
 BIN_DIR = VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
@@ -68,6 +69,11 @@ def _ensure_deps() -> None:
                 __import__(mod)
         except Exception:
             need.append(mod)
+    if os.name == "nt":
+        try:
+            import curses  # type: ignore
+        except Exception:
+            need.append("windows-curses")
     if need:
         subprocess.check_call([str(PIP_BIN), "install", *need], cwd=BASE_DIR)
 
@@ -333,7 +339,7 @@ class ServiceWatchdog:
         self._states: Dict[str, ServiceState] = {}
         self._global_stop = threading.Event()
         self._lock = threading.Lock()
-        self._terminal_template = self._detect_terminal()
+        self._terminal_template, self._terminal_creationflags = self._detect_terminal()
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
 
@@ -385,11 +391,19 @@ class ServiceWatchdog:
         return [state.snapshot() for state in self._states.values()]
 
     # internal helpers -------------------------------------------------
-    def _detect_terminal(self) -> Optional[List[str]]:
+    def _detect_terminal(self) -> Tuple[Optional[List[str]], int]:
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            for candidate in ("pwsh.exe", "pwsh", "powershell.exe", "powershell"):
+                resolved = shutil.which(candidate)
+                if resolved:
+                    template = [resolved, "-NoProfile", "-NoLogo", "-NoExit", "-Command", "{cmd}"]
+                    return template, creationflags
+            return (None, 0)
         for template in self.TERMINAL_TEMPLATES:
             if shutil.which(template[0]):
-                return template
-        return None
+                return template, 0
+        return (None, 0)
 
     def _prepare_service(self, definition: ServiceDefinition) -> ServiceState:
         svc_dir = SERVICES_ROOT / definition.name
@@ -613,7 +627,7 @@ class ServiceWatchdog:
                 pids = self._find_pids_on_port(port)
                 for pid in pids:
                     with contextlib.suppress(Exception):
-                        os.kill(pid, signal.SIGKILL)
+                        os.kill(pid, SIGKILL)
                 time.sleep(0.2)
 
     def _port_in_use(self, port: int) -> bool:
@@ -656,15 +670,32 @@ class ServiceWatchdog:
         with contextlib.suppress(FileNotFoundError):
             pid_path.unlink()
         state.terminal_pid_path = pid_path
-        quoted_pid = shlex.quote(str(pid_path))
-        quoted_log = shlex.quote(str(state.log_path))
-        cmd = (
-            f"printf '%d\\n' $$ > {quoted_pid} && "
-            f"exec tail -n 200 -f {quoted_log}"
-        )
+        if os.name == "nt":
+            def ps_quote(value: str) -> str:
+                return "'" + value.replace("'", "''") + "'"
+            pid_expr = ps_quote(str(pid_path))
+            log_expr = ps_quote(str(state.log_path))
+            title_expr = ps_quote(title)
+            cmd = (
+                f"& {{ $Host.UI.RawUI.WindowTitle = {title_expr}; "
+                f"$pid | Out-File -FilePath {pid_expr} -Encoding ascii; "
+                f"Get-Content -Path {log_expr} -Tail 200 -Wait }}"
+            )
+        else:
+            quoted_pid = shlex.quote(str(pid_path))
+            quoted_log = shlex.quote(str(state.log_path))
+            cmd = (
+                f"printf '%d\\n' $$ > {quoted_pid} && "
+                f"exec tail -n 200 -f {quoted_log}"
+            )
         args = [segment.format(title=title, cmd=cmd) for segment in self._terminal_template]
+        popen_kwargs: Dict[str, Any] = {"cwd": state.workdir}
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        elif self._terminal_creationflags:
+            popen_kwargs["creationflags"] = self._terminal_creationflags
         try:
-            state.terminal_proc = subprocess.Popen(args, cwd=state.workdir, start_new_session=True)
+            state.terminal_proc = subprocess.Popen(args, **popen_kwargs)
         except Exception as exc:
             state.last_error = f"terminal launch failed: {exc}"
             state.terminal_pid_path = None
@@ -725,7 +756,7 @@ class ServiceWatchdog:
             time.sleep(0.1)
         else:
             with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, SIGKILL)
 
     def _pid_alive(self, pid: int) -> bool:
         try:
@@ -940,16 +971,30 @@ spawn();
 """
 
 
+def _resolve_npm_command() -> Optional[str]:
+    if os.name == "nt":
+        candidates = ("npm.cmd", "npm.exe", "npm.bat", "npm")
+    else:
+        candidates = ("npm",)
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
 def ensure_bridge() -> None:
     if not BRIDGE_DIR.exists():
         BRIDGE_DIR.mkdir(parents=True)
-    if not shutil.which("node"):
+    node_cmd = shutil.which("node.exe" if os.name == "nt" else "node")
+    if not node_cmd:
         raise SystemExit("Node.js binary 'node' not found; install Node.js to run the router.")
-    if not shutil.which("npm"):
+    npm_cmd = _resolve_npm_command()
+    if not npm_cmd:
         raise SystemExit("npm not found; install Node.js/npm to run the router.")
     if not PKG_JSON.exists():
-        subprocess.check_call(["npm", "init", "-y"], cwd=BRIDGE_DIR)
-        subprocess.check_call(["npm", "install", "nkn-sdk@^1.3.6"], cwd=BRIDGE_DIR)
+        subprocess.check_call([npm_cmd, "init", "-y"], cwd=BRIDGE_DIR)
+        subprocess.check_call([npm_cmd, "install", "nkn-sdk@^1.3.6"], cwd=BRIDGE_DIR)
     if not BRIDGE_JS.exists() or BRIDGE_JS.read_text() != BRIDGE_SRC:
         BRIDGE_JS.write_text(BRIDGE_SRC)
 

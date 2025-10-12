@@ -7,6 +7,7 @@ docs/bridge-node
 docs/*.pem
 docs/config.json
 docs/router_config.json
+docs/__*
 service_router/.*
 service_router/.*
 service_router/bridge-node
