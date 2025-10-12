@@ -1,9 +1,14 @@
 docs/venv
+docs/.venv
+docs/.venv_router
+docs/.services
+docs/.logs
+docs/bridge-node
 docs/*.pem
 docs/config.json
+docs/router_config.json
 service_router/.*
 service_router/.*
 service_router/bridge-node
 service_router/router_config.json
 examples
-docs/.venv
