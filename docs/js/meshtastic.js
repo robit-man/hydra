@@ -71,6 +71,7 @@ const STYLE_TEXT = `
   flex-direction: column;
   gap: 8px;
   height: 100%;
+  min-height:250px;
 }
 .meshtastic-node .mesh-view.active {
   display: flex;
@@ -83,6 +84,8 @@ const STYLE_TEXT = `
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  max-height: 200px;
+  overflow: auto;
 }
 .meshtastic-node .mesh-peer-chip {
   background: #1b244d;
@@ -174,6 +177,7 @@ const STYLE_TEXT = `
   font-size: 12px;
   overflow: auto;
   min-height: 120px;
+  max-height:350px;
 }
 .meshtastic-node .mesh-log .ok {
   color: #5ee3a6;
@@ -1607,7 +1611,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         const view = tab.dataset.meshTab;
         state.activeView = view;
         state.ui.tabs.forEach((t) => t.classList.toggle('active', t === tab));
-        state.views?.forEach((el, key) => el.classList.toggle('active', key === view));
+        state.ui.views?.forEach((el, key) => el.classList.toggle('active', key === view));
         if (view === 'map') {
           setTimeout(() => {
             refreshMap(state, { fit: true });
