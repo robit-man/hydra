@@ -18,6 +18,7 @@ const STYLE_TEXT = `
   border-radius: 6px;
   font: inherit;
   padding: 6px 8px;
+    align-self: end;
 }
 .meshtastic-node button:hover:not(:disabled) {
   background: #2a3163;
@@ -71,7 +72,7 @@ const STYLE_TEXT = `
   flex-direction: column;
   gap: 8px;
   height: 100%;
-  min-height:250px;
+  min-height:350px;
 }
 .meshtastic-node .mesh-view.active {
   display: flex;
