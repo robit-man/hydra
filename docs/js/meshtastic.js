@@ -537,9 +537,15 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       myInfo: null,
       selfMetrics: null,
       selectedThread: 'public',
+      activeView: 'chat',
       shareInterval: null,
       map: null,
       mapMarkers: new Map(),
+      mapHasFit: false,
+      binaryAcc: new Uint8Array(0),
+      lastConfigNonce: 0,
+      expectedNodes: 0,
+      syncInProgress: false,
       seenMsgs: new Map(),
       dedupeList: [],
       peerTelemetry: new Map(),
@@ -549,7 +555,8 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       heartbeatNonce: 1,
       flushTimer: null,
       pendingConnect: null,
-      connectInFlight: false
+      connectInFlight: false,
+      _mapRefreshTimer: null
     };
   }
 
@@ -623,9 +630,11 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   function cleanAnsiStream(state, chunkText) {
     let s = state.ansiCarry + chunkText;
     state.ansiCarry = '';
+
     s = s.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
       .replace(/\x1b[@-~]/g, '');
+
     const escIdx = s.lastIndexOf('\x1b');
     if (escIdx !== -1) {
       const tail = s.slice(escIdx);
@@ -638,23 +647,35 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         s = s.slice(0, escIdx);
       }
     }
+
+    s = s.replace(/\b(\d{1,3})\s+(\d{1,3})m\b/g, '$1$2m')
+      .replace(/\b(\d{1,3})\s+(\d{1,3})m\b/g, '$1$2m');
+
+    s = s.replace(/(^|[^\w])\d{1,3}m(?=\w)/g, '$1')
+      .replace(/(^|[^\w])\d{1,3}m(?!\S)/g, '$1');
+
     return s;
   }
 
-  function splitAnsiLines(state, bytes) {
+  function appendAsciiBytes(state, bytes) {
+    if (!bytes || !bytes.length) return;
     const raw = state.asciiDecoder.decode(bytes, { stream: true });
+    if (!raw) return;
     const cleaned = cleanAnsiStream(state, raw).replace(/\r/g, '');
+    if (!cleaned) return;
+
     state.asciiLineBuffer += cleaned;
     const parts = state.asciiLineBuffer.split('\n');
     state.asciiLineBuffer = parts.pop();
-    return parts;
-  }
+    for (const line of parts) {
+      if (line.trim().length) logLine(state, line);
+    }
 
-  function appendAsciiParse(state, text) {
-    state.asciiParseBuffer += text;
+    state.asciiParseBuffer += cleaned;
     if (state.asciiParseBuffer.length > ASCII_BUFFER_LIMIT) {
       state.asciiParseBuffer = state.asciiParseBuffer.slice(-Math.floor(ASCII_BUFFER_LIMIT * 0.6));
     }
+    processAsciiBuffer(state);
   }
 
   function flushAscii(state) {
@@ -664,10 +685,11 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       state.asciiLineBuffer += cleaned;
       state.asciiParseBuffer += cleaned;
     }
-    const pendingLine = state.asciiLineBuffer.trim();
-    if (pendingLine) logLine(state, pendingLine);
+    const pendingLine = state.asciiLineBuffer;
+    if (pendingLine.trim().length) logLine(state, pendingLine);
     state.asciiLineBuffer = '';
     if (state.asciiParseBuffer.length) processAsciiBuffer(state);
+    state.ansiCarry = '';
     flushLog(state);
   }
 
@@ -937,6 +959,41 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.map.invalidateSize();
   }
 
+  function refreshMap(state, { fit = false } = {}) {
+    ensureMap(state);
+    const L = window.L;
+    if (!L || !state.map) return;
+    state.nodes.forEach((info) => {
+      if (!info || info._placeholder) return;
+      const num = info.num;
+      if (!Number.isFinite(num)) return;
+      if (!info.position) return;
+      if (!state.mapMarkers.has(num >>> 0)) {
+        updateMap(state, num, info.position, info.last_heard);
+      }
+    });
+    state.map.invalidateSize();
+    if (!fit) return;
+    const latLngs = [];
+    state.mapMarkers.forEach((marker) => {
+      if (!marker || typeof marker.getLatLng !== 'function') return;
+      const point = marker.getLatLng();
+      if (!point) return;
+      if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return;
+      latLngs.push(point);
+    });
+    if (latLngs.length) {
+      const bounds = L.latLngBounds(latLngs);
+      if (bounds.isValid()) {
+        state.map.fitBounds(bounds, { padding: [32, 32], maxZoom: 14 });
+        state.mapHasFit = true;
+        return;
+      }
+    }
+    state.mapHasFit = false;
+    state.map.setView([0, 0], 2);
+  }
+
   function updateMap(state, nodeNum, position, timeSec) {
     ensureMap(state);
     const L = window.L;
@@ -956,6 +1013,10 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     }
     const last = timeSec ? new Date(timeSec * 1000).toLocaleString() : '';
     marker.bindPopup(`<strong>${escapeHtml(label)}</strong><br>#${key}<br>${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}<br>${last}`);
+    if (state.activeView === 'map') {
+      state._mapRefreshTimer && clearTimeout(state._mapRefreshTimer);
+      state._mapRefreshTimer = setTimeout(() => refreshMap(state, { fit: false }), 120);
+    }
   }
 
   function appendMessage(state, message) {
@@ -999,7 +1060,13 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
 
   async function requestNodeDb(state) {
     if (!state.writer) throw new Error('Not connected');
-    await writeToRadio(state, { want_config_id: 3 });
+    const nonce = (Math.random() * 0xffffffff) >>> 0;
+    state.lastConfigNonce = nonce;
+    state.syncInProgress = true;
+    state.expectedNodes = 0;
+    updateStatus(state, 'Syncing NodeDB…', 'ok');
+    logLine(state, `Requesting NodeDB (nonce=${formatHex(nonce)})`, 'ok');
+    await writeToRadio(state, { want_config_id: nonce });
   }
 
   function onInboundText(state, { srcDec, dstDec, text, idHex, via }) {
@@ -1090,14 +1157,17 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   }
 
   function handlePeerTelemetry(state, nodeInfo) {
-    const key = nodeInfo?.num;
-    if (key == null) return;
-    state.nodes.set(key >>> 0, nodeInfo);
+    const numRaw = nodeInfo?.num;
+    const key = Number(numRaw);
+    if (!Number.isFinite(key)) return;
+    const dec = key >>> 0;
+    const stored = JSON.parse(JSON.stringify(nodeInfo));
+    state.nodes.set(dec, stored);
     const cfg = getConfig(state.nodeId);
     const peersCfg = { ...(cfg.peers || {}) };
-    const peerKey = String(key >>> 0);
+    const peerKey = String(dec);
     const existing = peersCfg[peerKey];
-    const label = nodeInfo.user?.long_name || nodeInfo.user?.short_name || nodeInfo.user?.id || `#${key}`;
+    const label = nodeInfo.user?.long_name || nodeInfo.user?.short_name || nodeInfo.user?.id || `#${dec}`;
     let changed = false;
     if (existing) {
       const next = { ...existing };
@@ -1124,79 +1194,125 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     }
     updatePeerCards(state);
     renderPeerChips(state);
-    updateMap(state, key, nodeInfo.position, nodeInfo.last_heard);
+    updateMap(state, dec, nodeInfo.position, nodeInfo.last_heard);
     if (refreshPortsHandler) refreshPortsHandler(state.nodeId, 'peers');
   }
 
   async function startReadLoop(state) {
-    if (!state.reader) return;
+    if (!state.port?.readable) return;
     state.readLoopAbort = new AbortController();
     const signal = state.readLoopAbort.signal;
+    const reader = state.port.readable.getReader();
+    state.reader = reader;
+    const HEADER0 = 0x94;
+    const HEADER1 = 0xc3;
+    const MAX_LEN = 4096;
+    let acc = state.binaryAcc instanceof Uint8Array ? state.binaryAcc : new Uint8Array(0);
+    await ensureProtobuf();
     try {
       while (true) {
         if (signal.aborted) break;
-        const { value, done } = await state.reader.read();
-        if (done || !value) break;
-        const lines = splitAnsiLines(state, value);
-        lines.forEach((line) => {
-          const stripped = line.trim();
-          if (!stripped) return;
-          logLine(state, stripped);
-        });
-        appendAsciiParse(state, cleanAnsiStream(state, state.asciiDecoder.decode(value, { stream: true }).replace(/\r/g, '')));
-        processAsciiBuffer(state);
+        let result;
         try {
-          await processBinaryChunk(state, value);
+          result = await reader.read();
         } catch (err) {
-          logLine(state, `decode error: ${err.message}`, 'err');
+          if (signal.aborted) break;
+          throw err;
+        }
+        const { value, done } = result;
+        if (done) break;
+        if (!value || !value.length) continue;
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+        if (!acc.length) acc = chunk;
+        else {
+          const tmp = new Uint8Array(acc.length + chunk.length);
+          tmp.set(acc, 0);
+          tmp.set(chunk, acc.length);
+          acc = tmp;
+        }
+
+        parse: while (acc.length >= 2) {
+          let i = 0;
+          while (i + 1 < acc.length && !(acc[i] === HEADER0 && acc[i + 1] === HEADER1)) i++;
+          if (i + 3 >= acc.length) {
+            if (i > 0) {
+              appendAsciiBytes(state, acc.subarray(0, i));
+              acc = acc.subarray(i);
+            }
+            break parse;
+          }
+          if (i > 0) {
+            appendAsciiBytes(state, acc.subarray(0, i));
+            acc = acc.subarray(i);
+          }
+          if (acc.length < 4) break parse;
+          const len = (acc[2] << 8) | acc[3];
+          if (len <= 0 || len > MAX_LEN) {
+            appendAsciiBytes(state, acc.subarray(0, 2));
+            acc = acc.subarray(2);
+            continue;
+          }
+          if (acc.length < 4 + len) break parse;
+          const frame = acc.subarray(4, 4 + len);
+          acc = acc.subarray(4 + len);
+          try {
+            await ensureProtobuf();
+            const msg = Types.FromRadio.decode(frame);
+            handleFromRadioMessage(state, msg);
+          } catch (err) {
+            logLine(state, `protobuf decode error: ${err.message}`, 'err');
+          }
         }
       }
-    } finally {
-      if (!state.userRequestedDisconnect) {
-        handleConnectionLost(state, 'read loop ended');
-      }
-    }
-  }
-
-  async function processBinaryChunk(state, chunk) {
-    await ensureProtobuf();
-    if (!chunk || !chunk.length) return;
-    const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-    let offset = 0;
-    while (offset + 4 <= bytes.length) {
-      if (bytes[offset] !== 0x94 || bytes[offset + 1] !== 0xc3) {
-        offset += 1;
-        continue;
-      }
-      const len = (bytes[offset + 2] << 8) | bytes[offset + 3];
-      if (offset + 4 + len > bytes.length) break;
-      const payload = bytes.slice(offset + 4, offset + 4 + len);
-      handleProtobufFrame(state, payload);
-      offset += 4 + len;
-    }
-  }
-
-  function handleProtobufFrame(state, payload) {
-    try {
-      const msg = Types.FromRadio.decode(payload);
-      const obj = Types.FromRadio.toObject(msg, { defaults: true });
-      if (!obj) return;
-      if (obj.packet) {
-        handleMeshPacket(state, obj.packet);
-        return;
-      }
-      if (obj.node_info) {
-        handlePeerTelemetry(state, obj.node_info);
-        return;
-      }
-      if (obj.my_info) {
-        state.myNodeNum = obj.my_info.my_node_num >>> 0;
-        state.myInfo = obj.my_info;
-        updateSelfInfo(state);
-        return;
-      }
     } catch (err) {
-      logLine(state, `protobuf decode error: ${err.message}`, 'err');
+      if (!signal.aborted && !state.userRequestedDisconnect) {
+        throw err;
+      }
+    } finally {
+      state.binaryAcc = acc;
+      try { reader.releaseLock(); } catch (_) { }
+      state.reader = null;
+      flushAscii(state);
+      state.readLoopAbort = null;
+    }
+  }
+
+  function handleFromRadioMessage(state, msg) {
+    if (!msg) return;
+    if (msg.my_info) {
+      const info = Types.MyNodeInfo.toObject(msg.my_info, { defaults: true });
+      state.myNodeNum = Number(info.my_node_num ?? state.myNodeNum ?? 0) >>> 0;
+      state.myInfo = info;
+      state.expectedNodes = Number(info.nodedb_count || 0);
+      state.syncInProgress = true;
+      updateSelfInfo(state);
+      if (state.expectedNodes > 0) {
+        updateStatus(state, `Syncing NodeDB… (${state.expectedNodes} nodes)`, 'ok');
+      } else {
+        updateStatus(state, 'Syncing NodeDB…', 'ok');
+      }
+      return;
+    }
+    if (msg.node_info) {
+      const nodeInfo = Types.NodeInfo.toObject(msg.node_info, { defaults: true });
+      handlePeerTelemetry(state, nodeInfo);
+      if (state.syncInProgress) {
+        const total = state.expectedNodes || state.nodes.size;
+        updateStatus(state, `Synced ${state.nodes.size}/${total} nodes`, 'ok');
+      }
+      return;
+    }
+    if (msg.config_complete_id != null) {
+      if (!state.lastConfigNonce || msg.config_complete_id === state.lastConfigNonce) {
+        state.syncInProgress = false;
+        updateStatus(state, 'NodeDB synced', 'ok');
+        refreshMap(state, { fit: true });
+      }
+      return;
+    }
+    if (msg.packet) {
+      handleMeshPacket(state, msg.packet);
+      return;
     }
   }
 
@@ -1208,10 +1324,13 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (packet.decoded) {
       const data = packet.decoded;
       if (data.portnum === 1) {
+        const payloadBytes = data.payload instanceof Uint8Array
+          ? data.payload
+          : (Array.isArray(data.payload) ? new Uint8Array(data.payload) : new Uint8Array(0));
         let text = '';
-        if (data.payload?.length) {
+        if (payloadBytes.length) {
           try {
-            text = new TextDecoder().decode(data.payload);
+            text = new TextDecoder().decode(payloadBytes);
           } catch (err) {
             text = `[decode error ${err.message}]`;
           }
@@ -1226,7 +1345,11 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       }
       if (data.portnum === 3 && data.payload?.length) {
         try {
-          const pos = Types.Position.decode(data.payload);
+          const payloadBytes = data.payload instanceof Uint8Array
+            ? data.payload
+            : (Array.isArray(data.payload) ? new Uint8Array(data.payload) : new Uint8Array(0));
+          if (!payloadBytes.length) return;
+          const pos = Types.Position.decode(payloadBytes);
           applyPositionUpdate(state, from, pos, packet.rx_time | 0);
         } catch (err) {
           logLine(state, `position decode error: ${err.message}`, 'warn');
@@ -1235,7 +1358,10 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       }
       if (data.portnum === 7 && data.payload?.length) {
         try {
-          const inflated = pako.inflate(data.payload, { to: 'string' });
+          const payloadBytes = data.payload instanceof Uint8Array
+            ? data.payload
+            : (Array.isArray(data.payload) ? new Uint8Array(data.payload) : new Uint8Array(0));
+          const inflated = payloadBytes.length ? pako.inflate(payloadBytes, { to: 'string' }) : '';
           const idHex = formatHex(packet.id || 0);
           const key = makeDedupKey(from, idHex, inflated);
           if (!state.seenMsgs.has(key)) {
@@ -1291,7 +1417,33 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.port = port;
     await port.open({ baudRate: 115200 });
     state.writer = port.writable?.getWriter?.();
-    state.reader = port.readable?.getReader?.();
+    state.binaryAcc = new Uint8Array(0);
+    state.lastConfigNonce = 0;
+    state.expectedNodes = 0;
+    state.syncInProgress = false;
+    state.mapHasFit = false;
+    state.asciiLineBuffer = '';
+    state.asciiParseBuffer = '';
+    state.ansiCarry = '';
+    state.logPending = '';
+    state.lastLogDiv = null;
+    state.nodes.clear();
+    state.mapMarkers.forEach((marker) => {
+      try { marker.remove?.(); } catch (_) { /* ignore */ }
+    });
+    state.mapMarkers.clear();
+    state.seenMsgs.clear();
+    state.dedupeList.length = 0;
+    if (state._mapRefreshTimer) {
+      clearTimeout(state._mapRefreshTimer);
+      state._mapRefreshTimer = null;
+    }
+    state.threads.clear();
+    state.unread.clear();
+    state.selectedThread = 'public';
+    renderPeerChips(state);
+    updatePeerCards(state);
+    updateSelectedThread(state, 'public');
     updateStatus(state, 'Connected @115200', 'ok');
     if (state.ui) {
       if (state.ui.connectButton) state.ui.connectButton.disabled = true;
@@ -1299,9 +1451,11 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       if (state.ui.refreshButton) state.ui.refreshButton.disabled = false;
       if (state.ui.sendButton) state.ui.sendButton.disabled = false;
     }
-    startReadLoop(state).catch((err) => {
-      logLine(state, `read loop error: ${err.message}`, 'err');
-      handleConnectionLost(state, 'read loop error');
+    startReadLoop(state).catch(async (err) => {
+      if (state.userRequestedDisconnect || state.readLoopAbort?.signal?.aborted) return;
+      const detail = err?.message || String(err || 'read loop error');
+      logLine(state, `read loop error: ${detail}`, 'err');
+      await handleConnectionLost(state, 'read loop');
     });
   }
 
@@ -1324,6 +1478,17 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.reader = null;
     state.writer = null;
     state.port = null;
+    if (state._mapRefreshTimer) {
+      clearTimeout(state._mapRefreshTimer);
+      state._mapRefreshTimer = null;
+    }
+    state.binaryAcc = new Uint8Array(0);
+    state.lastConfigNonce = 0;
+    state.expectedNodes = 0;
+    state.syncInProgress = false;
+    state.asciiLineBuffer = '';
+    state.asciiParseBuffer = '';
+    state.ansiCarry = '';
     updateStatus(state, 'Disconnected', 'warn');
     if (state.ui) {
       if (state.ui.connectButton) state.ui.connectButton.disabled = !state.allowed;
@@ -1440,12 +1605,15 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.ui.tabs?.forEach((tab) => {
       tab.addEventListener('click', () => {
         const view = tab.dataset.meshTab;
+        state.activeView = view;
         state.ui.tabs.forEach((t) => t.classList.toggle('active', t === tab));
         state.views?.forEach((el, key) => el.classList.toggle('active', key === view));
         if (view === 'map') {
           setTimeout(() => {
-            state.map?.invalidateSize();
-          }, 50);
+            refreshMap(state, { fit: true });
+          }, 60);
+        } else {
+          state.mapHasFit = false;
         }
       });
     });
@@ -1720,6 +1888,7 @@ Viewport: ${vp}`;
         const controls = document.createElement('div');
         controls.className = 'controls';
         const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
         toggleBtn.textContent = configEntry.enabled ? 'Enabled' : 'Disabled';
         toggleBtn.classList.toggle('active', configEntry.enabled);
         toggleBtn.addEventListener('click', () => {
@@ -1747,6 +1916,7 @@ Viewport: ${vp}`;
         });
         controls.appendChild(toggleBtn);
         const jsonBtn = document.createElement('button');
+        jsonBtn.type = 'button';
         const initialJson = peerJsonModeEnabled(cfg, key);
         jsonBtn.textContent = initialJson ? 'JSON' : 'Raw';
         jsonBtn.addEventListener('click', () => {
