@@ -12,6 +12,7 @@ function createGraph({
   Location,
   FileTransfer,
   MCP,
+  Meshtastic,
   Net,
   CFG,
   saveCFG,
@@ -1099,6 +1100,11 @@ function refreshNodeResolution(force = false) {
     if (node.type === 'LogicGate') {
       return handleLogicGateInput(node.id, portName, payload);
     }
+    if (node.type === 'Meshtastic') {
+      if (portName === 'public') return Meshtastic.sendPublic?.(node.id, payload);
+      if (portName.startsWith('peer-')) return Meshtastic.sendPeer?.(node.id, portName, payload);
+      return;
+    }
     if (node.type === 'LLM') {
       if (portName === 'prompt') {
         pullLlmSystemInput(node.id);
@@ -1258,6 +1264,108 @@ function refreshNodeResolution(force = false) {
 
     container.appendChild(portEl);
     Router.register(`${node.id}:in:${portName}`, portEl, (payload) => handleInputPayload(node, portName, payload));
+    return portEl;
+  }
+
+  function createOutputPort(node, container, portName, label = portName) {
+    if (!node || !container) return null;
+    node.portEls = node.portEls || {};
+    const key = `out:${portName}`;
+    const existing = node.portEls[key];
+    if (existing && existing.isConnected) {
+      const labelEl = existing.querySelector('span:first-child');
+      if (labelEl) labelEl.textContent = label;
+      existing.title = `${label} (Alt-click to disconnect)`;
+      return existing;
+    }
+    const portEl = document.createElement('div');
+    portEl.className = 'wp-port out';
+    portEl.dataset.port = portName;
+    portEl.title = `${label} (Alt-click to disconnect)`;
+    portEl.innerHTML = `<span>${label}</span><span class="dot"></span>`;
+    node.portEls[key] = portEl;
+
+    portEl.addEventListener('click', (ev) => {
+      if (ev.altKey || ev.metaKey || ev.ctrlKey) {
+        removeWiresAt(node.id, 'out', portName);
+        return;
+      }
+      onPortClick(node.id, 'out', portName, portEl);
+    });
+
+    portEl.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'touch') ev.preventDefault();
+      const wires = connectedWires(node.id, 'out', portName);
+      if (wires.length) {
+        const w = wires[wires.length - 1];
+        w.path?.setAttribute('stroke-dasharray', '6 4');
+        const move = (e) => {
+          if (e.pointerType === 'touch') e.preventDefault();
+          if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+          const pt = clientToWorkspace(e.clientX, e.clientY);
+          drawRetarget(w, 'from', pt.x, pt.y);
+          if (WS.drag) updateDropHover(WS.drag.expected);
+        };
+        const up = (e) => {
+          setDropHover(null);
+          finishAnyDrag(e.clientX, e.clientY);
+        };
+        WS.drag = {
+          kind: 'retarget',
+          wireId: w.id,
+          grabSide: 'from',
+          path: w.path,
+          pointerId: ev.pointerId,
+          expected: 'in',
+          lastClient: { x: ev.clientX, y: ev.clientY },
+          _cleanup: () => window.removeEventListener('pointermove', move)
+        };
+        window.addEventListener('pointermove', move, { passive: false });
+        window.addEventListener('pointerup', up, { once: true, passive: false });
+        updateDropHover('in');
+        return;
+      }
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', 'rgba(255,255,255,.6)');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('opacity', '0.9');
+      path.setAttribute('stroke-dasharray', '6 4');
+      path.setAttribute('vector-effect', 'non-scaling-stroke');
+      path.setAttribute('pointer-events', 'none');
+      WS.svgLayer.appendChild(path);
+
+      const move = (e) => {
+        if (e.pointerType === 'touch') e.preventDefault();
+        if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+        const pt = clientToWorkspace(e.clientX, e.clientY);
+        drawTempFromPort({ nodeId: node.id, side: 'out', portName }, pt.x, pt.y);
+        updateDropHover(WS.drag?.expected);
+      };
+      const up = (e) => {
+        setDropHover(null);
+        finishAnyDrag(e.clientX, e.clientY);
+      };
+      WS.drag = {
+        kind: 'new',
+        fromNodeId: node.id,
+        fromPort: portName,
+        path,
+        pointerId: ev.pointerId,
+        expected: 'in',
+        lastClient: { x: ev.clientX, y: ev.clientY },
+        _cleanup: () => window.removeEventListener('pointermove', move)
+      };
+      window.addEventListener('pointermove', move, { passive: false });
+      window.addEventListener('pointerup', up, { once: true, passive: false });
+      const pt = clientToWorkspace(ev.clientX, ev.clientY);
+      drawTempFromPort({ nodeId: node.id, side: 'out', portName }, pt.x, pt.y);
+      updateDropHover('in');
+    });
+
+    container.appendChild(portEl);
     return portEl;
   }
 
@@ -1710,6 +1818,67 @@ function refreshNodeResolution(force = false) {
           </div>
           <div class="muted" data-media-status style="margin-top:6px;">Ready</div>
         ` : ''}
+        ${node.type === 'Meshtastic' ? `
+          <div class="meshtastic-node" data-mesh-root>
+            <div class="mesh-header">
+              <div class="mesh-main-controls">
+                <button type="button" data-mesh-port>Choose Port…</button>
+                <button type="button" data-mesh-connect disabled>Connect</button>
+                <button type="button" data-mesh-refresh disabled>Refresh Nodes</button>
+                <button type="button" data-mesh-disconnect disabled>Disconnect</button>
+              </div>
+              <div class="mesh-status-line">
+                <span class="mesh-status-dot" data-mesh-status-dot></span>
+                <span data-mesh-status>Not connected</span>
+                <span class="mesh-self" data-mesh-self-info></span>
+              </div>
+            </div>
+            <div class="mesh-tabs">
+              <div class="mesh-tab active" data-mesh-tab="chat">Chat</div>
+              <div class="mesh-tab" data-mesh-tab="map">Map</div>
+              <div class="mesh-tab" data-mesh-tab="log">Logs</div>
+            </div>
+            <div class="mesh-views">
+              <div class="mesh-view active" data-mesh-view="chat">
+                <div class="mesh-chat-header" data-mesh-chat-header>Public broadcast</div>
+                <div class="mesh-peer-bar" data-mesh-peer-bar></div>
+                <div class="mesh-messages" data-mesh-messages></div>
+                <div class="mesh-sharebar">
+                  <div class="mesh-sharebar-group">
+                    <button type="button" data-mesh-send-ua>Send Browser Info</button>
+                  </div>
+                  <div class="mesh-sharebar-group">
+                    <button type="button" data-mesh-loc-once>Send Location Once</button>
+                    <label>Every (s)
+                      <input type="number" min="5" value="60" data-mesh-loc-interval>
+                    </label>
+                    <button type="button" data-mesh-loc-start>Start</button>
+                    <button type="button" data-mesh-loc-stop disabled>Stop</button>
+                  </div>
+                  <div class="mesh-sharebar-group">
+                    <label>Destination
+                      <select data-mesh-share-dest>
+                        <option value="current" selected>Current thread</option>
+                        <option value="public">Public</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div class="mesh-composer">
+                  <input type="text" data-mesh-input placeholder="Type message…">
+                  <button type="button" data-mesh-send disabled>Send</button>
+                </div>
+                <div class="mesh-peer-cards" data-mesh-peer-cards></div>
+              </div>
+              <div class="mesh-view" data-mesh-view="map">
+                <div class="mesh-map" data-mesh-map></div>
+              </div>
+              <div class="mesh-view" data-mesh-view="log">
+                <div class="mesh-log" data-mesh-log></div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
         ${node.type === 'Orientation' ? `
           <div class="muted" style="margin-top:6px;">Orientation</div>
           <div class="code" data-orientation-status style="min-height:28px">Idle</div>
@@ -2157,6 +2326,10 @@ function refreshNodeResolution(force = false) {
       });
 
       right.appendChild(portEl);
+    }
+
+    if (node.type === 'Meshtastic') {
+      initMeshtasticNode(node);
     }
 
     if (node.type === 'Template') {
@@ -2743,6 +2916,7 @@ function refreshNodeResolution(force = false) {
           setupTemplateNode(node, leftSide);
           pullTemplateInputs(node.id);
         });
+        if (node.type === 'Meshtastic') requestAnimationFrame(() => initMeshtasticNode(node));
         if (node.type === 'LogicGate') requestAnimationFrame(() => {
           const leftSide = node.el?.querySelector('.side.left');
           setupLogicGateNode(node, leftSide);
@@ -3010,6 +3184,17 @@ function refreshNodeResolution(force = false) {
         { key: 'audioChannels', label: 'Audio Channels', type: 'select', options: ['1', '2'], def: '1' },
         { key: 'audioFormat', label: 'Audio Format', type: 'select', options: ['pcm16', 'opus'], def: 'pcm16' },
         { key: 'audioBitsPerSecond', label: 'Audio Bitrate (bps)', type: 'number', def: 32000 }
+      ]
+    },
+    Meshtastic: {
+      title: 'Meshtastic',
+      supportsNkn: false,
+      inputs: [{ name: 'public', label: 'Send Public' }],
+      outputs: [{ name: 'public', label: 'Public Messages' }],
+      schema: [
+        { key: 'channel', label: 'Channel', type: 'number', def: 0 },
+        { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
+        { key: 'defaultJson', label: 'Default JSON Output', type: 'select', options: ['true', 'false'], def: 'true' }
       ]
     },
     Orientation: {
@@ -3309,6 +3494,89 @@ function refreshNodeResolution(force = false) {
     const updatedCfg = ensureVars();
     rebuildTemplateVariablePorts(node, leftContainer, updatedCfg);
     updateTemplatePreview(node, updatedCfg);
+  }
+
+  function refreshMeshtasticPorts(nodeId) {
+    const node = WS.nodes.get(nodeId);
+    if (!node || node.type !== 'Meshtastic') return;
+    const cfg = NodeStore.ensure(nodeId, 'Meshtastic').config || {};
+    const peers = cfg.peers || {};
+    const left = node.el?.querySelector('.side.left');
+    const right = node.el?.querySelector('.side.right');
+    if (!left || !right) return;
+
+    const channel = Number.isFinite(Number(cfg.channel)) ? Number(cfg.channel) : 0;
+    const pubLabel = `Public ch${channel}`;
+    const publicIn = node.portEls?.['in:public'];
+    if (publicIn) {
+      const span = publicIn.querySelector('span:last-child');
+      if (span) span.textContent = pubLabel;
+      publicIn.title = `${pubLabel} (Alt-click to disconnect)`;
+    }
+    const publicOut = node.portEls?.['out:public'];
+    if (publicOut) {
+      const span = publicOut.querySelector('span:first-child');
+      if (span) span.textContent = pubLabel;
+      publicOut.title = `${pubLabel} (Alt-click to disconnect)`;
+    }
+
+    const desired = new Map();
+    const nextPeers = { ...peers };
+    let changed = false;
+    for (const [key, info] of Object.entries(peers)) {
+      if (!info || !info.enabled) continue;
+      const portName = info.portName || `peer-${key}`;
+      if (info.portName !== portName) {
+        nextPeers[key] = { ...info, portName };
+        changed = true;
+      }
+      const label = info.label || `Peer #${key}`;
+      desired.set(portName, { peerKey: key, label });
+    }
+    if (changed) {
+      NodeStore.update(nodeId, { type: 'Meshtastic', peers: nextPeers });
+    }
+
+    node._meshtasticPorts = node._meshtasticPorts || new Set();
+    const active = node._meshtasticPorts;
+    const keep = new Set();
+
+    desired.forEach((meta, portName) => {
+      const inLabel = `To ${meta.label}`;
+      const outLabel = meta.label;
+      const inEl = createInputPort(node, left, portName, inLabel);
+      if (inEl) {
+        const span = inEl.querySelector('span:last-child');
+        if (span) span.textContent = inLabel;
+        inEl.title = `${inLabel} (Alt-click to disconnect)`;
+      }
+      const outEl = createOutputPort(node, right, portName, outLabel);
+      if (outEl) {
+        const span = outEl.querySelector('span:first-child');
+        if (span) span.textContent = outLabel;
+        outEl.title = `${outLabel} (Alt-click to disconnect)`;
+      }
+      active.add(portName);
+      keep.add(portName);
+    });
+
+    for (const portName of Array.from(active)) {
+      if (keep.has(portName)) continue;
+      unregisterInputPort(node, portName);
+      const inEl = node.portEls?.[`in:${portName}`];
+      if (inEl?.remove) inEl.remove();
+      if (node.portEls) delete node.portEls[`in:${portName}`];
+      removeOutputPort(node, portName);
+      active.delete(portName);
+    }
+
+    Meshtastic.refresh?.(nodeId);
+  }
+
+  function initMeshtasticNode(node) {
+    if (!node || node.type !== 'Meshtastic') return;
+    refreshMeshtasticPorts(node.id);
+    Meshtastic.init?.(node.id);
   }
 
   function pullTemplateInputs(nodeId) {
@@ -3637,6 +3905,15 @@ function refreshNodeResolution(force = false) {
     removeWiresAt(node.id, 'in', portName);
     unregisterInputPort(node, portName);
     const key = `in:${portName}`;
+    const el = node.portEls?.[key];
+    if (el?.remove) el.remove();
+    if (node.portEls) delete node.portEls[key];
+  }
+
+  function removeOutputPort(node, portName) {
+    if (!node) return;
+    removeWiresAt(node.id, 'out', portName);
+    const key = `out:${portName}`;
     const el = node.portEls?.[key];
     if (el?.remove) el.remove();
     if (node.portEls) delete node.portEls[key];
@@ -5214,6 +5491,13 @@ function refreshNodeResolution(force = false) {
       renderTargets();
     }
 
+    if (node.type === 'Meshtastic') {
+      const meshLabel = document.createElement('label');
+      meshLabel.textContent = 'Peers';
+      fields.appendChild(meshLabel);
+      Meshtastic.renderSettings?.(node.id, fields);
+    }
+
     convertBooleanSelectsIn(fields);
     if (!fields._boolToggleObserver) {
       const observer = new MutationObserver((mutations) => {
@@ -5340,6 +5624,10 @@ function refreshNodeResolution(force = false) {
       const leftSide = node.el?.querySelector('.side.left');
       setupTemplateNode(node, leftSide);
       pullTemplateInputs(nodeId);
+    }
+    if (nodeType === 'Meshtastic') {
+      refreshMeshtasticPorts(nodeId);
+      Meshtastic.refresh?.(nodeId);
     }
     if (nodeType === 'LogicGate') {
       const leftSide = node.el?.querySelector('.side.left');
@@ -5535,6 +5823,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       setupTemplateNode(node, leftSide);
       pullTemplateInputs(id);
     });
+    if (type === 'Meshtastic') requestAnimationFrame(() => initMeshtasticNode(node));
     if (type === 'LogicGate') requestAnimationFrame(() => {
       const leftSide = node.el?.querySelector('.side.left');
       setupLogicGateNode(node, leftSide);
@@ -5615,6 +5904,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'Location') {
       Location.dispose(nodeId);
     }
+    if (node.type === 'Meshtastic') {
+      Meshtastic.dispose?.(nodeId);
+    }
 
     connectedWires.forEach((w) => detachWire(w));
     node.el.remove();
@@ -5646,6 +5938,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'FileTransfer', label: 'File Transfer', x: 780, y: 200 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
+      { type: 'Meshtastic', label: 'Meshtastic', x: 260, y: 120 },
       { type: 'Orientation', label: 'Orientation', x: 220, y: 260 },
       { type: 'Location', label: 'Location', x: 200, y: 320 }
     ];
@@ -5831,6 +6124,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       if (e.target === WS.svg && (WS.portSel || WS.drag)) cancelLinking();
     });
   }
+
+  Meshtastic?.setRefreshPortsHandler?.((nodeId) => refreshMeshtasticPorts(nodeId));
 
   function bindNodeSelectionControls() {
     document.addEventListener('pointermove', updatePointerLocation, { passive: true });
@@ -6122,7 +6417,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     download: () => downloadWorkspaceFile(),
     openImportDialog: () => openGraphImportDialog(),
     saveAs: () => saveWorkspaceAsInteractive(),
-    setFlowSaveHandler
+    setFlowSaveHandler,
+    refreshMeshtasticPorts
   };
 }
 

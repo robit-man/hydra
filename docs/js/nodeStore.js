@@ -160,6 +160,14 @@ const NodeStore = {
       format: 'raw',
       precision: 6,
       running: false
+    },
+    Meshtastic: {
+      autoConnect: true,
+      channel: 0,
+      publicPortName: 'public',
+      defaultJson: true,
+      peers: {},
+      lastPortInfo: null
     }
   },
 

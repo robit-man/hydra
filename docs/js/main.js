@@ -18,6 +18,7 @@ import { createFileTransfer } from './fileTransfer.js';
 import { createWorkspaceSync } from './workspaceSync.js';
 import { createGraph } from './graph.js';
 import { createFlowsLibrary } from './flows.js';
+import { createMeshtastic } from './meshtastic.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -121,6 +122,14 @@ const FileTransfer = createFileTransfer({
   setBadge
 });
 
+const Meshtastic = createMeshtastic({
+  getNode: (id) => graphAccess.getNode(id),
+  NodeStore,
+  Router,
+  log,
+  setBadge
+});
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -131,15 +140,16 @@ const Graph = createGraph({
   Media,
   Orientation,
   Location: LocationNode,
+  FileTransfer,
   MCP,
+  Meshtastic,
   Net,
   CFG,
   saveCFG,
   openQrScanner,
   closeQrScanner,
   registerQrResultHandler,
-  updateTransportButton,
-  FileTransfer
+  updateTransportButton
 });
 
 graphAccess.getNode = (id) => Graph.getNode(id);
