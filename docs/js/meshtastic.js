@@ -84,6 +84,20 @@ const STYLE_TEXT = `
   font-size: 12px;
   color: #9aa3b2;
 }
+.meshtastic-node .mesh-peer-filter,
+.meshtastic-settings .mesh-settings-filter {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+}
+.meshtastic-node .mesh-peer-filter {
+  margin: 6px 0 10px;
+}
+.meshtastic-settings .mesh-settings-filter {
+  margin: 8px 0;
+}
 .meshtastic-node .mesh-peer-bar {
   display: flex;
   flex-wrap: wrap;
@@ -140,6 +154,7 @@ const STYLE_TEXT = `
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: all;
 }
 .meshtastic-node .mesh-message.me {
   margin-left: auto;
@@ -280,7 +295,6 @@ const STYLE_TEXT = `
   gap: 8px;
   padding: 4px 6px;
   border-radius: 6px;
-  border: 1px solid #262b4d;
   background: var(--panel2);
 }
 .meshtastic-settings .mesh-peer-toggle .info {
@@ -299,6 +313,7 @@ const STYLE_TEXT = `
 }
 .meshtastic-settings .mesh-peer-toggle .controls {
   display: flex;
+  flex-flow:row-reverse;
   gap: 6px;
   align-items: center;
 }
@@ -581,6 +596,8 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       dedupeList: [],
       peerTelemetry: new Map(),
       peerJsonMode: new Map(),
+      peerSearch: '',
+      settingsSearch: '',
       lastPortInfo: null,
       heartbeatTimer: null,
       heartbeatNonce: 1,
@@ -826,29 +843,45 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (!state.ui) return;
     const list = state.ui.peerBar;
     if (!list) return;
+    if (state.ui.peerFilter && state.ui.peerFilter.value !== (state.peerSearch || '')) {
+      state.ui.peerFilter.value = state.peerSearch || '';
+    }
+    const cfg = getConfig(state.nodeId);
+    const enabledPeers = cfg?.peers || {};
+    const filterText = (state.peerSearch || '').trim().toLowerCase();
     const peers = Array.from(state.nodes.values()).sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
     list.innerHTML = '';
+    let rendered = 0;
 
-    const publicChip = document.createElement('div');
-    publicChip.className = 'mesh-peer-chip' + (state.selectedThread === 'public' ? ' active' : '');
-    publicChip.dataset.peerKey = 'public';
-    publicChip.innerHTML = `<span>Public (ch${getConfig(state.nodeId)?.channel ?? 0})</span>`;
-    const pubUnread = getUnread(state, BROADCAST_NUM);
-    if (pubUnread > 0) {
-      const bubble = document.createElement('span');
-      bubble.className = 'bubble';
-      bubble.textContent = String(pubUnread);
-      publicChip.appendChild(bubble);
+    const channelLabel = String(cfg?.channel ?? 0);
+    const publicHaystack = `public ch${channelLabel} broadcast`; 
+    if (!filterText || publicHaystack.toLowerCase().includes(filterText)) {
+      const publicChip = document.createElement('div');
+      publicChip.className = 'mesh-peer-chip' + (state.selectedThread === 'public' ? ' active' : '');
+      publicChip.dataset.peerKey = 'public';
+      publicChip.innerHTML = `<span>Public (ch${channelLabel})</span>`;
+      const pubUnread = getUnread(state, BROADCAST_NUM);
+      if (pubUnread > 0) {
+        const bubble = document.createElement('span');
+        bubble.className = 'bubble';
+        bubble.textContent = String(pubUnread);
+        publicChip.appendChild(bubble);
+      }
+      list.appendChild(publicChip);
+      rendered += 1;
     }
-    list.appendChild(publicChip);
 
     peers.forEach((info) => {
       const key = String(info.num >>> 0);
+      const stored = enabledPeers[key];
+      const baseName = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
+      const displayName = stored?.label || baseName;
+      const haystack = `${displayName} ${info.user?.short_name || ''} ${info.user?.id || ''} ${formatHex(info.num)} ${info.num}`.toLowerCase();
+      if (filterText && !haystack.includes(filterText)) return;
       const chip = document.createElement('div');
       chip.className = 'mesh-peer-chip' + (state.selectedThread === key ? ' active' : '');
       chip.dataset.peerKey = key;
-      const name = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
-      chip.innerHTML = `<span>${escapeHtml(name)}</span>`;
+      chip.innerHTML = `<span>${escapeHtml(displayName)}</span>`;
       const unread = getUnread(state, info.num);
       if (unread > 0) {
         const bubble = document.createElement('span');
@@ -857,7 +890,15 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         chip.appendChild(bubble);
       }
       list.appendChild(chip);
+      rendered += 1;
     });
+
+    if (!rendered) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'font-size:12px;color:#9aa3b2;padding:4px 0;';
+      empty.textContent = 'No peers match filter';
+      list.appendChild(empty);
+    }
   }
 
   function updatePeerCards(state) {
@@ -1675,6 +1716,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       disconnectButton: wrap.querySelector('[data-mesh-disconnect]'),
       nodesButton: wrap.querySelector('[data-mesh-nodes]'),
       log: wrap.querySelector('[data-mesh-log]'),
+      peerFilter: wrap.querySelector('[data-mesh-peer-filter]'),
       peerBar: wrap.querySelector('[data-mesh-peer-bar]'),
       messages: wrap.querySelector('[data-mesh-messages]'),
       chatHeader: wrap.querySelector('[data-mesh-chat-header]'),
@@ -1707,6 +1749,13 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (state.ui.shareLocStop) state.ui.shareLocStop.disabled = true;
     if (state.ui.shareLocStart) state.ui.shareLocStart.disabled = false;
     if (state.ui.shareDest) state.ui.shareDest.value = state.ui.shareDest.value || 'current';
+    if (state.ui.peerFilter) {
+      state.ui.peerFilter.value = state.peerSearch || '';
+      state.ui.peerFilter.addEventListener('input', () => {
+        state.peerSearch = state.ui.peerFilter.value || '';
+        renderPeerChips(state);
+      });
+    }
     state.ui.portButton?.addEventListener('click', async () => {
       if (!('serial' in navigator)) {
         setBadge?.('WebSerial unsupported', false);
@@ -1981,7 +2030,7 @@ Viewport: ${vp}`;
         _placeholder: true
       });
     }
-    const peers = peerRecords.sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
+    const basePeers = peerRecords.slice();
     const wrap = document.createElement('div');
     wrap.className = 'meshtastic-settings';
     const info = document.createElement('div');
@@ -1989,26 +2038,48 @@ Viewport: ${vp}`;
     info.style.fontSize = '12px';
     info.style.color = '#9aa3b2';
     wrap.appendChild(info);
+
+    const filterInput = document.createElement('input');
+    filterInput.type = 'text';
+    filterInput.className = 'mesh-settings-filter';
+    filterInput.placeholder = 'Filter peers…';
+    filterInput.autocomplete = 'off';
+    filterInput.spellcheck = false;
+    filterInput.value = state.settingsSearch || '';
+    wrap.appendChild(filterInput);
+
     const list = document.createElement('div');
     list.className = 'mesh-settings-peers';
-    if (!peers.length) {
-      const empty = document.createElement('div');
-      empty.textContent = 'No peers discovered yet. Connect to your Meshtastic device.';
-      empty.style.color = '#9aa3b2';
-      empty.style.fontSize = '12px';
-      list.appendChild(empty);
-    } else {
-      peers.forEach((peer) => {
+
+    const renderPeerRows = () => {
+      list.innerHTML = '';
+      const cfgNow = getConfig(nodeId);
+      const peersStateNow = cfgNow.peers || {};
+      const filterText = (state.settingsSearch || '').trim().toLowerCase();
+      if (!basePeers.length) {
+        const empty = document.createElement('div');
+        empty.textContent = 'No peers discovered yet. Connect to your Meshtastic device.';
+        empty.style.color = '#9aa3b2';
+        empty.style.fontSize = '12px';
+        list.appendChild(empty);
+        return;
+      }
+      const sorted = basePeers.slice().sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
+      let rendered = 0;
+      sorted.forEach((peer) => {
         const key = String(peer.num >>> 0);
         const defaultName = peer.user?.long_name || peer.user?.short_name || peer.user?.id || `#${peer.num}`;
-        const storedEntry = peersState[key];
+        const storedEntry = peersStateNow[key];
+        const label = storedEntry?.label || defaultName;
+        const haystack = `${label} ${peer.user?.short_name || ''} ${peer.user?.id || ''} ${formatHex(peer.num)} ${peer.num}`.toLowerCase();
+        if (filterText && !haystack.includes(filterText)) return;
         const configEntry = storedEntry
           ? { ...storedEntry }
           : {
             enabled: false,
-            json: toBoolean(cfg.defaultJson, true),
+            json: toBoolean(cfgNow.defaultJson, true),
             portName: `peer-${key}`,
-            label: defaultName
+            label
           };
         const row = document.createElement('div');
         row.className = 'mesh-peer-toggle';
@@ -2035,64 +2106,66 @@ Viewport: ${vp}`;
         toggleBtn.textContent = configEntry.enabled ? 'Enabled' : 'Disabled';
         toggleBtn.classList.toggle('active', configEntry.enabled);
         toggleBtn.addEventListener('click', () => {
-          const cfgNow = getConfig(nodeId);
-          const peersNow = { ...(cfgNow.peers || {}) };
-          const nextEnabled = !configEntry.enabled;
+          const latestCfg = getConfig(nodeId);
+          const peersNow = { ...(latestCfg.peers || {}) };
           const prior = peersNow[key] || {};
-          const next = {
+          const nextEnabled = !toBoolean(prior.enabled ?? configEntry.enabled, false);
+          peersNow[key] = {
             ...prior,
             enabled: nextEnabled,
-            json: peerJsonModeEnabled(cfgNow, key),
+            json: peerJsonModeEnabled(latestCfg, key),
             portName: prior.portName || configEntry.portName || `peer-${key}`,
             label: prior.label || configEntry.label || defaultName
           };
-          peersNow[key] = next;
           saveConfig(nodeId, { peers: peersNow });
-          configEntry.enabled = nextEnabled;
-          configEntry.portName = next.portName;
-          configEntry.label = next.label;
-          toggleBtn.textContent = nextEnabled ? 'Enabled' : 'Disabled';
-          toggleBtn.classList.toggle('active', nextEnabled);
-          badge.textContent = `port: ${next.portName}`;
           if (refreshPortsHandler) refreshPortsHandler(nodeId, 'settings-toggle');
           updatePeerCards(state);
+          renderPeerRows();
         });
         controls.appendChild(toggleBtn);
         const jsonBtn = document.createElement('button');
         jsonBtn.type = 'button';
-        const initialJson = peerJsonModeEnabled(cfg, key);
-        jsonBtn.textContent = initialJson ? 'JSON' : 'Raw';
+        jsonBtn.textContent = peerJsonModeEnabled(cfgNow, key) ? 'JSON' : 'Raw';
         jsonBtn.addEventListener('click', () => {
-          const cfgNow = getConfig(nodeId);
-          const peersNow = { ...(cfgNow.peers || {}) };
+          const latestCfg = getConfig(nodeId);
+          const peersNow = { ...(latestCfg.peers || {}) };
           const prior = peersNow[key] || {};
-          const nextJson = !peerJsonModeEnabled(cfgNow, key);
-          const next = {
+          const nextJson = !peerJsonModeEnabled(latestCfg, key);
+          peersNow[key] = {
             ...prior,
             enabled: prior.enabled ?? configEntry.enabled ?? false,
             json: nextJson,
             portName: prior.portName || configEntry.portName || `peer-${key}`,
             label: prior.label || configEntry.label || defaultName
           };
-          peersNow[key] = next;
           saveConfig(nodeId, { peers: peersNow });
-          configEntry.json = nextJson;
-          configEntry.portName = next.portName;
-          configEntry.label = next.label;
-          jsonBtn.textContent = nextJson ? 'JSON' : 'Raw';
-          badge.textContent = `port: ${next.portName}`;
           updatePeerCards(state);
+          renderPeerRows();
         });
         controls.appendChild(jsonBtn);
         const badge = document.createElement('div');
         badge.className = 'badge';
-        const badgePort = configEntry.portName || `peer-${key}`;
-        badge.textContent = `port: ${badgePort}`;
+        badge.textContent = `port: ${configEntry.portName || `peer-${key}`}`;
         controls.appendChild(badge);
         row.appendChild(controls);
         list.appendChild(row);
+        rendered += 1;
       });
-    }
+      if (!rendered) {
+        const empty = document.createElement('div');
+        empty.textContent = filterText ? 'No peers match filter' : 'No peers available';
+        empty.style.color = '#9aa3b2';
+        empty.style.fontSize = '12px';
+        list.appendChild(empty);
+      }
+    };
+
+    renderPeerRows();
+    filterInput.addEventListener('input', () => {
+      state.settingsSearch = filterInput.value || '';
+      renderPeerRows();
+    });
+
     wrap.appendChild(list);
     container.appendChild(wrap);
   }

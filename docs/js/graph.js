@@ -1933,6 +1933,7 @@ function refreshNodeResolution(force = false) {
             <div class="mesh-views">
               <div class="mesh-view active" data-mesh-view="chat">
                 <div class="mesh-chat-header" data-mesh-chat-header>Public broadcast</div>
+                <input type="text" class="mesh-peer-filter" data-mesh-peer-filter placeholder="Filter peers…" autocapitalize="none" autocomplete="off" spellcheck="false">
                 <div class="mesh-peer-bar" data-mesh-peer-bar></div>
                 <div class="mesh-messages" data-mesh-messages></div>
                 <div class="mesh-sharebar">
