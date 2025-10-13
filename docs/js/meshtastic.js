@@ -109,6 +109,7 @@ const STYLE_TEXT = `
   border-radius: 8px;
   padding: 0 5px;
   font-size: 11px;
+  min-height:unset!important;
 }
 .meshtastic-node .mesh-messages {
   flex: 1;
@@ -325,10 +326,19 @@ const PROTO_SRC = `
     uint32 module = 7;
   }
 
+  enum PortNum {
+    UNKNOWN_APP = 0;
+    TEXT_MESSAGE_APP = 1;
+    POSITION_APP = 3;
+    ROUTING_APP = 4;
+    TELEMETRY_APP = 5;
+    TEXT_MESSAGE_COMPRESSED_APP = 7;
+  }
+
   message Data {
-    uint32 portnum = 1;
-    uint32 want_response = 2;
-    bytes payload = 3;
+    PortNum portnum = 1;
+    bytes payload = 2;
+    bool want_response = 3;
     fixed32 dest = 4;
     fixed32 source = 5;
     fixed32 request_id = 6;
@@ -1025,12 +1035,13 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   }
 
   function appendMessage(state, message) {
-    const key = threadKey(message.to ?? BROADCAST_NUM);
-    appendThread(state, message.to ?? BROADCAST_NUM, message);
+    const to = message.to ?? BROADCAST_NUM;
+    const key = threadKey(to);
+    appendThread(state, to, message);
     if (state.selectedThread === key) {
-      renderMessages(state, message.to ?? BROADCAST_NUM);
+      renderMessages(state, to);
     } else {
-      setUnread(state, message.to ?? BROADCAST_NUM, 1);
+      setUnread(state, to, 1);
       renderPeerChips(state);
     }
   }
@@ -1038,21 +1049,85 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   async function sendText(state, destNum, text) {
     if (!state.writer) throw new Error('Not connected');
     await ensureProtobuf();
+    const normalized = normalizePayloadToString(text);
+    if (!normalized) return;
     const encoder = new TextEncoder();
-    const payloadBytes = encoder.encode(text);
-    const isPublic = threadKey(destNum) === 'public';
-    const dest = isPublic ? BROADCAST_NUM : (destNum >>> 0);
-    const cfg = getConfig(state.nodeId);
-    const channel = Number.isFinite(Number(cfg.channel)) ? Number(cfg.channel) : 0;
-    const data = { portnum: 1, payload: payloadBytes, want_response: false, dest };
-    const packet = { to: dest, channel, decoded: data };
-    await writeToRadio(state, { packet });
-    appendMessage(state, { me: true, display: text, ts: Date.now(), to: dest });
+    const payloadBytes = encoder.encode(normalized);
+    const destValue = resolveSendDest(state, destNum);
+    if (destValue == null) return;
+    const frame = {
+      packet: {
+        to: destValue,
+        channel: 0,
+        decoded: {
+          portnum: 1,
+          payload: payloadBytes,
+          want_response: false,
+          dest: destValue
+        }
+      }
+    };
+    await writeToRadio(state, frame);
+    appendMessage(state, { me: true, display: normalized, ts: Date.now(), to: destValue });
+  }
+
+  function normalizePayloadToString(payload) {
+    if (payload == null) return '';
+    if (typeof payload === 'string') return payload.trim();
+    if (typeof payload === 'number' || typeof payload === 'boolean') return String(payload);
+    if (payload && typeof payload === 'object') {
+      if (typeof payload.text === 'string') return payload.text;
+      if (typeof payload.value === 'string') return payload.value;
+      if (Array.isArray(payload)) {
+        return payload
+          .map((item) => normalizePayloadToString(item))
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .join(' ');
+      }
+      try {
+        return JSON.stringify(payload);
+      } catch (_) {
+        return String(payload);
+      }
+    }
+    return String(payload || '').trim();
+  }
+
+  function resolveSendDest(state, rawDest) {
+    const broadcastValue = BROADCAST_NUM >>> 0;
+    if (rawDest === BROADCAST_NUM || rawDest === 'public') {
+      return broadcastValue;
+    }
+    if (typeof rawDest === 'number' && Number.isFinite(rawDest)) {
+      return rawDest >>> 0;
+    }
+    const text = String(rawDest || '').trim();
+    if (!text) {
+      logLine(state, 'Missing destination', 'warn');
+      return null;
+    }
+    if (/^0x[0-9a-f]+$/i.test(text)) {
+      const value = Number.parseInt(text, 16);
+      if (Number.isFinite(value)) return value >>> 0;
+    }
+    const peerMatch = /^peer-(0x[0-9a-f]+|\d+)$/i.exec(text);
+    if (peerMatch) {
+      const parsed = peerMatch[1].startsWith('0x') ? Number.parseInt(peerMatch[1], 16) : Number(peerMatch[1]);
+      if (Number.isFinite(parsed)) return parsed >>> 0;
+    }
+    if (/^[0-9]+$/.test(text)) {
+      const value = Number(text);
+      if (Number.isFinite(value)) return value >>> 0;
+    }
+    logLine(state, `Invalid destination ${rawDest}`, 'warn');
+    return null;
   }
 
   async function writeToRadio(state, obj) {
     if (!state.writer) throw new Error('Not connected');
-    const payload = Types.ToRadio.encode(Types.ToRadio.create(obj)).finish();
+    const message = Types.ToRadio.create(obj);
+    const payload = Types.ToRadio.encode(message).finish();
     const header = new Uint8Array(4);
     header[0] = 0x94; header[1] = 0xc3;
     header[2] = (payload.length >>> 8) & 0xff;
@@ -1076,26 +1151,65 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
 
   function onInboundText(state, { srcDec, dstDec, text, idHex, via }) {
     if (!text) return;
-    const destKey = dstDec === BROADCAST_NUM ? 'public' : threadKey(dstDec);
-    const msg = {
+    ensurePeerRecord(state, srcDec);
+    const display = text;
+    const isBroadcast = dstDec === 0 || dstDec === BROADCAST_NUM;
+
+    const publicEntry = {
       me: false,
-      display: (destKey === 'public' ? `${formatSender(state, srcDec)}: ${text}` : text),
+      display,
+      from: srcDec,
+      to: BROADCAST_NUM,
+      ts: Date.now(),
+      id: idHex,
+      via
+    };
+
+    const peerEntry = {
+      me: false,
+      display,
       from: srcDec,
       to: dstDec,
       ts: Date.now(),
       id: idHex,
       via
     };
-    const key = threadKey(dstDec === BROADCAST_NUM ? srcDec : dstDec);
-    const target = dstDec === BROADCAST_NUM ? BROADCAST_NUM : srcDec;
-    appendThread(state, target, msg);
-    if (state.selectedThread === threadKey(target)) {
-      renderMessages(state, target);
-    } else {
-      setUnread(state, target, 1);
+
+    if (isBroadcast) {
+      appendThread(state, BROADCAST_NUM, publicEntry);
+      if (state.selectedThread === 'public') renderMessages(state, BROADCAST_NUM);
+      else {
+        setUnread(state, BROADCAST_NUM, 1);
+        renderPeerChips(state);
+      }
+
+      emitToGraph(state, publicEntry);
+      return;
+    }
+
+    const dmKey = threadKey(srcDec);
+    appendThread(state, srcDec, peerEntry);
+    if (state.selectedThread === dmKey) renderMessages(state, srcDec);
+    else {
+      setUnread(state, srcDec, 1);
       renderPeerChips(state);
     }
-    emitToGraph(state, msg);
+    emitToGraph(state, peerEntry);
+  }
+
+  function ensurePeerRecord(state, num) {
+    if (!Number.isFinite(num)) return;
+    const key = num >>> 0;
+    if (state.nodes.has(key)) return;
+    state.nodes.set(key, {
+      num: key,
+      user: {
+        id: formatHex(key),
+        short_name: formatHex(key),
+        long_name: formatHex(key)
+      },
+      last_heard: Math.floor(Date.now() / 1000)
+    });
   }
 
   function formatSender(state, num) {
@@ -1420,7 +1534,15 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (!port) throw new Error('No port selected');
     await ensureProtobuf();
     state.port = port;
-    await port.open({ baudRate: 115200 });
+    if (!(port.readable || port.writable)) {
+      await port.open({
+        baudRate: 115200,
+        dataBits: 8,
+        stopBits: 1,
+        parity: 'none',
+        flowControl: 'none'
+      });
+    }
     state.writer = port.writable?.getWriter?.();
     state.binaryAcc = new Uint8Array(0);
     state.lastConfigNonce = 0;
@@ -2058,15 +2180,20 @@ Viewport: ${vp}`;
     async sendPublic(nodeId, payload) {
       const entry = sessions.get(nodeId);
       if (!entry) throw new Error('Meshtastic node not initialized');
-      if (!payload) return;
-      await sendText(entry.state, BROADCAST_NUM, String(payload));
+      if (payload == null) return;
+      const text = normalizePayloadToString(payload);
+      if (!text) return;
+      await sendText(entry.state, BROADCAST_NUM, text);
     },
     async sendPeer(nodeId, peerKey, payload) {
       const entry = sessions.get(nodeId);
       if (!entry) throw new Error('Meshtastic node not initialized');
       const num = Number(peerKey.replace(/^peer-/, ''));
       if (!Number.isFinite(num)) throw new Error('Invalid peer key');
-      await sendText(entry.state, num, String(payload));
+      if (payload == null) return;
+      const text = normalizePayloadToString(payload);
+      if (!text) return;
+      await sendText(entry.state, num, text);
     }
   };
 }
