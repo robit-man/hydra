@@ -12,16 +12,18 @@ const STYLE_TEXT = `
 .meshtastic-node input[type="text"],
 .meshtastic-node input[type="number"],
 .meshtastic-node input[type="range"] {
-  background: #1f2550;
-  color: inherit;
-  border: 1px solid #2c3361;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  border:1px solid rgba(255, 255, 255, 0.2);
   border-radius: 6px;
   font: inherit;
   padding: 6px 8px;
-    align-self: end;
+  align-self: end;
+  height: 32px;
 }
 .meshtastic-node button:hover:not(:disabled) {
-  background: #2a3163;
+  background: rgba(255, 255, 255, 0.15);
+  cursor:pointer;
 }
 .meshtastic-node button:disabled {
   opacity: 0.45;
@@ -53,14 +55,15 @@ const STYLE_TEXT = `
   text-align: center;
   padding: 6px;
   border-radius: 6px;
-  background: #1a2040;
-  border: 1px solid #262b52;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255,255,255,0.15);
   cursor: pointer;
   user-select: none;
 }
 .meshtastic-node .mesh-tab.active {
-  background: #242d5b;
-  border-color: #3a4384;
+  background: white;
+  border-color: rgba(255,255,255,0.15);
+  color:black;
 }
 .meshtastic-node .mesh-views {
   position: relative;
@@ -89,8 +92,8 @@ const STYLE_TEXT = `
   overflow: auto;
 }
 .meshtastic-node .mesh-peer-chip {
-  background: #1b244d;
-  border: 1px solid #29315f;
+  background: #rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255,255,255,0.15);
   border-radius: 999px;
   padding: 3px 8px;
   cursor: pointer;
@@ -99,9 +102,15 @@ const STYLE_TEXT = `
   align-items: center;
   gap: 4px;
 }
+  .mesh-peer-chip:hover span { 
+  pointer-events:none;
+  cursor: pointer;
+}
+  
 .meshtastic-node .mesh-peer-chip.active {
-  background: #273375;
-  border-color: #4050a7;
+  background: var(--accent);
+  color:black;
+  border-color: rgba(255,255,255,0.1);
 }
 .meshtastic-node .mesh-peer-chip .bubble {
   background: #ef4444;
@@ -116,8 +125,8 @@ const STYLE_TEXT = `
   min-height: 80px;
   max-height: 220px;
   overflow: auto;
-  background: #151a2d;
-  border: 1px solid #21264a;
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 6px;
   padding: 8px;
   display: flex;
@@ -134,25 +143,32 @@ const STYLE_TEXT = `
 }
 .meshtastic-node .mesh-message.me {
   margin-left: auto;
-  background: #293066;
+  background: rgba(255, 255, 255, 0.1);
 }
 .meshtastic-node .mesh-message.them {
   margin-right: auto;
-  background: #1f244b;
+  background: rgba(255, 255, 255, 0.2);
 }
 .meshtastic-node .mesh-sharebar {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
-  background: #151a2d;
-  border: 1px solid #21264a;
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 6px;
   padding: 6px;
 }
 .meshtastic-node .mesh-sharebar-group {
   display: flex;
   gap: 6px;
+  flex-flow:wrap;
+  align-items: center;
+}
+.meshtastic-node .mesh-sharebar-group label {
+  display: flex;
+  gap: 6px;
+  flex-flow:wrap;
   align-items: center;
 }
 .meshtastic-node .mesh-composer {
@@ -172,7 +188,7 @@ const STYLE_TEXT = `
 .meshtastic-node .mesh-log {
   flex: 1;
   background: #0f1220;
-  border: 1px solid #21264a;
+  border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 6px;
   padding: 6px;
   font-family: ui-monospace, Consolas, monospace;
@@ -205,8 +221,8 @@ const STYLE_TEXT = `
   gap: 4px;
   padding: 6px;
   border-radius: 6px;
-  border: 1px solid #21264a;
-  background: #151a2d;
+  border: 1px solid rgba(255, 255, 255, .15);
+  background: var(--panel2);
 }
 .meshtastic-node .mesh-peer-card .title {
   font-size: 13px;
@@ -229,6 +245,7 @@ const STYLE_TEXT = `
   padding: 4px 6px;
 }
 .meshtastic-node .mesh-status-dot {
+  aspect-ratio: 1 / 1;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -253,8 +270,7 @@ const STYLE_TEXT = `
   max-height: 240px;
   overflow: auto;
   padding: 6px;
-  background: rgba(15, 18, 32, 0.8);
-  border: 1px solid #21264a;
+  border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 6px;
 }
 .meshtastic-settings .mesh-peer-toggle {
@@ -265,7 +281,7 @@ const STYLE_TEXT = `
   padding: 4px 6px;
   border-radius: 6px;
   border: 1px solid #262b4d;
-  background: #151a2d;
+  background: var(--panel2);
 }
 .meshtastic-settings .mesh-peer-toggle .info {
   flex: 1;
@@ -294,8 +310,8 @@ const STYLE_TEXT = `
   border-radius: 6px;
   padding: 2px 6px;
   font-size: 11px;
-  background: #1f2a4e;
-  color: #9aa3b2;
+  background: rgba(255,255,255,0.15);
+  color: var(--text);
 }
 .meshtastic-node .mesh-spacer {
   height: 1px;
@@ -870,26 +886,26 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     entries
       .sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0))
       .forEach((info) => {
-      const peerKey = info._peerKey || String(info.num >>> 0);
-      const stored = enabledPeers[peerKey];
-      if (!stored?.enabled) {
-        if (info._placeholder && info._peerKey) {
-          // placeholder corresponds to non-numeric key
-        } else {
-          return;
+        const peerKey = info._peerKey || String(info.num >>> 0);
+        const stored = enabledPeers[peerKey];
+        if (!stored?.enabled) {
+          if (info._placeholder && info._peerKey) {
+            // placeholder corresponds to non-numeric key
+          } else {
+            return;
+          }
         }
-      }
-      const card = document.createElement('div');
-      card.className = 'mesh-peer-card';
-      const rawName = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
-      const displayName = stored?.label || rawName;
-      let posStr = '—';
-      const ll = positionToLatLon(info.position);
-      if (ll) posStr = `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`;
-      const battery = info.device_metrics?.battery_level;
-      const voltage = info.device_metrics?.voltage;
-      const last = info.last_heard ? new Date(info.last_heard * 1000).toLocaleTimeString() : '—';
-      card.innerHTML = `
+        const card = document.createElement('div');
+        card.className = 'mesh-peer-card';
+        const rawName = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
+        const displayName = stored?.label || rawName;
+        let posStr = '—';
+        const ll = positionToLatLon(info.position);
+        if (ll) posStr = `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}`;
+        const battery = info.device_metrics?.battery_level;
+        const voltage = info.device_metrics?.voltage;
+        const last = info.last_heard ? new Date(info.last_heard * 1000).toLocaleTimeString() : '—';
+        card.innerHTML = `
         <div class="title">${escapeHtml(displayName)} <span style="font-weight:400;">#${info.num}</span></div>
         <div class="metrics">
           <span>${formatHex(info.num)}</span>
@@ -899,19 +915,19 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
           <span>pos: ${posStr}</span>
         </div>
       `;
-      const actions = document.createElement('div');
-      actions.className = 'actions';
-      const toggle = document.createElement('button');
-      toggle.textContent = peerJsonModeEnabled(cfg, peerKey) ? 'JSON output' : 'Raw output';
-      toggle.addEventListener('click', () => {
-        const current = peerJsonModeEnabled(getConfig(state.nodeId), peerKey);
-        updatePeerJsonMode(state.nodeId, peerKey, !current);
-        toggle.textContent = !current ? 'JSON output' : 'Raw output';
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        const toggle = document.createElement('button');
+        toggle.textContent = peerJsonModeEnabled(cfg, peerKey) ? 'JSON output' : 'Raw output';
+        toggle.addEventListener('click', () => {
+          const current = peerJsonModeEnabled(getConfig(state.nodeId), peerKey);
+          updatePeerJsonMode(state.nodeId, peerKey, !current);
+          toggle.textContent = !current ? 'JSON output' : 'Raw output';
+        });
+        actions.appendChild(toggle);
+        card.appendChild(actions);
+        cards.appendChild(card);
       });
-      actions.appendChild(toggle);
-      card.appendChild(actions);
-      cards.appendChild(card);
-    });
   }
 
   function peerJsonModeEnabled(cfg, peerKey) {
@@ -1883,8 +1899,8 @@ Viewport: ${vp}`;
     updateStatus(state, 'Reconnecting…', 'warn');
     logLine(state, `Scheduling reconnect ${reason ? `(${reason})` : ''} in ${state.reconnectBackoff}ms`, 'warn');
     state.reconnectTimer = setTimeout(async () => {
-        state.reconnectTimer = null;
-        try {
+      state.reconnectTimer = null;
+      try {
         await connect(state.session);
         logLine(state, 'Reconnected', 'ok');
         state.reconnectBackoff = 1000;
@@ -1989,11 +2005,11 @@ Viewport: ${vp}`;
         const configEntry = storedEntry
           ? { ...storedEntry }
           : {
-              enabled: false,
-              json: toBoolean(cfg.defaultJson, true),
-              portName: `peer-${key}`,
-              label: defaultName
-            };
+            enabled: false,
+            json: toBoolean(cfg.defaultJson, true),
+            portName: `peer-${key}`,
+            label: defaultName
+          };
         const row = document.createElement('div');
         row.className = 'mesh-peer-toggle';
         const inf = document.createElement('div');
@@ -2006,8 +2022,8 @@ Viewport: ${vp}`;
         const ll = positionToLatLon(peer.position);
         const pos = ll ? `${ll[0].toFixed(5)}, ${ll[1].toFixed(5)}` : '—';
         const battery = peer.device_metrics?.battery_level != null ? `${peer.device_metrics.battery_level}%` : '—';
-      const idLabel = peer._placeholder ? `key ${key}` : `#${peer.num}`;
-      const hexLabel = peer._placeholder ? '—' : formatHex(peer.num);
+        const idLabel = peer._placeholder ? `key ${key}` : `#${peer.num}`;
+        const hexLabel = peer._placeholder ? '—' : formatHex(peer.num);
         meta.textContent = `${idLabel} • ${hexLabel} • batt ${battery} • pos ${pos}`;
         inf.appendChild(name);
         inf.appendChild(meta);

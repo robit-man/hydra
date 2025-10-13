@@ -1767,38 +1767,38 @@ function refreshNodeResolution(force = false) {
           <div class="side right"></div>
         </div>
         ${node.type === 'ASR' ? `
-          <canvas data-asr-vis style="margin-top:6px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px"></canvas>
-          <div class="asr-partial-row" style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
+          <canvas data-asr-vis style="pointer-events:auto;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px"></canvas>
+          <div class="asr-partial-row" style="pointer-events:auto;display:flex;align-items:center;justify-content:space-between;gap:10px;">
             <div class="muted" data-asr-partial-flag data-state="idle">Waiting</div>
             <div class="asr-rms" data-asr-rms data-state="idle">0.000</div>
           </div>
           <div class="bubble" data-asr-partial style="min-height:28px"></div>
-          <div class="muted" style="margin-top:6px;">Finals</div>
+          <div class="muted" style="pointer-events:auto;">Finals</div>
           <div class="code" data-asr-final style="min-height:60px;max-height:360px"></div>
         ` : ''}
         ${node.type === 'TTS' ? `
-          <div class="row" style="margin-top:6px;align-items:center;justify-content:space-between;gap:12px;">
+          <div class="row" style="pointer-events:auto;align-items:center;justify-content:space-between;gap:12px;">
               <input type="range" min="0" max="1" step="0.01" data-tts-volume class="slider" style="width:100%;">
           </div>
           <canvas data-tts-vis style="margin-top:4px;width:100%;height:56px;background:rgba(0,0,0,.25);border-radius:4px"></canvas>
-          <audio data-tts-audio controls style="margin-top:6px;display:none;"></audio>
+          <audio data-tts-audio controls style="pointer-events:auto;display:none;"></audio>
         ` : ''}
         ${node.type === 'LLM' ? `
-          <div class="muted" style="margin-top:6px;">Output</div>
+          <div class="muted" style="pointer-events:auto;">Output</div>
           <div class="code" data-llm-out style="min-height:60px;max-height:360px;overflow:auto;white-space:pre-wrap"></div>
         ` : ''}
         ${node.type === 'MCP' ? `
-          <div class="muted" style="margin-top:6px;">Status</div>
+          <div class="muted" style="pointer-events:auto;">Status</div>
           <div class="bubble" data-mcp-status>(idle)</div>
-          <div class="muted" style="margin-top:6px;">Server</div>
+          <div class="muted" style="pointer-events:auto;">Server</div>
           <div class="code" data-mcp-server style="min-height:48px;max-height:360px;overflow:auto;"></div>
-          <div class="muted" style="margin-top:6px;">Resources</div>
+          <div class="muted" style="pointer-events:auto;">Resources</div>
           <div class="code" data-mcp-resources style="min-height:48px;max-height:360px;overflow:auto;"></div>
-          <div class="muted" style="margin-top:6px;">Last Context</div>
+          <div class="muted" style="pointer-events:auto;">Last Context</div>
           <div class="code" data-mcp-context style="min-height:60px;max-height:160px;overflow:auto;white-space:pre-wrap"></div>
         ` : ''}
         ${node.type === 'MediaStream' ? `
-          <div class="muted" style="margin-top:6px;">Local Preview</div>
+          <div class="muted" style="pointer-events:auto;">Local Preview</div>
           <div class="media-preview-wrap" data-media-local-wrap>
             <video class="media-preview" data-media-local autoplay playsinline muted></video>
             <button type="button" class="ghost media-flash hidden" data-media-flash title="Toggle flashlight">🔦</button>
@@ -1816,7 +1816,7 @@ function refreshNodeResolution(force = false) {
           <div class="media-remote-grid" data-media-remote-grid>
             <div class="tiny media-remote-empty" data-media-remote-empty>(no remote streams)</div>
           </div>
-          <div class="muted" data-media-status style="margin-top:6px;">Ready</div>
+          <div class="muted" data-media-status style="pointer-events:auto;">Ready</div>
         ` : ''}
         ${node.type === 'Meshtastic' ? `
           <div class="meshtastic-node" data-mesh-root>
@@ -1880,25 +1880,25 @@ function refreshNodeResolution(force = false) {
           </div>
         ` : ''}
         ${node.type === 'Orientation' ? `
-          <div class="muted" style="margin-top:6px;">Orientation</div>
+          <div class="muted" style="pointer-events:auto;">Orientation</div>
           <div class="code" data-orientation-status style="min-height:28px">Idle</div>
         ` : ''}
         ${node.type === 'Location' ? `
-          <div class="muted" style="margin-top:6px;">Location</div>
+          <div class="muted" style="pointer-events:auto;">Location</div>
           <div class="code" data-location-status style="min-height:28px">Idle</div>
         ` : ''}
         ${node.type === 'NknDM' ? `
-          <div class="muted" style="margin-top:6px;">Local Address</div>
+          <div class="muted" style="pointer-events:auto;">Local Address</div>
           <div class="dm-address-row">
             <div class="bubble" data-nkndm-local style="min-height:24px">(offline)</div>
             <button type="button" class="ghost" data-nkndm-copy>Copy</button>
             <span class="dm-indicator offline" data-nkndm-indicator title="Offline"></span>
           </div>
-          <div class="row" style="margin-top:6px;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="row" style="pointer-events:auto;align-items:center;gap:8px;flex-wrap:wrap;">
             <button type="button" class="ghost" data-nkndm-autochunk>Auto chunk: off</button>
             <span class="tiny" data-nkndm-chunk-note>Chunk Size</span>
           </div>
-          <div class="muted" style="margin-top:6px;">Peer</div>
+          <div class="muted" style="pointer-events:auto;">Peer</div>
           <div class="dm-peer-row">
             <div class="bubble" data-nkndm-peer style="min-height:24px">(none)</div>
             <div class="dm-peer-actions hidden" data-nkndm-actions>
@@ -1906,11 +1906,11 @@ function refreshNodeResolution(force = false) {
               <button type="button" class="ghost" data-nkndm-revoke title="Remove trust">✖</button>
             </div>
           </div>
-          <div class="muted" style="margin-top:6px;">Log</div>
+          <div class="muted" style="pointer-events:auto;">Log</div>
           <div class="code" data-nkndm-log style="min-height:60px;max-height:360px"></div>
         ` : ''}
         ${node.type === 'TextInput' ? `
-          <div class="text-input-area" style="margin-top:6px;">
+          <div class="text-input-area" style="pointer-events:auto;">
             <textarea data-textinput-field placeholder="Type a message…"></textarea>
             <div class="text-input-actions">
               <button type="button" class="secondary" data-textinput-send>Send</button>
@@ -1918,20 +1918,20 @@ function refreshNodeResolution(force = false) {
           </div>
         ` : ''}
         ${node.type === 'TextDisplay' ? `
-          <div class="muted" style="margin-top:6px;">Latest Text</div>
+          <div class="muted" style="pointer-events:auto;">Latest Text</div>
           <div class="text-display-wrap" data-textdisplay-wrap style="position:relative;margin-top:4px;">
             <button type="button" class="ghost" data-textdisplay-copy title="Copy" style="position:absolute;top:4px;right:4px;padding:2px 8px;line-height:1.2;">Copy</button>
             <div class="bubble" data-textdisplay-content style="min-height:48px;padding-right:48px;white-space:pre-wrap;word-break:break-word;"></div>
           </div>
         ` : ''}
         ${node.type === 'Template' ? `
-          <div class="template-editor" style="margin-top:6px;">
+          <div class="template-editor" style="pointer-events:auto;">
             <textarea data-template-editor placeholder="Hello {name}, welcome to {place}."></textarea>
             <div class="template-preview" data-template-preview></div>
           </div>
         ` : ''}
         ${node.type === 'LogicGate' ? `
-          <div class="muted" style="margin-top:6px;">Rules</div>
+          <div class="muted" style="pointer-events:auto;">Rules</div>
           <div class="logic-gate-list" data-logic-gate></div>
         ` : ''}
         ${node.type === 'FileTransfer' ? `
@@ -1970,7 +1970,7 @@ function refreshNodeResolution(force = false) {
           </div>
         ` : ''}
         ${node.type === 'ImageInput' ? `
-          <div class="image-input" style="margin-top:6px;">
+          <div class="image-input" style="pointer-events:auto;">
             <div class="image-input-drop" data-image-drop>
               <input type="file" accept="image/*" hidden />
               <div class="image-input-instructions">Drop image, paste, or click to upload</div>

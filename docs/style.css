@@ -4,7 +4,7 @@
   --bg: #000000;
   --panel: rgba(255, 255, 255, .07);
   --panel2: rgba(255, 255, 255, .05);
-  --accent: #00ff00;
+  --accent: #5ee3a6;
   --accent2: #a8ff60;
   --text: #e8f1f8;
   --muted: #a9b6c3;
@@ -1276,7 +1276,6 @@ button.danger {
   border-radius: 4px;
   padding: 10px;
   white-space: pre-wrap;
-  margin-top: 6px;
   max-height: 260px;
   overflow: auto
 }
@@ -1594,7 +1593,7 @@ button.danger {
 }
 
 .node .resizeHandle:hover {
-  border-color: #00ff00 !important;
+  border-color: var(--accent) !important;
 
   width: 4rem !important;
   height: 4rem !important;
@@ -1789,6 +1788,9 @@ button.danger {
   border: 1px solid rgba(255, 255, 255, 1);
   border-top-width: 0px !important;
   cursor: grab;
+    display: flex;
+    flex-flow: column;
+    gap: 0.5rem;
 }
 
 .node .body * {
