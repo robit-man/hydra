@@ -34,6 +34,7 @@ function createGraph({
     view: { x: 0, y: 0, scale: 1 },
     _redrawReq: false,
     selectedNodeId: null,
+    selectedNodes: new Set(),
     clipboard: null,
     lastPointer: null
   };
@@ -412,28 +413,102 @@ function createGraph({
     return Boolean(target.closest('[contenteditable="true"]'));
   };
 
-  function setSelectedNode(nodeId, { focus = false } = {}) {
-    if (WS.selectedNodeId === nodeId) {
-      if (focus && nodeId) WS.nodes.get(nodeId)?.el?.focus?.({ preventScroll: true });
-      return;
-    }
-    if (WS.selectedNodeId) {
-      const prev = WS.nodes.get(WS.selectedNodeId);
-      prev?.el?.classList.remove('selected');
-    }
-    WS.selectedNodeId = nodeId || null;
-    if (!nodeId) return;
+  const ensureSelectionSet = () => {
+    if (!WS.selectedNodes) WS.selectedNodes = new Set();
+  };
+
+  function updateSelectionClass(nodeId, selected) {
     const node = WS.nodes.get(nodeId);
     if (!node?.el) return;
-    node.el.classList.add('selected');
-    if (focus) node.el.focus?.({ preventScroll: true });
+    node.el.classList.toggle('selected', Boolean(selected));
+  }
+
+  function isNodeSelected(nodeId) {
+    ensureSelectionSet();
+    return WS.selectedNodes.has(nodeId);
+  }
+
+  function setSelectedNode(nodeId, { focus = false, additive = false, toggle = false } = {}) {
+    ensureSelectionSet();
+    if (nodeId == null) {
+      if (!WS.selectedNodes.size) return;
+      WS.selectedNodes.forEach((id) => updateSelectionClass(id, false));
+      WS.selectedNodes.clear();
+      WS.selectedNodeId = null;
+      return;
+    }
+    const already = WS.selectedNodes.has(nodeId);
+    if (toggle) {
+      if (already) {
+        WS.selectedNodes.delete(nodeId);
+        updateSelectionClass(nodeId, false);
+        if (WS.selectedNodeId === nodeId) {
+          WS.selectedNodeId = WS.selectedNodes.size ? Array.from(WS.selectedNodes).slice(-1)[0] : null;
+        }
+        return;
+      }
+      WS.selectedNodes.add(nodeId);
+      updateSelectionClass(nodeId, true);
+      WS.selectedNodeId = nodeId;
+    } else if (additive) {
+      if (!already) {
+        WS.selectedNodes.add(nodeId);
+        updateSelectionClass(nodeId, true);
+      }
+      WS.selectedNodeId = nodeId;
+    } else {
+      if (already && WS.selectedNodes.size === 1) {
+        WS.selectedNodeId = nodeId;
+        if (focus) WS.nodes.get(nodeId)?.el?.focus?.({ preventScroll: true });
+        return;
+      }
+      WS.selectedNodes.forEach((id) => {
+        if (id !== nodeId) updateSelectionClass(id, false);
+      });
+      WS.selectedNodes.clear();
+      WS.selectedNodes.add(nodeId);
+      updateSelectionClass(nodeId, true);
+      WS.selectedNodeId = nodeId;
+    }
+    if (!WS.selectedNodes.size) {
+      WS.selectedNodeId = null;
+    } else if (!WS.selectedNodes.has(WS.selectedNodeId)) {
+      WS.selectedNodeId = Array.from(WS.selectedNodes).slice(-1)[0];
+    }
+    if (focus && WS.selectedNodeId) {
+      WS.nodes.get(WS.selectedNodeId)?.el?.focus?.({ preventScroll: true });
+    }
+  }
+
+  function deselectNode(nodeId) {
+    ensureSelectionSet();
+    if (!WS.selectedNodes.delete(nodeId)) return;
+    updateSelectionClass(nodeId, false);
+    if (WS.selectedNodeId === nodeId) {
+      WS.selectedNodeId = WS.selectedNodes.size ? Array.from(WS.selectedNodes).slice(-1)[0] : null;
+    }
   }
 
   function clearSelectedNode() {
-    if (!WS.selectedNodeId) return;
-    const node = WS.nodes.get(WS.selectedNodeId);
-    node?.el?.classList.remove('selected');
-    WS.selectedNodeId = null;
+    setSelectedNode(null);
+  }
+
+  function selectAllNodes() {
+    ensureSelectionSet();
+    if (!WS.nodes.size) {
+      clearSelectedNode();
+      return;
+    }
+    WS.selectedNodes.clear();
+    WS.nodes.forEach((n, id) => {
+      if (!n?.el) return;
+      WS.selectedNodes.add(id);
+      n.el.classList.add('selected');
+    });
+    WS.selectedNodeId = Array.from(WS.selectedNodes)[WS.selectedNodes.size - 1] || null;
+    if (WS.selectedNodeId) {
+      WS.nodes.get(WS.selectedNodeId)?.el?.focus?.({ preventScroll: true });
+    }
   }
 
   function updatePointerLocation(e) {
@@ -1676,9 +1751,26 @@ function refreshNodeResolution(force = false) {
     el.tabIndex = 0;
     el.addEventListener('pointerdown', (evt) => {
       if (evt.button !== undefined && evt.button !== 0) return;
-      setSelectedNode(node.id);
+      const toggle = evt.ctrlKey || evt.metaKey;
+      const additive = !toggle && evt.shiftKey;
+      if (toggle) {
+        setSelectedNode(node.id, { toggle: true, focus: true });
+      } else if (additive) {
+        setSelectedNode(node.id, { additive: true, focus: true });
+      } else if (isNodeSelected(node.id) && WS.selectedNodes.size > 1) {
+        setSelectedNode(node.id, { additive: true, focus: true });
+      } else {
+        setSelectedNode(node.id, { focus: true });
+      }
     });
-    el.addEventListener('focus', () => setSelectedNode(node.id));
+    el.addEventListener('focus', () => {
+      const multi = WS.selectedNodes?.size > 1;
+      if (multi && isNodeSelected(node.id)) {
+        node.el.focus?.({ preventScroll: true });
+        return;
+      }
+      setSelectedNode(node.id, { focus: true });
+    });
 
     node.sizeLocked = Boolean(node.sizeLocked);
     let headEl = null;
@@ -2346,28 +2438,54 @@ function refreshNodeResolution(force = false) {
 
     const startNodeDrag = (sourceEl, e) => {
       if (e.button !== undefined && e.button !== 0) return;
+      if (!isNodeSelected(node.id)) setSelectedNode(node.id, { focus: true });
       const start = clientToWorkspace(e.clientX, e.clientY);
+      const ids = WS.selectedNodes && WS.selectedNodes.size
+        ? Array.from(WS.selectedNodes)
+        : [node.id];
+      const nodes = ids
+        .map((id) => {
+          const target = WS.nodes.get(id);
+          if (!target?.el) return null;
+          return {
+            id,
+            node: target,
+            el: target.el,
+            dx: start.x - (target.x || 0),
+            dy: start.y - (target.y || 0)
+          };
+        })
+        .filter(Boolean);
+      if (!nodes.length) return;
       drag = {
         pointerId: e.pointerId,
-        dx: start.x - (node.x || 0),
-        dy: start.y - (node.y || 0)
+        nodes,
+        moved: false
       };
-      setSelectedNode(node.id);
       sourceEl.setPointerCapture?.(e.pointerId);
     };
 
     const handlePointerMove = (e) => {
       if (!drag || e.pointerId !== drag.pointerId) return;
       const p = clientToWorkspace(e.clientX, e.clientY);
-      const prevX = node.x || 0;
-      const prevY = node.y || 0;
-      const gx = Math.round((p.x - drag.dx) / GRID_SIZE) * GRID_SIZE;
-      const gy = Math.round((p.y - drag.dy) / GRID_SIZE) * GRID_SIZE;
-      if (gx !== prevX || gy !== prevY) {
-        el.style.left = `${gx}px`;
-        el.style.top = `${gy}px`;
-        node.x = gx;
-        node.y = gy;
+      let changed = false;
+      drag.nodes.forEach((entry) => {
+        const target = entry.node;
+        const targetEl = entry.el;
+        const prevX = target.x || 0;
+        const prevY = target.y || 0;
+        const gx = Math.round((p.x - entry.dx) / GRID_SIZE) * GRID_SIZE;
+        const gy = Math.round((p.y - entry.dy) / GRID_SIZE) * GRID_SIZE;
+        if (gx !== prevX || gy !== prevY) {
+          targetEl.style.left = `${gx}px`;
+          targetEl.style.top = `${gy}px`;
+          target.x = gx;
+          target.y = gy;
+          changed = true;
+        }
+      });
+      if (changed) {
+        drag.moved = true;
         playMoveBlip();
         requestRedraw();
       }
@@ -2375,8 +2493,9 @@ function refreshNodeResolution(force = false) {
 
     const handlePointerUp = (e) => {
       if (!drag || e.pointerId !== drag.pointerId) return;
+      const shouldSave = drag.moved;
       drag = null;
-      saveGraph();
+      if (shouldSave) saveGraph();
     };
 
     const bindDragSurface = (surfaceEl, guard) => {
@@ -5862,7 +5981,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     const wireSnapshots = (!History.isSilent() && connectedWires.length)
       ? connectedWires.map((w) => cloneWireForHistory(w)).filter(Boolean)
       : [];
-    if (WS.selectedNodeId === nodeId) clearSelectedNode();
+    deselectNode(nodeId);
     if (node._ro) {
       try {
         node._ro.disconnect();
@@ -6157,6 +6276,12 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
         if (e.shiftKey) saveWorkspaceAsInteractive();
         else if (requestFlowSave) requestFlowSave();
         else downloadWorkspaceFile();
+        return;
+      }
+
+      if (key === 'a') {
+        e.preventDefault();
+        selectAllNodes();
         return;
       }
 
