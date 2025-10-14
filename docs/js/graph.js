@@ -2851,9 +2851,63 @@ function refreshNodeResolution(force = false) {
     return Array.from(names);
   }
 
+  // Support inline numeric transforms in templates: any `[ ... ]` block is treated
+  // as a lightweight expression where `{var}` placeholders are replaced with the
+  // numeric value of the corresponding variable (if possible). This lets authors
+  // write templates such as `Battery: [0.1 * {millivolts} / 20] %`.
+  const TEMPLATE_EXPR_RE = /\[([^[\]]+)\]/g;
+  const NUMERIC_FRAGMENT_RE = /[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/;
+  const SAFE_EXPR_RE = /^[0-9+\-*/().\s%Ee]+$/;
+
+  function extractNumericValue(raw) {
+    if (raw == null) return Number.NaN;
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : Number.NaN;
+    if (typeof raw === 'boolean') return raw ? 1 : 0;
+    const match = String(raw).match(NUMERIC_FRAGMENT_RE);
+    if (!match) return Number.NaN;
+    const num = Number(match[0]);
+    return Number.isFinite(num) ? num : Number.NaN;
+  }
+
+  function evaluateTemplateExpression(body, vars) {
+    const trimmed = body.trim();
+    if (!trimmed) return '';
+    const rawValues = [];
+    let nonNumeric = false;
+    const substituted = trimmed.replace(TEMPLATE_VAR_RE, (_, name) => {
+      const value = vars[name];
+      rawValues.push(value != null ? String(value) : '');
+      const num = extractNumericValue(value);
+      if (!Number.isFinite(num)) {
+        nonNumeric = true;
+        return '0';
+      }
+      return String(num);
+    });
+    if (nonNumeric) {
+      if (rawValues.length === 1) return rawValues[0];
+      return rawValues.filter((v) => v.length).join(' ') || '';
+    }
+    if (!SAFE_EXPR_RE.test(substituted)) return trimmed;
+    let result;
+    try {
+      // eslint-disable-next-line no-new-func
+      result = Function(`"use strict"; return (${substituted});`)();
+    } catch (_) {
+      return trimmed;
+    }
+    if (typeof result === 'number' && Number.isFinite(result)) {
+      const rounded = Math.abs(result) < 1e6 ? Number(result.toFixed(6)) : result;
+      return String(rounded);
+    }
+    return trimmed;
+  }
+
   function renderTemplateString(template, variables) {
     const vars = variables || {};
-    return String(template || '').replace(TEMPLATE_VAR_RE, (_, name) => {
+    const templateText = String(template || '');
+    const withMath = templateText.replace(TEMPLATE_EXPR_RE, (_, exprBody) => evaluateTemplateExpression(exprBody, vars));
+    return withMath.replace(TEMPLATE_VAR_RE, (_, name) => {
       const value = vars[name];
       return value != null ? String(value) : '';
     });
