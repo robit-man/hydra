@@ -13,6 +13,7 @@ function createGraph({
   FileTransfer,
   MCP,
   Meshtastic,
+  WebSerial,
   Net,
   CFG,
   saveCFG,
@@ -1208,6 +1209,10 @@ function refreshNodeResolution(force = false) {
       if (portName === 'packet') return NknDM.onPacket(node.id, payload);
       return;
     }
+    if (node.type === 'WebSerial') {
+      if (portName === 'send') return WebSerial.onSend(node.id, payload);
+      return;
+    }
     if (node.type === 'FileTransfer') {
       if (portName === 'incoming') return FileTransfer.onIncoming(node.id, payload);
       if (portName === 'file') return FileTransfer.onFilePayload(node.id, payload);
@@ -1972,6 +1977,48 @@ function refreshNodeResolution(force = false) {
             </div>
           </div>
         ` : ''}
+        ${node.type === 'WebSerial' ? `
+          <div class="webserial-node" data-webserial-root>
+            <div class="mesh-header">
+              <div class="mesh-main-controls">
+                <button type="button" data-webserial-choose>Choose Port…</button>
+                <button type="button" data-webserial-connect disabled>Connect</button>
+                <button type="button" data-webserial-disconnect disabled>Disconnect</button>
+                <button type="button" data-webserial-clear>Clear Log</button>
+              </div>
+              <div class="mesh-status-line">
+                <span class="mesh-status-dot" data-webserial-status-dot></span>
+                <span data-webserial-status>Disconnected</span>
+              </div>
+            </div>
+            <div class="webserial-baud" style="display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap;">
+              <label style="display:flex;align-items:center;gap:6px;">
+                Baud
+                <select data-webserial-baud>
+                  <option value="9600">9600</option>
+                  <option value="14400">14400</option>
+                  <option value="19200">19200</option>
+                  <option value="28800">28800</option>
+                  <option value="38400">38400</option>
+                  <option value="57600">57600</option>
+                  <option value="74880">74880</option>
+                  <option value="115200" selected>115200</option>
+                  <option value="230400">230400</option>
+                  <option value="460800">460800</option>
+                  <option value="921600">921600</option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </label>
+              <input type="number" data-webserial-baud-custom placeholder="Custom" style="width:120px;">
+              <button type="button" data-webserial-baud-apply>Set</button>
+            </div>
+            <div class="webserial-log" data-webserial-log></div>
+            <div class="mesh-composer" style="margin-top:8px;">
+              <input type="text" data-webserial-send-input placeholder="Send data…" autocomplete="off" spellcheck="false">
+              <button type="button" data-webserial-send-button disabled>Send</button>
+            </div>
+          </div>
+        ` : ''}
         ${node.type === 'Orientation' ? `
           <div class="muted" style="pointer-events:auto;">Orientation</div>
           <div class="code" data-orientation-status style="min-height:28px">Idle</div>
@@ -2423,6 +2470,10 @@ function refreshNodeResolution(force = false) {
 
     if (node.type === 'Meshtastic') {
       initMeshtasticNode(node);
+    }
+
+    if (node.type === 'WebSerial') {
+      WebSerial.init(node.id);
     }
 
     if (node.type === 'Template') {
@@ -3316,6 +3367,24 @@ function refreshNodeResolution(force = false) {
         { key: 'channel', label: 'Channel', type: 'number', def: 0 },
         { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
         { key: 'defaultJson', label: 'Default JSON Output', type: 'select', options: ['true', 'false'], def: 'true' }
+      ]
+    },
+    WebSerial: {
+      title: 'WebSerial',
+      supportsNkn: false,
+      inputs: [{ name: 'send', label: 'Send' }],
+      outputs: [{ name: 'data', label: 'Data' }],
+      schema: [
+        { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['false', 'true'], def: 'false' },
+        { key: 'autoReconnect', label: 'Auto Reconnect', type: 'select', options: ['true', 'false'], def: 'true' },
+        { key: 'rememberPort', label: 'Remember Port', type: 'select', options: ['true', 'false'], def: 'true' },
+        { key: 'baudRate', label: 'Baud Rate', type: 'number', def: 115200 },
+        { key: 'encoding', label: 'Encoding', type: 'text', placeholder: 'utf-8', def: 'utf-8' },
+        { key: 'writeMode', label: 'Write Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
+        { key: 'readMode', label: 'Read Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
+        { key: 'appendNewline', label: 'Append Newline', type: 'select', options: ['false', 'true'], def: 'false' },
+        { key: 'newline', label: 'Newline', type: 'text', def: '\\n', placeholder: '\\n' },
+        { key: 'maxLogLines', label: 'Max Log Lines', type: 'number', def: 500 }
       ]
     },
     Orientation: {
@@ -5750,6 +5819,9 @@ function refreshNodeResolution(force = false) {
       fields.appendChild(meshLabel);
       Meshtastic.renderSettings?.(node.id, fields);
     }
+    if (node.type === 'WebSerial') {
+      WebSerial.renderSettings?.(node.id, fields);
+    }
 
     convertBooleanSelectsIn(fields);
     if (!fields._boolToggleObserver) {
@@ -6185,6 +6257,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'Meshtastic') {
       Meshtastic.dispose?.(nodeId);
     }
+    if (node.type === 'WebSerial') {
+      WebSerial.dispose?.(nodeId);
+    }
 
     connectedWires.forEach((w) => detachWire(w));
     node.el.remove();
@@ -6217,6 +6292,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
       { type: 'Meshtastic', label: 'Meshtastic', x: 260, y: 120 },
+      { type: 'WebSerial', label: 'Web Serial', x: 320, y: 120 },
       { type: 'Orientation', label: 'Orientation', x: 220, y: 260 },
       { type: 'Location', label: 'Location', x: 200, y: 320 }
     ];

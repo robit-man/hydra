@@ -19,6 +19,7 @@ import { createWorkspaceSync } from './workspaceSync.js';
 import { createGraph } from './graph.js';
 import { createFlowsLibrary } from './flows.js';
 import { createMeshtastic } from './meshtastic.js';
+import { createWebSerial } from './webSerial.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -130,6 +131,14 @@ const Meshtastic = createMeshtastic({
   setBadge
 });
 
+const WebSerial = createWebSerial({
+  getNode: (id) => graphAccess.getNode(id),
+  NodeStore,
+  Router,
+  log,
+  setBadge
+});
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -143,6 +152,7 @@ const Graph = createGraph({
   FileTransfer,
   MCP,
   Meshtastic,
+  WebSerial,
   Net,
   CFG,
   saveCFG,

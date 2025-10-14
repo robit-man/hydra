@@ -45,6 +45,19 @@ const normalizeBoolChoice = (value) => {
   return null;
 };
 
+function toBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (value == null) return fallback;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = normalizeBoolChoice(value);
+  if (normalized !== null) return normalized;
+  if (typeof value === 'string') {
+    const num = Number(value);
+    if (Number.isFinite(num)) return num !== 0;
+  }
+  return fallback;
+}
+
 function convertBooleanSelect(select) {
   if (!select) return null;
   const options = Array.from(select.options || []);
@@ -126,6 +139,7 @@ export {
   b64ToBytes,
   convertBooleanSelect,
   convertBooleanSelects,
+  toBoolean,
   j,
   log,
   setBadge

@@ -169,6 +169,21 @@ const NodeStore = {
       defaultJson: true,
       peers: {},
       lastPortInfo: null
+    },
+    WebSerial: {
+      autoConnect: false,
+      autoReconnect: true,
+      rememberPort: true,
+      baudRate: 115200,
+      customBaud: '',
+      encoding: 'utf-8',
+      appendNewline: false,
+      newline: '\n',
+      writeMode: 'text',
+      readMode: 'text',
+      echoSent: false,
+      maxLogLines: 500,
+      lastPortInfo: null
     }
   },
 

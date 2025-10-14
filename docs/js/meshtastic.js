@@ -39,6 +39,15 @@ const STYLE_TEXT = `
   flex-wrap: wrap;
   gap: 6px;
 }
+  .mesh-header{display:flex;
+  flex-flow:column;gap:0.5rem;}
+
+  .mesh-main-controls{
+  gap:0.5rem;
+  flex-flow:wrap;
+  display:flex;
+  }
+
 .meshtastic-node .mesh-status-line {
   display: flex;
   align-items: center;
@@ -97,6 +106,23 @@ const STYLE_TEXT = `
 }
 .meshtastic-settings .mesh-settings-filter {
   margin: 8px 0;
+}
+  .webserial-node{
+  display:flex;flex-flow:column;gap:0.5rem;}
+.webserial-node .webserial-log {
+  background: #0f1220;
+  border: 1px solid #21264a;
+  border-radius: 6px;
+  min-height: 120px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: #e7e8ee;
+}
+.webserial-node .mesh-composer {
+  margin-top: 8px;
 }
 .meshtastic-node .mesh-peer-bar {
   display: flex;
@@ -187,6 +213,10 @@ const STYLE_TEXT = `
   align-items: center;
 }
 .meshtastic-node .mesh-composer {
+  display: flex;
+  gap: 6px;
+}
+.webserial-node .mesh-composer {
   display: flex;
   gap: 6px;
 }
