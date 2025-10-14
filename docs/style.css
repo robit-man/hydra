@@ -984,6 +984,73 @@ input.relay-disabled {
   opacity: 0.6;
 }
 
+.filter-token-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.filter-token-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.filter-token-input-row input {
+  flex: 1 1 auto;
+}
+
+.filter-token-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.filter-token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+
+.filter-token-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.filter-token-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-token-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  line-height: 1;
+}
+
+.filter-token-remove:hover {
+  color: var(--text);
+}
+
+.filter-token-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .model-picker {
   display: flex;
   flex-direction: column;

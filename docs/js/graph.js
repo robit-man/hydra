@@ -3220,6 +3220,7 @@ function refreshNodeResolution(force = false) {
         { key: 'api', label: 'API Key', type: 'text' },
         { key: 'model', label: 'Voice/Model', type: 'select', options: [] },
         { key: 'mode', label: 'Mode', type: 'select', options: ['stream', 'file'], def: 'stream' },
+        { key: 'filterTokens', label: 'Filter List', type: 'filterList', def: ['#'], placeholder: 'Character or phrase to strip', note: 'Emoji are always removed before synthesis.' },
         { key: 'muteSignalMode', label: 'Mute Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' },
         { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
       ]
@@ -4487,6 +4488,132 @@ function refreshNodeResolution(force = false) {
     return wrap;
   }
 
+  function createFilterListEditor(field, cfg) {
+    const wrap = document.createElement('div');
+    wrap.className = 'filter-token-editor';
+
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = field.key;
+    wrap.appendChild(hidden);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'filter-token-input-row';
+    wrap.appendChild(inputRow);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = field.placeholder || 'Add filter';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    inputRow.appendChild(input);
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'ghost filter-token-add';
+    addBtn.textContent = 'Add';
+    inputRow.appendChild(addBtn);
+
+    const note = document.createElement('div');
+    note.className = 'filter-token-note tiny muted';
+    note.textContent = field.note || 'Filters are stripped before synthesis.';
+    wrap.appendChild(note);
+
+    const list = document.createElement('div');
+    list.className = 'filter-token-list';
+    wrap.appendChild(list);
+
+    const normalizeValue = (value) => {
+      let text = String(value ?? '');
+      try {
+        text = text.normalize('NFKC');
+      } catch (err) {
+        // ignore
+      }
+      return text.trim();
+    };
+
+    const normalizeTokens = (items) => {
+      const out = [];
+      const seen = new Set();
+      if (!Array.isArray(items)) return out;
+      items.forEach((value) => {
+        const normalized = normalizeValue(value);
+        if (!normalized) return;
+        if (seen.has(normalized)) return;
+        seen.add(normalized);
+        out.push(normalized);
+      });
+      return out;
+    };
+
+    let tokens = normalizeTokens(
+      Array.isArray(cfg?.[field.key]) ? cfg[field.key] : (Array.isArray(field.def) ? field.def : [])
+    );
+
+    const render = () => {
+      tokens = normalizeTokens(tokens);
+      hidden.value = JSON.stringify(tokens);
+      list.innerHTML = '';
+      if (!tokens.length) {
+        const empty = document.createElement('div');
+        empty.className = 'filter-token-empty tiny muted';
+        empty.textContent = 'No filters configured.';
+        list.appendChild(empty);
+        return;
+      }
+      tokens.forEach((token, index) => {
+        const chip = document.createElement('span');
+        chip.className = 'filter-token-chip';
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'filter-token-label';
+        labelSpan.textContent = token;
+        chip.appendChild(labelSpan);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'filter-token-remove';
+        removeBtn.textContent = 'x';
+        removeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          tokens = tokens.filter((_, idx) => idx !== index);
+          render();
+        });
+        chip.appendChild(removeBtn);
+
+        list.appendChild(chip);
+      });
+    };
+
+    const addToken = (value) => {
+      const normalized = normalizeValue(value);
+      if (!normalized) return;
+      if (tokens.includes(normalized)) return;
+      tokens = [...tokens, normalized];
+      render();
+    };
+
+    addBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      addToken(input.value);
+      input.value = '';
+      input.focus();
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addToken(input.value);
+        input.value = '';
+        input.focus();
+      }
+    });
+
+    render();
+    return wrap;
+  }
+
   function initTextInputNode(node) {
     const textarea = node.el?.querySelector('[data-textinput-field]');
     const sendBtn = node.el?.querySelector('[data-textinput-send]');
@@ -4802,6 +4929,12 @@ function refreshNodeResolution(force = false) {
       }
       if (field.type === 'logicRules') {
         const editor = createLogicRulesEditor(node, field, cfg);
+        fields.appendChild(label);
+        fields.appendChild(editor);
+        continue;
+      }
+      if (field.type === 'filterList') {
+        const editor = createFilterListEditor(field, cfg);
         fields.appendChild(label);
         fields.appendChild(editor);
         continue;
@@ -5862,6 +5995,31 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
             parsed = [];
           }
           patch[k] = sanitizeLogicRules(parsed);
+          continue;
+        }
+        if (schema.type === 'filterList') {
+          let parsed = [];
+          try {
+            const raw = JSON.parse(v);
+            if (Array.isArray(raw)) parsed = raw;
+          } catch (_) {
+            parsed = [];
+          }
+          const normalized = [];
+          const seen = new Set();
+          parsed.forEach((value) => {
+            let text = String(value ?? '');
+            try {
+              text = text.normalize('NFKC');
+            } catch (err) {
+              // ignore
+            }
+            const trimmed = text.trim();
+            if (!trimmed || seen.has(trimmed)) return;
+            seen.add(trimmed);
+            normalized.push(trimmed);
+          });
+          patch[k] = normalized;
           continue;
         }
         if (schema.type === 'number' || schema.type === 'range') {

@@ -9,6 +9,46 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   const SIGNAL_TRUE_EMPTY = 'true/empty';
   const muteRequests = new Map();
   const lastActiveByNode = new Map();
+  const DEFAULT_FILTER_TOKENS = ['#'];
+  const stripEmoji = (() => {
+    try {
+      const propertyRegex = new RegExp('[\\p{Extended_Pictographic}\\p{Emoji_Presentation}]', 'gu');
+      const modifierRegex = /[\u200D\uFE0F]/g;
+      return (text) => {
+        if (!text) return '';
+        return text.replace(propertyRegex, '').replace(modifierRegex, '');
+      };
+    } catch (err) {
+      const ranges = [
+        [0x1F000, 0x1FFFF],
+        [0x1F1E6, 0x1F1FF],
+        [0x2600, 0x27BF],
+        [0x2300, 0x23FF],
+        [0xFE00, 0xFE0F],
+        [0xE0020, 0xE007F]
+      ];
+      const singles = new Set([0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299, 0x200D]);
+      return (text) => {
+        if (!text) return '';
+        let out = '';
+        for (const ch of text) {
+          const cp = ch.codePointAt(0);
+          if (!cp) continue;
+          let remove = singles.has(cp);
+          if (!remove) {
+            for (const [start, end] of ranges) {
+              if (cp >= start && cp <= end) {
+                remove = true;
+                break;
+              }
+            }
+          }
+          if (!remove) out += ch;
+        }
+        return out;
+      };
+    }
+  })();
 
   const clampVolume = (value) => {
     const num = Number(value);
@@ -735,6 +775,38 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     return out;
   }
 
+  function resolveFilterTokens(cfg) {
+    const source = Array.isArray(cfg?.filterTokens) ? cfg.filterTokens : DEFAULT_FILTER_TOKENS;
+    const seen = new Set();
+    const out = [];
+    source.forEach((token) => {
+      if (token == null) return;
+      let value = typeof token === 'string' ? token : String(token);
+      try {
+        value = value.normalize('NFKC');
+      } catch (err) {
+        // ignore
+      }
+      value = value.trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      out.push(value);
+    });
+    return out;
+  }
+
+  function applySpeakFilters(text, cfg) {
+    if (!text) return '';
+    let result = stripEmoji(text);
+    const tokens = resolveFilterTokens(cfg);
+    for (const token of tokens) {
+      if (!token) continue;
+      result = result.split(token).join('');
+    }
+    result = result.replace(/[^\S\r\n]+/g, ' ').replace(/\s*([.,?!])\s*/g, '$1 ').trim();
+    return result;
+  }
+
   function refreshUI(nodeId) {
     const st = ensure(nodeId);
     const cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
@@ -763,9 +835,12 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const eos = !!(payload && payload.eos);
     if (!raw) return;
 
+    const sanitized = sanitize(String(raw));
+    if (!sanitized) return;
+    const speakText = applySpeakFilters(sanitized, cfg);
+    if (!speakText) return;
+
     const st = ensure(nodeId);
-    const clean = sanitize(String(raw));
-    if (!clean) return;
 
     const speakOnce = async () => {
       if (usingNkn) updateRelayState('warn', mode === 'stream' ? 'Awaiting audio stream' : 'Synthesizing audio');
@@ -773,7 +848,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
         await st.ac.resume();
         showStreamUI(st);
         enqueue(st, new Float32Array(Math.round((st.sr || 22050) * 0.04)));
-        const req = { text: clean, mode: 'stream', format: 'raw', ...(model ? { model, voice: model } : {}) };
+        const req = { text: speakText, mode: 'stream', format: 'raw', ...(model ? { model, voice: model } : {}) };
         const handleBytes = (u8) => {
           if (!u8 || !u8.length) return;
           const even = (u8.length >> 1) << 1;
@@ -879,7 +954,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
           const data = await Net.postJSON(
             base,
             '/speak',
-            { text: clean, mode: 'file', format: 'ogg', ...(model ? { model, voice: model } : {}) },
+            { text: speakText, mode: 'file', format: 'ogg', ...(model ? { model, voice: model } : {}) },
             api,
             viaNkn,
             relay,

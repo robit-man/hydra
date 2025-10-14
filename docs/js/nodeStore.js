@@ -52,6 +52,7 @@ const NodeStore = {
       endpointMode: 'auto',
       mode: 'stream',
       volume: 1,
+      filterTokens: ['#'],
       muteSignalMode: 'true/false',
       activeSignalMode: 'true/false'
     },
