@@ -1474,6 +1474,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     const peersCfg = { ...(cfg.peers || {}) };
     const peerKey = String(dec);
     const existing = peersCfg[peerKey];
+    const nameKey = deviceNameKey(label);
     const label = nodeInfo.user?.long_name || nodeInfo.user?.short_name || nodeInfo.user?.id || `#${dec}`;
     let changed = false;
     if (existing) {
@@ -1482,7 +1483,8 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         next.portName = `peer-${peerKey}`;
         changed = true;
       }
-      if (!next.label && label) {
+      const existingNameKey = deviceNameKey(next.label);
+      if (label && existingNameKey !== nameKey) {
         next.label = label;
         changed = true;
       }
