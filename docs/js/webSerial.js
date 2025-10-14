@@ -38,7 +38,8 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       portInfo: cfg.lastPortInfo || null,
       ready: false,
       uiBound: false,
-      uiRoot: null
+      uiRoot: null,
+      textCarry: ''
     };
   }
 
@@ -369,6 +370,7 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     }
     state.reader = null;
     state.writer = null;
+    state.textCarry = '';
     updateButtons(state);
   }
 
@@ -412,13 +414,26 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     state.userRequestedDisconnect = false;
     cancelReconnect(state);
     try {
-      await state.port.open({ baudRate: coerceNumber(cfg.baudRate, 115200) });
+      const openOptions = {
+        baudRate: coerceNumber(cfg.baudRate, 115200),
+        dataBits: 8,
+        stopBits: 1,
+        parity: 'none',
+        bufferSize: Math.max(256, coerceNumber(cfg.bufferSize ?? 0, 0)) || 256,
+        flowControl: 'none'
+      };
+      await state.port.open(openOptions);
     } catch (err) {
       if (state.port.readable || state.port.writable) {
         appendLog(state, 'Port already open', 'warn');
       } else {
         throw err;
       }
+    }
+    try {
+      await state.port.setSignals?.({ dataTerminalReady: true, requestToSend: false });
+    } catch (_) {
+      /* setSignals not supported */
     }
     state.writer = state.port.writable?.getWriter?.() || null;
     state.reader = state.port.readable?.getReader?.() || null;
@@ -451,39 +466,75 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
 
   function startReadLoop(state) {
     stopReadLoop(state);
-    if (!state.reader) return;
+    if (!state.reader || !state.port?.readable) return;
     state.readLoopAbort = new AbortController();
     const signal = state.readLoopAbort.signal;
+    const cfg = getConfig(state.nodeId);
     const buffer = [];
+    const readMode = (cfg.readMode || 'text').toLowerCase();
+    const textEncoder = readMode === 'text' ? new TextEncoder() : null;
+    state.textCarry = '';
 
     (async () => {
       let failureDetail = '';
+      let shouldReconnect = false;
       try {
         while (true) {
           if (signal.aborted) break;
           const { value, done } = await state.reader.read();
-          if (done) break;
-          if (!value) continue;
+          if (done) {
+            failureDetail = failureDetail || 'port closed';
+            shouldReconnect = true;
+            break;
+          }
+          if (!value || !value.length) continue;
           buffer.push(value);
           const merged = mergeBuffers(buffer);
           buffer.length = 0;
-          const text = decodeBytes(state, merged);
-          if (text) {
-            appendLog(state, text);
-            Router.sendFrom(state.nodeId, 'data', buildOutputPayload(state, merged, text));
+
+          if (readMode === 'hex') {
+            const text = decodeBytes(state, merged);
+            if (text) {
+              appendLog(state, text);
+              Router.sendFrom(state.nodeId, 'data', buildOutputPayload(state, merged, text));
+            }
+            continue;
+          }
+
+          const chunk = decodeBytes(state, merged);
+          if (!chunk) continue;
+          state.textCarry += chunk;
+          let match;
+          const lineBreakRegex = /[\r\n]/g;
+          while ((match = lineBreakRegex.exec(state.textCarry))) {
+            const line = state.textCarry.slice(0, match.index).trim();
+            state.textCarry = state.textCarry.slice(match.index + 1);
+            lineBreakRegex.lastIndex = 0;
+            if (!line) continue;
+            appendLog(state, line);
+            const rawBytes = textEncoder ? textEncoder.encode(line) : new TextEncoder().encode(line);
+            Router.sendFrom(state.nodeId, 'data', buildOutputPayload(state, rawBytes, line));
+          }
+          if (state.textCarry.length > 2048) {
+            const excess = state.textCarry.slice(-512);
+            state.textCarry = excess;
           }
         }
       } catch (err) {
         if (!signal.aborted) {
           failureDetail = err?.message || String(err || 'read error');
           appendLog(state, `read error: ${failureDetail}`, 'err');
+          shouldReconnect = /device has been lost/i.test(failureDetail || '') || /NetworkError/i.test(failureDetail || '');
         }
       } finally {
-        await releaseIo(state, { closePort: !signal.aborted });
+        const closePort = !signal.aborted || shouldReconnect;
+        await releaseIo(state, { closePort });
         if (!signal.aborted) {
           updateStatus(state, 'Disconnected', 'warn');
           if (!failureDetail) appendLog(state, 'Connection closed', 'warn');
-          if (!state.userRequestedDisconnect) scheduleReconnect(state, failureDetail || 'port closed');
+          if (!state.userRequestedDisconnect && (shouldReconnect || failureDetail)) {
+            scheduleReconnect(state, failureDetail || 'port closed');
+          }
         }
       }
     })();
