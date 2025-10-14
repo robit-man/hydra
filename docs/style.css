@@ -965,7 +965,7 @@ textarea {
   display: flex;
   gap: 8px;
   align-items: center;
-  flex-flow:wrap;
+  flex-flow: wrap;
 }
 
 .input-with-btn> :first-child {
@@ -1855,9 +1855,9 @@ button.danger {
   border: 1px solid rgba(255, 255, 255, 1);
   border-top-width: 0px !important;
   cursor: grab;
-    display: flex;
-    flex-flow: column;
-    gap: 0.5rem;
+  display: flex;
+  flex-flow: column;
+  gap: 0.5rem;
 }
 
 .node .body * {
@@ -2033,6 +2033,12 @@ button.danger {
 
 .node .file-transfer-receive .tiny {
   color: rgba(255, 255, 255, 0.75);
+}
+
+.model-pull-form {
+  display: flex;
+  flex-flow: column;
+  gap: 8px;
 }
 
 .tts-volume input[type="range"] {
