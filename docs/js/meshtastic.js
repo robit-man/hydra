@@ -854,7 +854,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     let rendered = 0;
 
     const channelLabel = String(cfg?.channel ?? 0);
-    const publicHaystack = `public ch${channelLabel} broadcast`; 
+    const publicHaystack = `public ch${channelLabel} broadcast`;
     if (!filterText || publicHaystack.toLowerCase().includes(filterText)) {
       const publicChip = document.createElement('div');
       publicChip.className = 'mesh-peer-chip' + (state.selectedThread === 'public' ? ' active' : '');
@@ -2034,14 +2034,81 @@ Viewport: ${vp}`;
     const wrap = document.createElement('div');
     wrap.className = 'meshtastic-settings';
 
-
     const permissions = document.createElement('div');
-    permissions.textContent = 'sudo setfacl -m u:$USER:rw $(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null)';
+    permissions.textContent = '⚠️ If you run into issues connecting a device, you may need to adjust permissions:';
     permissions.style.fontSize = '12px';
     permissions.style.color = '#9aa3b2';
     wrap.appendChild(permissions);
 
-    
+    // helper that creates a copyable command row
+    function makeCopyable(cmd) {
+      const el = document.createElement('div');
+      el.textContent = cmd;
+      el.style.fontSize = '12px';
+      el.style.color = '#9aa3b2';
+      el.style.cursor = 'pointer';
+      el.style.userSelect = 'none';
+      el.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+      el.style.padding = '2px 6px';
+      el.style.border = '1px solid rgba(154,163,178,0.35)';
+      el.style.borderRadius = '6px';
+      el.style.display = 'inline-block';
+      el.style.marginTop = '6px';
+      el.title = 'Click to copy';
+      el.setAttribute('role', 'button');
+      el.tabIndex = 0;
+
+      async function copy() {
+        const text = cmd;
+        let ok = true;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          // fallback for older browsers
+          ok = false;
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          try {
+            document.execCommand('copy');
+            ok = true;
+          } catch {
+            ok = false;
+          }
+          document.body.removeChild(ta);
+        }
+
+        const original = el.textContent;
+        el.textContent = ok ? `${text}  ✓ copied` : `${text}  ⚠ copy failed`;
+        el.style.color = ok ? '#10b981' : '#ef4444';
+        setTimeout(() => {
+          el.textContent = original;
+          el.style.color = '#9aa3b2';
+        }, 1200);
+      }
+
+      el.addEventListener('click', copy);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          copy();
+        }
+      });
+
+      return el;
+    }
+
+    const permUpdate1 = makeCopyable('sudo setfacl -m u:$USER:rw $(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null)');
+    wrap.appendChild(permUpdate1);
+
+    const permUpdate2 = makeCopyable('sudo snap connect chromium:raw-usb');
+    wrap.appendChild(permUpdate2);
+
+
     const info = document.createElement('div');
     info.textContent = 'Select peers to expose as ports. Toggle JSON outputs per peer.';
     info.style.fontSize = '12px';
