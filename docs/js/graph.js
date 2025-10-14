@@ -1603,7 +1603,7 @@ function refreshNodeResolution(force = false) {
                 <span data-webserial-status>Disconnected</span>
               </div>
             </div>
-            <div class="webserial-baud" style="display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap;">
+            <div class="webserial-baud" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               <label style="display:flex;align-items:center;gap:6px;">
                 Baud
                 <select data-webserial-baud>
@@ -1625,7 +1625,7 @@ function refreshNodeResolution(force = false) {
               <button type="button" data-webserial-baud-apply>Set</button>
             </div>
             <div class="webserial-log" data-webserial-log></div>
-            <div class="mesh-composer" style="margin-top:8px;">
+            <div class="mesh-composer">
               <input type="text" data-webserial-send-input placeholder="Send data…" autocomplete="off" spellcheck="false">
               <button type="button" data-webserial-send-button disabled>Send</button>
             </div>

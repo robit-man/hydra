@@ -108,10 +108,13 @@ const STYLE_TEXT = `
   margin: 8px 0;
 }
   .webserial-node{
-  display:flex;flex-flow:column;gap:0.5rem;}
+  display:flex;
+  flex-flow:column;
+  gap:0.5rem;
+  }
 .webserial-node .webserial-log {
-  background: #0f1220;
-  border: 1px solid #21264a;
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .15);
   border-radius: 6px;
   min-height: 120px;
   max-height: 240px;
