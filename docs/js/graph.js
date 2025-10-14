@@ -791,6 +791,7 @@ function refreshNodeResolution(force = false) {
     if (node.type === 'Meshtastic') {
       if (portName === 'public') return Meshtastic.sendPublic?.(node.id, payload);
       if (portName.startsWith('peer-')) return Meshtastic.sendPeer?.(node.id, portName, payload);
+      if (portName === 'auto') return Meshtastic.sendAuto?.(node.id, payload);
       return;
     }
     if (node.type === 'LLM') {
@@ -3197,6 +3198,24 @@ function refreshNodeResolution(force = false) {
       active.add(portName);
       keep.add(portName);
     });
+
+    const autoMeta = Meshtastic.getAutoTarget?.(nodeId) || {};
+    const autoLabel = autoMeta.label ? `Auto ${autoMeta.label}` : 'Auto (no target)';
+    const autoInLabel = autoMeta.label ? `Auto → ${autoMeta.label}` : 'Auto (no target)';
+    const autoIn = createInputPort(node, left, 'auto', autoInLabel);
+    if (autoIn) {
+      const span = autoIn.querySelector('span:last-child');
+      if (span) span.textContent = autoInLabel;
+      autoIn.title = `${autoInLabel} (Alt-click to disconnect)`;
+    }
+    const autoOut = createOutputPort(node, right, 'auto', autoLabel);
+    if (autoOut) {
+      const span = autoOut.querySelector('span:first-child');
+      if (span) span.textContent = autoLabel;
+      autoOut.title = `${autoLabel} (Alt-click to disconnect)`;
+    }
+    active.add('auto');
+    keep.add('auto');
 
     for (const portName of Array.from(active)) {
       if (keep.has(portName)) continue;

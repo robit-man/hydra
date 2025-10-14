@@ -175,7 +175,7 @@ const GraphTypes = {
       { key: 'writeMode', label: 'Write Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
       { key: 'readMode', label: 'Read Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
       { key: 'appendNewline', label: 'Append Newline', type: 'select', options: ['false', 'true'], def: 'false' },
-      { key: 'newline', label: 'Newline', type: 'text', def: '\n', placeholder: '\n' },
+      { key: 'newline', label: 'Newline', type: 'text', def: '\\n', placeholder: '\\n' },
       { key: 'maxLogLines', label: 'Max Log Lines', type: 'number', def: 500 }
     ]
   },

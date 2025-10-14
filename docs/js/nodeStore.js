@@ -184,7 +184,7 @@ const NodeStore = {
       customBaud: '',
       encoding: 'utf-8',
       appendNewline: false,
-      newline: '\n',
+      newline: '\\n',
       writeMode: 'text',
       readMode: 'text',
       echoSent: false,

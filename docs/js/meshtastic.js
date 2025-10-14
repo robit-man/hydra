@@ -654,6 +654,12 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       peerSearch: '',
       settingsSearch: '',
       lastPortInfo: null,
+      autoTarget: {
+        peerNum: null,
+        peerKey: '',
+        label: '',
+        portName: 'public'
+      },
       heartbeatTimer: null,
       heartbeatNonce: 1,
       flushTimer: null,
@@ -1181,6 +1187,9 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     };
     await writeToRadio(state, frame);
     appendMessage(state, { me: true, display: normalized, ts: Date.now(), to: destValue });
+    if (destValue !== (BROADCAST_NUM >>> 0)) {
+      updateAutoTarget(state, destValue);
+    }
   }
 
   function normalizePayloadToString(payload) {
@@ -1330,18 +1339,59 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     return info.user?.short_name || info.user?.long_name || info.user?.id || `#${num}`;
   }
 
+  function updateAutoTarget(state, peerNum) {
+    if (!Number.isFinite(peerNum)) return;
+    const cfg = getConfig(state.nodeId);
+    const peerKey = String(peerNum >>> 0);
+    const peerCfg = cfg.peers?.[peerKey];
+    const label = peerCfg?.label || formatSender(state, peerNum) || `#${peerKey}`;
+    const portName = peerCfg?.portName || `peer-${peerKey}`;
+    state.autoTarget = {
+      peerNum: peerNum >>> 0,
+      peerKey,
+      label,
+      portName
+    };
+    if (refreshPortsHandler) refreshPortsHandler(state.nodeId, 'auto-target');
+  }
+
+  function clearAutoTarget(state) {
+    state.autoTarget = {
+      peerNum: null,
+      peerKey: '',
+      label: '',
+      portName: 'public'
+    };
+    if (refreshPortsHandler) refreshPortsHandler(state.nodeId, 'auto-target');
+  }
+
   function emitToGraph(state, message) {
     const cfg = getConfig(state.nodeId);
     const publicName = cfg?.publicPortName || 'public';
     const selectedChannel = cfg?.channel ?? 0;
     const payload = buildMessagePayload(state, message, cfg, selectedChannel);
+    const fromNum = Number.isFinite(message.from) ? (message.from >>> 0) : null;
+    const peerKey = fromNum != null ? String(fromNum) : null;
+
     if (message.to === BROADCAST_NUM || message.to === undefined || message.to === null) {
       Router.sendFrom(state.nodeId, publicName, payload);
-      return;
+    } else if (peerKey) {
+      const peerPort = (cfg?.peers?.[peerKey]?.portName) || `peer-${peerKey}`;
+      Router.sendFrom(state.nodeId, peerPort, payload);
+    } else {
+      Router.sendFrom(state.nodeId, publicName, payload);
     }
-    const peerKey = String(message.from >>> 0);
-    const peerPort = (cfg?.peers?.[peerKey]?.portName) || `peer-${peerKey}`;
-    Router.sendFrom(state.nodeId, peerPort, payload);
+
+    if (fromNum != null) {
+      updateAutoTarget(state, fromNum);
+      const autoPayload = {
+        ...payload,
+        autoTarget: { ...state.autoTarget }
+      };
+      Router.sendFrom(state.nodeId, 'auto', autoPayload);
+    } else {
+      clearAutoTarget(state);
+    }
   }
 
   function buildMessagePayload(state, message, cfg, channel) {
@@ -2076,6 +2126,7 @@ Viewport: ${vp}`;
     state.userRequestedDisconnect = true;
     await disconnectSerial(state);
     state.userRequestedDisconnect = false;
+    clearAutoTarget(state);
   }
 
   function renderSettings(nodeId, container) {
@@ -2422,6 +2473,13 @@ Viewport: ${vp}`;
       updatePeerCards(entry.state);
       renderPeerChips(entry.state);
     },
+    getAutoTarget(nodeId) {
+      const entry = sessions.get(nodeId);
+      const fallback = { peerNum: null, peerKey: '', label: '', portName: 'public' };
+      if (!entry) return fallback;
+      const target = entry.state.autoTarget || fallback;
+      return { ...fallback, ...target };
+    },
     async sendPublic(nodeId, payload) {
       const entry = sessions.get(nodeId);
       if (!entry) throw new Error('Meshtastic node not initialized');
@@ -2439,6 +2497,18 @@ Viewport: ${vp}`;
       const text = normalizePayloadToString(payload);
       if (!text) return;
       await sendText(entry.state, num, text);
+    },
+    async sendAuto(nodeId, payload) {
+      const entry = sessions.get(nodeId);
+      if (!entry) throw new Error('Meshtastic node not initialized');
+      const target = entry.state.autoTarget || {};
+      if (!Number.isFinite(target.peerNum)) {
+        logLine(entry.state, 'Auto target not set', 'warn');
+        return;
+      }
+      const text = normalizePayloadToString(payload);
+      if (!text) return;
+      await sendText(entry.state, target.peerNum, text);
     }
   };
 }
