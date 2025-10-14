@@ -168,12 +168,18 @@ const NodeStore = {
       publicPortName: 'public',
       defaultJson: true,
       peers: {},
-      lastPortInfo: null
+      rememberPort: true,
+      rememberDevice: false,
+      lastPortInfo: null,
+      lastDeviceName: ''
     },
     WebSerial: {
       autoConnect: false,
       autoReconnect: true,
       rememberPort: true,
+      rememberDevice: false,
+      lastPortInfo: null,
+      lastDeviceName: '',
       baudRate: 115200,
       customBaud: '',
       encoding: 'utf-8',
@@ -182,8 +188,7 @@ const NodeStore = {
       writeMode: 'text',
       readMode: 'text',
       echoSent: false,
-      maxLogLines: 500,
-      lastPortInfo: null
+      maxLogLines: 500
     }
   },
 

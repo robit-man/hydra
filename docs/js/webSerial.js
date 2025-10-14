@@ -14,6 +14,22 @@ const DEFAULT_BAUDS = [
   921600
 ];
 
+// Translate SerialPort.getInfo() output into a stable, human readable label we
+// can store and compare on reconnect (helpful when the OS renumbers the path).
+const friendlyDeviceName = (info = {}) => {
+  if (!info || typeof info !== 'object') return '';
+  if (info.usbProductName) return String(info.usbProductName);
+  if (info.productName) return String(info.productName);
+  if (info.serialNumber) return String(info.serialNumber);
+  if (info.manufacturerName) return String(info.manufacturerName);
+  if (info.usbVendorId != null && info.usbProductId != null) {
+    const vid = info.usbVendorId.toString(16).padStart(4, '0');
+    const pid = info.usbProductId.toString(16).padStart(4, '0');
+    return `vid:${vid} pid:${pid}`;
+  }
+  return '';
+};
+
 function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
   const sessions = new Map();
   let serialEventsBound = false;
@@ -331,8 +347,20 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     if (!info) return;
     state.portInfo = info;
     const cfg = getConfig(state.nodeId);
+    const update = {};
     if (booleanFromConfig(cfg, 'rememberPort', true)) {
-      saveConfig(state.nodeId, { lastPortInfo: info });
+      update.lastPortInfo = info;
+    } else if (cfg?.lastPortInfo) {
+      update.lastPortInfo = null;
+    }
+    if (booleanFromConfig(cfg, 'rememberDevice', false)) {
+      const name = friendlyDeviceName(info);
+      if (name) update.lastDeviceName = name;
+    } else if (cfg?.lastDeviceName) {
+      update.lastDeviceName = '';
+    }
+    if (Object.keys(update).length) {
+      saveConfig(state.nodeId, update);
     }
   }
 
@@ -384,8 +412,16 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       return;
     }
     if (!state.port) {
-      if (cfg.lastPortInfo && booleanFromConfig(cfg, 'rememberPort', true)) {
-        const ports = await navigator.serial.getPorts();
+      const ports = await navigator.serial.getPorts();
+      if (booleanFromConfig(cfg, 'rememberDevice', false) && cfg.lastDeviceName) {
+        const name = String(cfg.lastDeviceName || '').trim();
+        const matchByName = ports.find((port) => {
+          const info = port.getInfo?.() || {};
+          return friendlyDeviceName(info) === name;
+        });
+        if (matchByName) state.port = matchByName;
+      }
+      if (!state.port && cfg.lastPortInfo && booleanFromConfig(cfg, 'rememberPort', true)) {
         const match = ports.find((port) => {
           const info = port.getInfo?.() || {};
           return (
@@ -663,7 +699,9 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     const entry = ensureSession(nodeId);
     const cfg = getConfig(nodeId);
     const summary = document.createElement('div');
-    summary.textContent = `Last port: ${cfg.lastPortInfo ? JSON.stringify(cfg.lastPortInfo) : '—'}`;
+    const lastPortText = cfg.lastPortInfo ? JSON.stringify(cfg.lastPortInfo) : '—';
+    const deviceLabel = cfg.lastDeviceName ? ` | Device: ${cfg.lastDeviceName}` : '';
+    summary.textContent = `Last port: ${lastPortText}${deviceLabel}`;
     summary.className = 'tiny muted';
     summary.style.gridColumn = '1 / -1';
     summary.style.marginBottom = '6px';

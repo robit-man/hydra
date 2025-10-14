@@ -1,3 +1,25 @@
+// Derive a stable, human-readable identifier for a serial port so we can
+// reconnect even if the OS assigns a different path on the next boot.
+async function readSerialFriendlyName(port, info = null) {
+  try {
+    if (typeof port?.getInfo === 'function') {
+      info = info || port.getInfo() || {};
+    }
+    if (info?.usbProductName) return String(info.usbProductName);
+    if (info?.productName) return String(info.productName);
+    if (info?.serialNumber) return String(info.serialNumber);
+    if (info?.manufacturerName) return String(info.manufacturerName);
+    if (info?.usbVendorId != null && info?.usbProductId != null) {
+      const vid = info.usbVendorId.toString(16).padStart(4, '0');
+      const pid = info.usbProductId.toString(16).padStart(4, '0');
+      return `vid:${vid} pid:${pid}`;
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return '';
+}
+
 const STYLE_ID = 'meshtastic-node-style';
 const STYLE_TEXT = `
 .meshtastic-node {
@@ -1802,7 +1824,20 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         state.ui.connectButton.disabled = false;
         try {
           const info = port.getInfo?.() || {};
-          saveConfig(session.nodeId, { lastPortInfo: info });
+          const cfg = getConfig(session.nodeId);
+          const next = {};
+          if (toBoolean(cfg?.rememberPort, true)) {
+            next.lastPortInfo = info;
+          } else if (cfg?.lastPortInfo) {
+            next.lastPortInfo = null;
+          }
+          if (toBoolean(cfg?.rememberDevice, false) && typeof port?.getInfo === 'function') {
+            const name = await readSerialFriendlyName(port, info);
+            if (name) next.lastDeviceName = name;
+          } else if (cfg?.lastDeviceName) {
+            next.lastDeviceName = '';
+          }
+          if (Object.keys(next).length) saveConfig(session.nodeId, next);
         } catch (_) { }
       } catch (err) {
         if (err?.name !== 'NotFoundError') logLine(state, `requestPort: ${err.message}`, 'err');
@@ -2326,8 +2361,20 @@ Viewport: ${vp}`;
     }
     state.allowed = true;
     const last = cfg?.lastPortInfo;
+    const rememberDevice = toBoolean(cfg?.rememberDevice, false);
+    const lastName = (cfg?.lastDeviceName || '').trim();
     let chosen = null;
-    if (last && (last.usbVendorId || last.usbProductId)) {
+    if (rememberDevice && lastName) {
+      for (const port of ports) {
+        const info = port.getInfo?.() || {};
+        const friendly = await readSerialFriendlyName(port, info);
+        if (friendly && friendly === lastName) {
+          chosen = port;
+          break;
+        }
+      }
+    }
+    if (!chosen && last && (last.usbVendorId || last.usbProductId)) {
       chosen = ports.find((port) => {
         const info = port.getInfo?.() || {};
         return (
