@@ -1,3 +1,5 @@
+import { ensureLocalNetworkAccess } from './localNetwork.js';
+
 function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayState = () => {}, Router }) {
   const state = new Map();
   const MODEL_PROMISE = new Map();
@@ -140,6 +142,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   };
 
   async function streamHttpNdjson(url, options, onEvent) {
+    await ensureLocalNetworkAccess();
     const res = await fetch(url, options);
     if (!res.ok) {
       let detail = '';
@@ -379,6 +382,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const modelUrl = String(onnxModelUrl || '').trim();
     if (!jsonUrl || !modelUrl) throw new Error('Both JSON and ONNX URLs are required');
 
+    await ensureLocalNetworkAccess({ requireGesture: true });
+
     const rec = NodeStore.ensure(nodeId, 'TTS');
     const cfg = rec?.config || {};
     const endpoint = resolveEndpointConfig(cfg, override);
@@ -461,11 +466,12 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     return { ok: true };
   }
 
-  function refreshModels(nodeId, override = null, options = {}) {
+  async function refreshModels(nodeId, override = null, options = {}) {
     const rec = NodeStore.ensure(nodeId, 'TTS');
     const cfg = rec?.config || {};
     const merged = Object.assign({ force: true }, options || {});
     if (override) merged.override = override;
+    await ensureLocalNetworkAccess({ requireGesture: true });
     return ensureModelMetadata(nodeId, cfg, merged);
   }
 
@@ -819,6 +825,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   async function onText(nodeId, payload) {
     const node = getNode(nodeId);
     if (!node) return;
+    await ensureLocalNetworkAccess({ requireGesture: true });
     let cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
     cfg = await ensureModelConfigured(nodeId, cfg);
     const endpoint = resolveEndpointConfig(cfg);

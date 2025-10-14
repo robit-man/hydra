@@ -662,6 +662,10 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
         label: '',
         portName: 'public'
       },
+      peerRenderQueue: [],
+      peerRenderSet: new Set(),
+      peerRenderFrame: null,
+      peerInitialRenderTimer: null,
       heartbeatTimer: null,
       heartbeatNonce: 1,
       flushTimer: null,
@@ -685,20 +689,13 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
 
   function getConfig(nodeId) {
     const rec = NodeStore.ensure(nodeId, 'Meshtastic');
-    const cfg = rec?.config || {};
-    if (cfg._rememberDeviceSet !== true) {
-      cfg.rememberDevice = true;
-      cfg._rememberDeviceSet = true;
-      NodeStore.saveCfg(nodeId, 'Meshtastic', cfg);
-    }
-    return cfg;
+    return rec?.config || {};
   }
 
   function saveConfig(nodeId, patch) {
     const rec = NodeStore.ensure(nodeId, 'Meshtastic');
     const cfg = rec?.config || {};
     const next = { ...cfg, ...patch };
-    if (next._rememberDeviceSet !== true) next._rememberDeviceSet = true;
     NodeStore.saveCfg(nodeId, 'Meshtastic', next);
     return next;
   }
@@ -908,69 +905,193 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (header) header.textContent = `Chat with ${title}`;
   }
 
-  function renderPeerChips(state) {
+  function ensurePeerRenderState(state) {
+    if (!state.peerRenderQueue) state.peerRenderQueue = [];
+    if (!state.peerRenderSet) state.peerRenderSet = new Set();
+  }
+
+  function processPeerRenderQueue(state) {
+    state.peerRenderFrame = null;
+    ensurePeerRenderState(state);
+    if (!state.ui?.peerBar) {
+      if (state.peerRenderQueue.length) {
+        state.peerRenderFrame = requestAnimationFrame(() => processPeerRenderQueue(state));
+      }
+      return;
+    }
+    const nextKey = state.peerRenderQueue.shift();
+    if (nextKey == null) {
+      state.peerRenderSet.clear();
+      return;
+    }
+    state.peerRenderSet.delete(nextKey);
+    renderPeerChips(state, { appendOnly: true, onlyPeerKey: nextKey });
+    if (state.peerRenderQueue.length) {
+      state.peerRenderFrame = requestAnimationFrame(() => processPeerRenderQueue(state));
+    }
+  }
+
+  function enqueuePeerChip(state, keyLike) {
+    ensurePeerRenderState(state);
+    const key = keyLike === 'public' ? 'public' : String(Number(keyLike) >>> 0);
+    if (state.peerRenderSet.has(key)) return;
+    state.peerRenderSet.add(key);
+    state.peerRenderQueue.push(key);
+    if (!state.peerRenderFrame) {
+      state.peerRenderFrame = requestAnimationFrame(() => processPeerRenderQueue(state));
+    }
+  }
+
+  function renderPeerChips(state, { appendOnly = false, onlyPeerKey = null } = {}) {
     if (!state.ui) return;
     const list = state.ui.peerBar;
-    if (!list) return;
+    if (!list) {
+      schedulePeerRenderRetry(state);
+      return;
+    }
     if (state.ui.peerFilter && state.ui.peerFilter.value !== (state.peerSearch || '')) {
       state.ui.peerFilter.value = state.peerSearch || '';
     }
     const cfg = getConfig(state.nodeId);
     const enabledPeers = cfg?.peers || {};
     const filterText = (state.peerSearch || '').trim().toLowerCase();
-    const peers = Array.from(state.nodes.values()).sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
-    list.innerHTML = '';
-    let rendered = 0;
-
-    const channelLabel = String(cfg?.channel ?? 0);
-    const publicHaystack = `public ch${channelLabel} broadcast`;
-    if (!filterText || publicHaystack.toLowerCase().includes(filterText)) {
-      const publicChip = document.createElement('div');
-      publicChip.className = 'mesh-peer-chip' + (state.selectedThread === 'public' ? ' active' : '');
-      publicChip.dataset.peerKey = 'public';
-      publicChip.innerHTML = `<span>Public (ch${channelLabel})</span>`;
-      const pubUnread = getUnread(state, BROADCAST_NUM);
-      if (pubUnread > 0) {
-        const bubble = document.createElement('span');
-        bubble.className = 'bubble';
-        bubble.textContent = String(pubUnread);
-        publicChip.appendChild(bubble);
-      }
-      list.appendChild(publicChip);
-      rendered += 1;
+    const peers = Array.from(state.nodes.values());
+    const seen = new Set(peers.map((info) => String(info.num >>> 0)));
+    for (const [peerKey, entry] of Object.entries(enabledPeers)) {
+      if (!entry || entry.enabled === false) continue;
+      const normalized = String(peerKey);
+      if (normalized === 'public' || seen.has(normalized)) continue;
+      const rawNum = Number(peerKey);
+      if (!Number.isFinite(rawNum)) continue;
+      seen.add(normalized);
+      peers.push({
+        num: rawNum >>> 0,
+        user: { long_name: entry.label || `Peer ${peerKey}`, short_name: entry.shortLabel || '' },
+        last_heard: entry.last_heard || entry.lastHeard || 0,
+        _placeholder: true
+      });
     }
+    peers.sort((a, b) => (b.last_heard || 0) - (a.last_heard || 0));
 
-    peers.forEach((info) => {
-      const key = String(info.num >>> 0);
-      const stored = enabledPeers[key];
-      const baseName = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
-      const displayName = stored?.label || baseName;
-      const haystack = `${displayName} ${info.user?.short_name || ''} ${info.user?.id || ''} ${formatHex(info.num)} ${info.num}`.toLowerCase();
-      if (filterText && !haystack.includes(filterText)) return;
-      const chip = document.createElement('div');
-      chip.className = 'mesh-peer-chip' + (state.selectedThread === key ? ' active' : '');
-      chip.dataset.peerKey = key;
-      chip.innerHTML = `<span>${escapeHtml(displayName)}</span>`;
-      const unread = getUnread(state, info.num);
+    const removePlaceholders = () => {
+      list.querySelectorAll('.mesh-peer-empty').forEach((el) => el.remove());
+    };
+    const findChip = (key) => {
+      for (const el of list.querySelectorAll('.mesh-peer-chip')) {
+        if (el.dataset.peerKey === key) return el;
+      }
+      return null;
+    };
+    const ensureLabelSpan = (chip) => {
+      let span = chip.querySelector('span');
+      if (!span) {
+        span = document.createElement('span');
+        chip.insertBefore(span, chip.firstChild || null);
+      }
+      return span;
+    };
+    const setChipState = (chip, { label, unread, active, info }) => {
+      chip.classList.toggle('active', !!active);
+      ensureLabelSpan(chip).textContent = label;
+      chip.querySelectorAll('.bubble').forEach((b) => b.remove());
       if (unread > 0) {
         const bubble = document.createElement('span');
         bubble.className = 'bubble';
         bubble.textContent = String(unread);
         chip.appendChild(bubble);
       }
-      list.appendChild(chip);
-      rendered += 1;
-    });
+      const heard = info && Number.isFinite(info.last_heard) ? Number(info.last_heard) : 0;
+      chip.dataset.lastHeard = String(heard);
+    };
+    const positionChip = (chip) => {
+      const key = chip.dataset.peerKey;
+      if (key === 'public') {
+        if (chip !== list.firstChild) list.insertBefore(chip, list.firstChild || null);
+        return;
+      }
+      const lastHeard = Number(chip.dataset.lastHeard || 0);
+      const siblings = Array.from(list.querySelectorAll('.mesh-peer-chip')).filter((el) => el !== chip && el.dataset.peerKey !== 'public');
+      let placed = false;
+      for (const sibling of siblings) {
+        const siblingHeard = Number(sibling.dataset.lastHeard || 0);
+        if (lastHeard >= siblingHeard) {
+          list.insertBefore(chip, sibling);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) list.appendChild(chip);
+    };
+    const ensureChip = (key, opts) => {
+      let chip = findChip(key);
+      if (!chip) {
+        chip = document.createElement('div');
+        chip.className = 'mesh-peer-chip';
+        chip.dataset.peerKey = key;
+        list.appendChild(chip);
+      } else if (!chip.isConnected) {
+        list.appendChild(chip);
+      }
+      removePlaceholders();
+      setChipState(chip, opts);
+      positionChip(chip);
+    };
+    const ensurePublic = () => {
+      const channelLabel = String(cfg?.channel ?? 0);
+      const label = `Public (ch${channelLabel})`;
+      const unread = getUnread(state, BROADCAST_NUM);
+      const active = state.selectedThread === 'public';
+      ensureChip('public', { label, unread, active, info: { last_heard: Number.MAX_SAFE_INTEGER } });
+    };
+    const updatePeer = (info) => {
+      const key = String(info.num >>> 0);
+      const stored = enabledPeers[key];
+      const baseName = info.user?.long_name || info.user?.short_name || info.user?.id || `#${info.num}`;
+      const displayName = stored?.label || baseName;
+      const haystack = `${displayName} ${info.user?.short_name || ''} ${info.user?.id || ''} ${formatHex(info.num)} ${info.num}`.toLowerCase();
+      const chip = findChip(key);
+      if (filterText && !haystack.includes(filterText)) {
+        if (chip) chip.remove();
+        return;
+      }
+      const unread = getUnread(state, info.num);
+      const active = state.selectedThread === key;
+      ensureChip(key, { label: displayName, unread, active, info });
+    };
 
-    if (!rendered) {
-      const empty = document.createElement('div');
-      empty.style.cssText = 'font-size:12px;color:#9aa3b2;padding:4px 0;';
-      empty.textContent = 'No peers match filter';
-      list.appendChild(empty);
+    if (!appendOnly || !onlyPeerKey) list.innerHTML = '';
+    if (!onlyPeerKey || onlyPeerKey === 'public') ensurePublic();
+    if (onlyPeerKey) {
+      if (onlyPeerKey === 'public') return;
+      const info = state.nodes.get(Number(onlyPeerKey));
+      if (!info) return;
+      updatePeer(info);
+      return;
+    }
+
+    peers.forEach(updatePeer);
+
+    if (!appendOnly) {
+      const hasPeerChip = Array.from(list.querySelectorAll('.mesh-peer-chip')).some((el) => el.dataset.peerKey !== 'public');
+      if (!hasPeerChip) {
+        const empty = document.createElement('div');
+        empty.className = 'mesh-peer-empty';
+        empty.style.cssText = 'font-size:12px;color:#9aa3b2;padding:4px 0;';
+        empty.textContent = 'No peers match filter';
+        list.appendChild(empty);
+      }
     }
   }
 
-  function updatePeerCards(state) {
+  function schedulePeerRenderRetry(state) {
+    if (state.peerInitialRenderTimer) return;
+    state.peerInitialRenderTimer = setTimeout(() => {
+      state.peerInitialRenderTimer = null;
+      renderPeerChips(state);
+    }, 0);
+  }
+
+function updatePeerCards(state) {
     if (!state.ui) return;
     const cards = state.ui.peerCards;
     if (!cards) return;
@@ -1181,11 +1302,12 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
 
     appendThread(state, threadTarget, message);
 
-    if (state.selectedThread === threadKey(threadTarget)) {
+    const threadKeyStr = threadKey(threadTarget);
+    if (state.selectedThread === threadKeyStr) {
       renderMessages(state, threadTarget);
     } else {
       setUnread(state, threadTarget, 1);
-      renderPeerChips(state);
+      renderPeerChips(state, { appendOnly: true, onlyPeerKey: threadKeyStr });
     }
   }
 
@@ -1327,7 +1449,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       if (state.selectedThread === 'public') renderMessages(state, BROADCAST_NUM);
       else {
         setUnread(state, BROADCAST_NUM, 1);
-        renderPeerChips(state);
+        renderPeerChips(state, { appendOnly: true, onlyPeerKey: 'public' });
       }
 
       emitToGraph(state, publicEntry);
@@ -1339,7 +1461,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     if (state.selectedThread === dmKey) renderMessages(state, srcDec);
     else {
       setUnread(state, srcDec, 1);
-      renderPeerChips(state);
+      renderPeerChips(state, { appendOnly: true, onlyPeerKey: dmKey });
     }
     emitToGraph(state, peerEntry);
   }
@@ -1410,11 +1532,12 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
 
     if (fromNum != null) {
       updateAutoTarget(state, fromNum);
-      const autoPayload = {
-        ...payload,
-        autoTarget: { ...state.autoTarget }
-      };
-      Router.sendFrom(state.nodeId, 'auto', autoPayload);
+      const autoTargetSnapshot = { ...state.autoTarget };
+      if (typeof payload === 'string') {
+        Router.sendFrom(state.nodeId, 'auto', payload);
+      } else {
+        Router.sendFrom(state.nodeId, 'auto', { ...payload, autoTarget: autoTargetSnapshot });
+      }
     } else {
       clearAutoTarget(state);
     }
@@ -1474,8 +1597,8 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     const peersCfg = { ...(cfg.peers || {}) };
     const peerKey = String(dec);
     const existing = peersCfg[peerKey];
-    const nameKey = deviceNameKey(label);
     const label = nodeInfo.user?.long_name || nodeInfo.user?.short_name || nodeInfo.user?.id || `#${dec}`;
+    const nameKey = deviceNameKey(label);
     let changed = false;
     if (existing) {
       const next = { ...existing };
@@ -1502,7 +1625,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       saveConfig(state.nodeId, { peers: peersCfg });
     }
     updatePeerCards(state);
-    renderPeerChips(state);
+    enqueuePeerChip(state, dec);
     updateMap(state, dec, nodeInfo.position, nodeInfo.last_heard);
     if (refreshPortsHandler) refreshPortsHandler(state.nodeId, 'peers');
   }
@@ -1745,6 +1868,14 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.logPending = '';
     state.lastLogDiv = null;
     state.nodes.clear();
+    ensurePeerRenderState(state);
+    state.peerRenderQueue.length = 0;
+    state.peerRenderSet.clear();
+    if (state.peerRenderFrame != null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(state.peerRenderFrame);
+      else if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(state.peerRenderFrame);
+      state.peerRenderFrame = null;
+    }
     state.mapMarkers.forEach((marker) => {
       try { marker.remove?.(); } catch (_) { /* ignore */ }
     });
@@ -1755,10 +1886,14 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       clearTimeout(state._mapRefreshTimer);
       state._mapRefreshTimer = null;
     }
+    if (state.peerInitialRenderTimer) {
+      clearTimeout(state.peerInitialRenderTimer);
+      state.peerInitialRenderTimer = null;
+    }
     state.threads.clear();
     state.unread.clear();
     state.selectedThread = 'public';
-    renderPeerChips(state);
+    renderPeerChips(state, { appendOnly: true, onlyPeerKey: 'public' });
     updatePeerCards(state);
     updateSelectedThread(state, 'public');
     updateStatus(state, 'Connected @115200', 'ok');
@@ -1998,6 +2133,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     state.ui.shareLocStop?.addEventListener('click', () => stopLocationInterval(state));
     updateStatus(state, 'Select port', 'warn');
     renderPeerChips(state);
+    schedulePeerRenderRetry(state);
     renderMessages(state, BROADCAST_NUM);
     updatePeerCards(state);
   }

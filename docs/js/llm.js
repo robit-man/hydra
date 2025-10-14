@@ -1,3 +1,5 @@
+import { ensureLocalNetworkAccess } from './localNetwork.js';
+
 function createLLM({
   getNode,
   NodeStore,
@@ -318,6 +320,7 @@ function createLLM({
   }
 
   async function streamHttpNdjson(url, options, onEvent) {
+    await ensureLocalNetworkAccess();
     const res = await fetch(url, options);
     if (!res.ok) {
       let detail = '';
@@ -527,6 +530,8 @@ function createLLM({
     const modelName = String(model || '').trim();
     if (!modelName) throw new Error('Model name is required');
 
+    await ensureLocalNetworkAccess({ requireGesture: true });
+
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
     const endpoint = resolveEndpointConfig(cfg, override);
@@ -605,11 +610,12 @@ function createLLM({
     return { ok: true };
   }
 
-  function refreshModels(nodeId, override = null, options = {}) {
+  async function refreshModels(nodeId, override = null, options = {}) {
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec.config || {};
     const merged = Object.assign({ force: true }, options || {});
     if (override) merged.override = override;
+    await ensureLocalNetworkAccess({ requireGesture: true });
     return ensureModelMetadata(nodeId, cfg, merged);
   }
 
@@ -633,6 +639,7 @@ function createLLM({
   async function onPrompt(nodeId, payload) {
     const node = getNode(nodeId);
     if (!node) return;
+    await ensureLocalNetworkAccess({ requireGesture: true });
     const rec = NodeStore.ensure(nodeId, 'LLM');
     let cfg = rec.config || {};
     cfg = await ensureModelConfigured(nodeId, cfg);

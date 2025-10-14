@@ -1,3 +1,5 @@
+import { ensureLocalNetworkAccess } from './localNetwork.js';
+
 function createMCP({
   getNode,
   NodeStore,
@@ -163,6 +165,9 @@ function createMCP({
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
     updateStatus(nodeId, { status: 'loading', lastError: null });
     try {
+      if (!viaNkn && base) {
+        await ensureLocalNetworkAccess({ requireGesture: true });
+      }
       const data = await Net.getJSON(base, '/mcp/status', api, viaNkn, relay);
       updateStatus(nodeId, {
         status: 'ready',
@@ -256,6 +261,10 @@ function createMCP({
     const viaNkn = !!relay;
     const api = (cfg.api || '').trim();
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
+
+    if (!viaNkn) {
+      await ensureLocalNetworkAccess({ requireGesture: true });
+    }
 
     const requestBody = {
       query: queryText,

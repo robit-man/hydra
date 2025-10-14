@@ -72,18 +72,11 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
 
   function getConfig(nodeId) {
     const rec = NodeStore.ensure(nodeId, 'WebSerial');
-    const cfg = rec?.config || {};
-    if (cfg._rememberDeviceSet !== true) {
-      cfg.rememberDevice = true;
-      cfg._rememberDeviceSet = true;
-      NodeStore.saveCfg(nodeId, 'WebSerial', cfg);
-    }
-    return cfg;
+    return rec?.config || {};
   }
 
   function saveConfig(nodeId, patch) {
     const cfg = { ...getConfig(nodeId), ...patch };
-    if (cfg._rememberDeviceSet !== true) cfg._rememberDeviceSet = true;
     NodeStore.saveCfg(nodeId, 'WebSerial', cfg);
     return cfg;
   }

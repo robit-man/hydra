@@ -1,3 +1,5 @@
+import { ensureLocalNetworkAccess } from './localNetwork.js';
+
 function createASR({
   getNode,
   Router,
@@ -258,11 +260,12 @@ function createASR({
     return models.find((item) => item.id === modelId) || null;
   }
 
-  function refreshModels(nodeId, override = null, options = {}) {
+  async function refreshModels(nodeId, override = null, options = {}) {
     const rec = NodeStore.ensure(nodeId, 'ASR');
     const cfg = rec?.config || {};
     const merged = Object.assign({ force: true }, options || {});
     if (override) merged.override = override;
+    await ensureLocalNetworkAccess({ requireGesture: true });
     return ensureModelMetadata(nodeId, cfg, merged);
   }
 
@@ -752,6 +755,7 @@ function createASR({
       if (this.running && this.ownerId && this.ownerId !== nodeId) {
         await this.stop();
       }
+      await ensureLocalNetworkAccess({ requireGesture: true });
       const rec = NodeStore.ensure(nodeId, 'ASR');
       let cfg = rec.config || {};
       cfg = await ensureModelConfigured(nodeId, cfg);

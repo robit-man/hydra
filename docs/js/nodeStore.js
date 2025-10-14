@@ -171,8 +171,7 @@ const NodeStore = {
       rememberPort: true,
       rememberDevice: true,
       lastPortInfo: null,
-      lastDeviceName: '',
-      _rememberDeviceSet: true
+      lastDeviceName: ''
     },
     WebSerial: {
       autoConnect: false,
@@ -181,7 +180,6 @@ const NodeStore = {
       rememberDevice: true,
       lastPortInfo: null,
       lastDeviceName: '',
-      _rememberDeviceSet: true,
       baudRate: 115200,
       customBaud: '',
       encoding: 'utf-8',

@@ -20,9 +20,11 @@ import { createGraph } from './graph.js';
 import { createFlowsLibrary } from './flows.js';
 import { createMeshtastic } from './meshtastic.js';
 import { createWebSerial } from './webSerial.js';
+import { primeLocalNetworkRequest } from './localNetwork.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
+primeLocalNetworkRequest();
 
 const graphAccess = {
   getNode: () => null
