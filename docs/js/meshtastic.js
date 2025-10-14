@@ -2033,6 +2033,15 @@ Viewport: ${vp}`;
     const basePeers = peerRecords.slice();
     const wrap = document.createElement('div');
     wrap.className = 'meshtastic-settings';
+
+
+    const permissions = document.createElement('div');
+    permissions.textContent = 'sudo setfacl -m u:$USER:rw $(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null)';
+    permissions.style.fontSize = '12px';
+    permissions.style.color = '#9aa3b2';
+    wrap.appendChild(permissions);
+
+    
     const info = document.createElement('div');
     info.textContent = 'Select peers to expose as ports. Toggle JSON outputs per peer.';
     info.style.fontSize = '12px';
