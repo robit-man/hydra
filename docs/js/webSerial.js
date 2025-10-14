@@ -36,7 +36,9 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       allowed: false,
       logLines: [],
       portInfo: cfg.lastPortInfo || null,
-      ready: false
+      ready: false,
+      uiBound: false,
+      uiRoot: null
     };
   }
 
@@ -211,37 +213,52 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
   }
 
   function attachUi(state) {
-    state.ui = buildUi(state);
-    if (!state.ui) return;
+    const ui = buildUi(state);
+    if (!ui || !ui.root) return false;
+    if (state.uiBound && state.uiRoot === ui.root) return true;
+    state.ui = ui;
+    state.uiRoot = ui.root;
+    state.logLines = [];
+    if (ui.log) ui.log.textContent = '';
+    state.uiBound = false;
     if (!('serial' in navigator)) {
       updateStatus(state, 'WebSerial unsupported in this browser', 'err');
-      state.ui.choose && (state.ui.choose.disabled = true);
-      state.ui.connect && (state.ui.connect.disabled = true);
-      state.ui.disconnect && (state.ui.disconnect.disabled = true);
-      state.ui.sendButton && (state.ui.sendButton.disabled = true);
-      state.ui.sendInput && (state.ui.sendInput.disabled = true);
+      ui.choose && (ui.choose.disabled = true);
+      ui.connect && (ui.connect.disabled = true);
+      ui.disconnect && (ui.disconnect.disabled = true);
+      ui.sendButton && (ui.sendButton.disabled = true);
+      ui.sendInput && (ui.sendInput.disabled = true);
       setBadge?.('WebSerial requires a secure Chromium-based browser', false);
-      return;
+      state.uiBound = true;
+      return true;
     }
-    ensureBaudOptions(state.ui.baudSelect);
+    ensureBaudOptions(ui.baudSelect);
     syncBaudUi(state);
     updateButtons(state);
     updateStatus(state, 'Disconnected', 'warn');
 
-    state.ui.choose?.addEventListener('click', async () => {
+    ui.choose?.addEventListener('click', async () => {
+      if (!('serial' in navigator)) {
+        setBadge?.('WebSerial unsupported', false);
+        return;
+      }
       try {
         const port = await navigator.serial.requestPort({});
         state.port = port;
         state.allowed = true;
         rememberPort(state, port);
         updateStatus(state, 'Port selected', 'warn');
+        appendLog(state, 'Port selected');
+        if (ui.connect) ui.connect.disabled = false;
+        if (ui.sendButton) ui.sendButton.disabled = true;
+        if (ui.disconnect) ui.disconnect.disabled = true;
         updateButtons(state);
       } catch (err) {
         if (err?.name !== 'NotFoundError') appendLog(state, `requestPort: ${err.message}`, 'err');
       }
     });
 
-    state.ui.connect?.addEventListener('click', async () => {
+    ui.connect?.addEventListener('click', async () => {
       try {
         await connect(state.nodeId);
       } catch (err) {
@@ -249,17 +266,17 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       }
     });
 
-    state.ui.disconnect?.addEventListener('click', async () => {
+    ui.disconnect?.addEventListener('click', async () => {
       state.userRequestedDisconnect = true;
       cancelReconnect(state);
       await disconnect(state.nodeId);
     });
 
-    state.ui.applyBaud?.addEventListener('click', () => {
-      const selectValue = state.ui.baudSelect?.value;
+    ui.applyBaud?.addEventListener('click', () => {
+      const selectValue = ui.baudSelect?.value;
       let nextBaud = coerceNumber(selectValue, NaN);
       if (selectValue === 'custom') {
-        nextBaud = coerceNumber(state.ui.baudCustom?.value, NaN);
+        nextBaud = coerceNumber(ui.baudCustom?.value, NaN);
       }
       if (!Number.isFinite(nextBaud) || nextBaud <= 0) {
         setBadge('Enter a valid baud rate', false);
@@ -270,29 +287,42 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       syncBaudUi(state);
     });
 
-    state.ui.clearLog?.addEventListener('click', () => {
+    ui.clearLog?.addEventListener('click', () => {
       state.logLines.forEach((line) => line?.remove());
       state.logLines.length = 0;
     });
 
+    const interactiveButtons = [
+      ui.choose,
+      ui.connect,
+      ui.disconnect,
+      ui.clearLog,
+      ui.sendButton
+    ].filter(Boolean);
+    interactiveButtons.forEach((btn) => {
+      btn.addEventListener('pointerdown', (ev) => ev.stopPropagation(), { passive: false });
+    });
+
     const send = async () => {
-      const value = state.ui.sendInput?.value ?? '';
+      const value = ui.sendInput?.value ?? '';
       if (!value) return;
       try {
         await writePayload(state.nodeId, value);
-        state.ui.sendInput.value = '';
+        ui.sendInput.value = '';
       } catch (err) {
         appendLog(state, `send error: ${err.message}`, 'err');
       }
     };
 
-    state.ui.sendButton?.addEventListener('click', send);
-    state.ui.sendInput?.addEventListener('keydown', (ev) => {
+    ui.sendButton?.addEventListener('click', send);
+    ui.sendInput?.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && !ev.shiftKey) {
         ev.preventDefault();
         send();
       }
     });
+    state.uiBound = true;
+    return true;
   }
 
   function rememberPort(state, port) {
@@ -309,7 +339,8 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     if (!state.ui) return;
     const connected = Boolean(state.writer);
     const hasPort = Boolean(state.port);
-    if (state.ui.connect) state.ui.connect.disabled = connected || !hasPort;
+    const canPrompt = Boolean(navigator.serial?.requestPort);
+    if (state.ui.connect) state.ui.connect.disabled = connected || (!hasPort && !canPrompt);
     if (state.ui.disconnect) state.ui.disconnect.disabled = !connected;
     if (state.ui.sendButton) state.ui.sendButton.disabled = !connected;
   }
@@ -361,6 +392,20 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
           );
         });
         if (match) state.port = match;
+      }
+      if (!state.port && navigator.serial?.requestPort) {
+        try {
+          const port = await navigator.serial.requestPort({});
+          state.port = port;
+          state.allowed = true;
+          rememberPort(state, port);
+          updateStatus(state, 'Port selected', 'warn');
+          appendLog(state, 'Port selected');
+          updateButtons(state);
+        } catch (err) {
+          if (err?.name === 'NotFoundError') throw new Error('No port selected');
+          throw err;
+        }
       }
       if (!state.port) throw new Error('No port selected');
     }
@@ -530,7 +575,15 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
   function init(nodeId) {
     const entry = ensureSession(nodeId);
     entry.state.nodeId = nodeId;
-    attachUi(entry.state);
+    if (!attachUi(entry.state)) {
+      let attempts = 0;
+      const retry = () => {
+        if (attachUi(entry.state)) return;
+        if (attempts++ > 20) return;
+        requestAnimationFrame(retry);
+      };
+      requestAnimationFrame(retry);
+    }
     bindSerialEvents();
     const cfg = getConfig(nodeId);
     if (booleanFromConfig(cfg, 'autoConnect', false)) {

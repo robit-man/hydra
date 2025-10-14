@@ -1978,15 +1978,15 @@ function refreshNodeResolution(force = false) {
           </div>
         ` : ''}
         ${node.type === 'WebSerial' ? `
-          <div class="webserial-node" data-webserial-root>
-            <div class="mesh-header">
-              <div class="mesh-main-controls">
+          <div class="webserial-node" data-webserial-root style="pointer-events:auto;">
+            <div class="mesh-header" style="pointer-events:auto;">
+            <div class="mesh-main-controls" style="pointer-events:auto;gap:6px;flex-wrap:wrap;display:flex;">
                 <button type="button" data-webserial-choose>Choose Port…</button>
                 <button type="button" data-webserial-connect disabled>Connect</button>
                 <button type="button" data-webserial-disconnect disabled>Disconnect</button>
                 <button type="button" data-webserial-clear>Clear Log</button>
               </div>
-              <div class="mesh-status-line">
+              <div class="mesh-status-line" style="pointer-events:auto;">
                 <span class="mesh-status-dot" data-webserial-status-dot></span>
                 <span data-webserial-status>Disconnected</span>
               </div>
