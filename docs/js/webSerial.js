@@ -18,10 +18,10 @@ const DEFAULT_BAUDS = [
 // can store and compare on reconnect (helpful when the OS renumbers the path).
 const friendlyDeviceName = (info = {}) => {
   if (!info || typeof info !== 'object') return '';
-  if (info.usbProductName) return String(info.usbProductName);
-  if (info.productName) return String(info.productName);
-  if (info.serialNumber) return String(info.serialNumber);
-  if (info.manufacturerName) return String(info.manufacturerName);
+  if (info.usbProductName) return String(info.usbProductName).trim();
+  if (info.productName) return String(info.productName).trim();
+  if (info.serialNumber) return String(info.serialNumber).trim();
+  if (info.manufacturerName) return String(info.manufacturerName).trim();
   if (info.usbVendorId != null && info.usbProductId != null) {
     const vid = info.usbVendorId.toString(16).padStart(4, '0');
     const pid = info.usbProductId.toString(16).padStart(4, '0');
@@ -29,6 +29,8 @@ const friendlyDeviceName = (info = {}) => {
   }
   return '';
 };
+
+const deviceNameKey = (name) => String(name || '').trim().toLowerCase();
 
 function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
   const sessions = new Map();
@@ -70,11 +72,18 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
 
   function getConfig(nodeId) {
     const rec = NodeStore.ensure(nodeId, 'WebSerial');
-    return rec?.config || {};
+    const cfg = rec?.config || {};
+    if (cfg._rememberDeviceSet !== true) {
+      cfg.rememberDevice = true;
+      cfg._rememberDeviceSet = true;
+      NodeStore.saveCfg(nodeId, 'WebSerial', cfg);
+    }
+    return cfg;
   }
 
   function saveConfig(nodeId, patch) {
     const cfg = { ...getConfig(nodeId), ...patch };
+    if (cfg._rememberDeviceSet !== true) cfg._rememberDeviceSet = true;
     NodeStore.saveCfg(nodeId, 'WebSerial', cfg);
     return cfg;
   }
@@ -353,7 +362,7 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     } else if (cfg?.lastPortInfo) {
       update.lastPortInfo = null;
     }
-    if (booleanFromConfig(cfg, 'rememberDevice', false)) {
+    if (booleanFromConfig(cfg, 'rememberDevice', true)) {
       const name = friendlyDeviceName(info);
       if (name) update.lastDeviceName = name;
     } else if (cfg?.lastDeviceName) {
@@ -413,11 +422,12 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     }
     if (!state.port) {
       const ports = await navigator.serial.getPorts();
-      if (booleanFromConfig(cfg, 'rememberDevice', false) && cfg.lastDeviceName) {
-        const name = String(cfg.lastDeviceName || '').trim();
+      if (booleanFromConfig(cfg, 'rememberDevice', true) && cfg.lastDeviceName) {
+        const nameKey = deviceNameKey(cfg.lastDeviceName);
         const matchByName = ports.find((port) => {
           const info = port.getInfo?.() || {};
-          return friendlyDeviceName(info) === name;
+          const candidate = friendlyDeviceName(info);
+          return nameKey && deviceNameKey(candidate) === nameKey;
         });
         if (matchByName) state.port = matchByName;
       }

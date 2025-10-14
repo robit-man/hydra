@@ -169,17 +169,19 @@ const NodeStore = {
       defaultJson: true,
       peers: {},
       rememberPort: true,
-      rememberDevice: false,
+      rememberDevice: true,
       lastPortInfo: null,
-      lastDeviceName: ''
+      lastDeviceName: '',
+      _rememberDeviceSet: true
     },
     WebSerial: {
       autoConnect: false,
       autoReconnect: true,
       rememberPort: true,
-      rememberDevice: false,
+      rememberDevice: true,
       lastPortInfo: null,
       lastDeviceName: '',
+      _rememberDeviceSet: true,
       baudRate: 115200,
       customBaud: '',
       encoding: 'utf-8',

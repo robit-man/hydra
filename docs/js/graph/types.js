@@ -156,7 +156,7 @@ const GraphTypes = {
       { key: 'channel', label: 'Channel', type: 'number', def: 0 },
       { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'rememberPort', label: 'Remember Port', type: 'select', options: ['true', 'false'], def: 'true' },
-      { key: 'rememberDevice', label: 'Remember Device Name', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'rememberDevice', label: 'Remember Device Name', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'defaultJson', label: 'Default JSON Output', type: 'select', options: ['true', 'false'], def: 'true' }
     ]
   },
@@ -169,7 +169,7 @@ const GraphTypes = {
       { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'autoReconnect', label: 'Auto Reconnect', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'rememberPort', label: 'Remember Port', type: 'select', options: ['true', 'false'], def: 'true' },
-      { key: 'rememberDevice', label: 'Remember Device Name', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'rememberDevice', label: 'Remember Device Name', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'baudRate', label: 'Baud Rate', type: 'number', def: 115200 },
       { key: 'encoding', label: 'Encoding', type: 'text', placeholder: 'utf-8', def: 'utf-8' },
       { key: 'writeMode', label: 'Write Mode', type: 'select', options: ['text', 'hex'], def: 'text' },

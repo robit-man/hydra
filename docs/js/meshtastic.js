@@ -1,14 +1,16 @@
 // Derive a stable, human-readable identifier for a serial port so we can
 // reconnect even if the OS assigns a different path on the next boot.
+const deviceNameKey = (name) => String(name || '').trim().toLowerCase();
+
 async function readSerialFriendlyName(port, info = null) {
   try {
     if (typeof port?.getInfo === 'function') {
       info = info || port.getInfo() || {};
     }
-    if (info?.usbProductName) return String(info.usbProductName);
-    if (info?.productName) return String(info.productName);
-    if (info?.serialNumber) return String(info.serialNumber);
-    if (info?.manufacturerName) return String(info.manufacturerName);
+    if (info?.usbProductName) return String(info.usbProductName).trim();
+    if (info?.productName) return String(info.productName).trim();
+    if (info?.serialNumber) return String(info.serialNumber).trim();
+    if (info?.manufacturerName) return String(info.manufacturerName).trim();
     if (info?.usbVendorId != null && info?.usbProductId != null) {
       const vid = info.usbVendorId.toString(16).padStart(4, '0');
       const pid = info.usbProductId.toString(16).padStart(4, '0');
@@ -684,6 +686,11 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   function getConfig(nodeId) {
     const rec = NodeStore.ensure(nodeId, 'Meshtastic');
     const cfg = rec?.config || {};
+    if (cfg._rememberDeviceSet !== true) {
+      cfg.rememberDevice = true;
+      cfg._rememberDeviceSet = true;
+      NodeStore.saveCfg(nodeId, 'Meshtastic', cfg);
+    }
     return cfg;
   }
 
@@ -691,6 +698,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     const rec = NodeStore.ensure(nodeId, 'Meshtastic');
     const cfg = rec?.config || {};
     const next = { ...cfg, ...patch };
+    if (next._rememberDeviceSet !== true) next._rememberDeviceSet = true;
     NodeStore.saveCfg(nodeId, 'Meshtastic', next);
     return next;
   }
@@ -1153,13 +1161,30 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
   }
 
   function appendMessage(state, message) {
-    const to = message.to ?? BROADCAST_NUM;
-    const key = threadKey(to);
-    appendThread(state, to, message);
-    if (state.selectedThread === key) {
-      renderMessages(state, to);
+    const broadcastValue = BROADCAST_NUM >>> 0;
+    const toRaw = message.to;
+    const fromRaw = message.from;
+    let toNum = broadcastValue;
+    if (typeof toRaw === 'number' && Number.isFinite(toRaw)) toNum = toRaw >>> 0;
+    const fromNum = (typeof fromRaw === 'number' && Number.isFinite(fromRaw)) ? (fromRaw >>> 0) : null;
+    const isBroadcast = toNum === broadcastValue || toRaw == null;
+    let threadTarget;
+    if (isBroadcast) {
+      threadTarget = broadcastValue;
+    } else if (message.me) {
+      threadTarget = toNum;
+    } else if (fromNum != null) {
+      threadTarget = fromNum;
     } else {
-      setUnread(state, to, 1);
+      threadTarget = toNum;
+    }
+
+    appendThread(state, threadTarget, message);
+
+    if (state.selectedThread === threadKey(threadTarget)) {
+      renderMessages(state, threadTarget);
+    } else {
+      setUnread(state, threadTarget, 1);
       renderPeerChips(state);
     }
   }
@@ -1186,7 +1211,8 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
       }
     };
     await writeToRadio(state, frame);
-    appendMessage(state, { me: true, display: normalized, ts: Date.now(), to: destValue });
+    const fromNum = Number.isFinite(state.myNodeNum) ? (state.myNodeNum >>> 0) : null;
+    appendMessage(state, { me: true, display: normalized, ts: Date.now(), to: destValue, from: fromNum });
     if (destValue !== (BROADCAST_NUM >>> 0)) {
       updateAutoTarget(state, destValue);
     }
@@ -1344,7 +1370,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     const cfg = getConfig(state.nodeId);
     const peerKey = String(peerNum >>> 0);
     const peerCfg = cfg.peers?.[peerKey];
-    const label = peerCfg?.label || formatSender(state, peerNum) || `#${peerKey}`;
+    const label = (peerCfg?.label || formatSender(state, peerNum) || `#${peerKey}`).trim();
     const portName = peerCfg?.portName || `peer-${peerKey}`;
     state.autoTarget = {
       peerNum: peerNum >>> 0,
@@ -1881,7 +1907,7 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
           } else if (cfg?.lastPortInfo) {
             next.lastPortInfo = null;
           }
-          if (toBoolean(cfg?.rememberDevice, false) && typeof port?.getInfo === 'function') {
+          if (toBoolean(cfg?.rememberDevice, true) && typeof port?.getInfo === 'function') {
             const name = await readSerialFriendlyName(port, info);
             if (name) next.lastDeviceName = name;
           } else if (cfg?.lastDeviceName) {
@@ -2412,14 +2438,15 @@ Viewport: ${vp}`;
     }
     state.allowed = true;
     const last = cfg?.lastPortInfo;
-    const rememberDevice = toBoolean(cfg?.rememberDevice, false);
+    const rememberDevice = toBoolean(cfg?.rememberDevice, true);
     const lastName = (cfg?.lastDeviceName || '').trim();
+    const lastNameKey = deviceNameKey(lastName);
     let chosen = null;
     if (rememberDevice && lastName) {
       for (const port of ports) {
         const info = port.getInfo?.() || {};
         const friendly = await readSerialFriendlyName(port, info);
-        if (friendly && friendly === lastName) {
+        if (deviceNameKey(friendly) === lastNameKey && lastNameKey) {
           chosen = port;
           break;
         }
