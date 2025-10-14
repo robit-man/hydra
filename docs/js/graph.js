@@ -1,4 +1,15 @@
-import { LS, qs, qsa, setBadge, log, convertBooleanSelect } from './utils.js';
+import { LS, qs, qsa, setBadge, log } from './utils.js';
+import { createHistory } from './graph/history.js';
+import {
+  deepClone,
+  isEditableTarget,
+  cloneWireForHistory,
+  sanitizeHistoryNode,
+  convertBooleanSelectsIn
+} from './graph/utils.js';
+import { GraphTypes as graphTypes } from './graph/types.js';
+import { createAudioHelpers } from './graph/audio.js';
+import { createWorkspaceManager } from './graph/workspace.js';
 
 function createGraph({
   Router,
@@ -40,379 +51,25 @@ function createGraph({
     lastPointer: null
   };
 
-  const HISTORY_KEY = 'graph.history.v1';
   const LOG_COLLAPSED_KEY = 'graph.logCollapsed';
-  const HISTORY_MAX = 50;
-
-  const cloneWireForHistory = (wireLike) => {
-    if (!wireLike) return null;
-    const from = wireLike.from || {};
-    const to = wireLike.to || {};
-    const fromNode = String(from.node || '');
-    const toNode = String(to.node || '');
-    const fromPort = String(from.port || '');
-    const toPort = String(to.port || '');
-    if (!fromNode || !toNode || !fromPort || !toPort) return null;
-    return {
-      from: { node: fromNode, port: fromPort },
-      to: { node: toNode, port: toPort }
-    };
-  };
-
-  const sanitizeHistoryNode = (data) => {
-    if (!data || typeof data !== 'object') return null;
-    const id = String(data.id || data.sourceId || '');
-    const type = String(data.type || '');
-    if (!id || !type) return null;
-    return {
-      id,
-      type,
-      x: Number.isFinite(data.x) ? data.x : 0,
-      y: Number.isFinite(data.y) ? data.y : 0,
-      w: Number.isFinite(data.w) ? data.w : 0,
-      h: Number.isFinite(data.h) ? data.h : 0,
-      sizeLocked: Boolean(data.sizeLocked),
-      config: data.config && typeof data.config === 'object' ? deepClone(data.config) : {}
-    };
-  };
-
-  const History = (() => {
-    let entries = [];
-    let index = -1;
-    let silent = 0;
-    let updateUi = null;
-
-    const notify = () => {
-      updateUi?.({ canUndo: index >= 0, canRedo: index + 1 < entries.length });
-    };
-
-    const persist = () => {
-      try {
-        LS.set(HISTORY_KEY, { entries, index });
-      } catch (_) {
-        /* ignore storage failures */
-      }
-    };
-
-    const sanitizeEntry = (raw) => {
-      if (!raw || typeof raw !== 'object') return null;
-      const type = String(raw.type || '');
-      if (!type) return null;
-      if (type === 'node.add' || type === 'node.remove') {
-        const node = sanitizeHistoryNode(raw.node);
-        if (!node) return null;
-        const wires = Array.isArray(raw.wires)
-          ? raw.wires.map((w) => cloneWireForHistory(w)).filter(Boolean)
-          : [];
-        return { type, node, wires };
-      }
-      if (type === 'wire.add' || type === 'wire.remove') {
-        const wire = cloneWireForHistory(raw.wire);
-        if (!wire) return null;
-        return { type, wire };
-      }
-      if (type === 'node.config') {
-        const nodeId = String(raw.nodeId || (raw.node && raw.node.id) || '');
-        const nodeType = String(raw.nodeType || (raw.node && raw.node.type) || '');
-        if (!nodeId || !nodeType) return null;
-        const before = raw.before && typeof raw.before === 'object' ? deepClone(raw.before) : {};
-        const after = raw.after && typeof raw.after === 'object' ? deepClone(raw.after) : {};
-        return { type, nodeId, nodeType, before, after };
-      }
-      return null;
-    };
-
-    const load = () => {
-      const stored = LS.get(HISTORY_KEY, null);
-      if (!stored || typeof stored !== 'object') {
-        entries = [];
-        index = -1;
-        notify();
-        return;
-      }
-      const rawEntries = Array.isArray(stored.entries) ? stored.entries : [];
-      entries = rawEntries
-        .map((entry) => sanitizeEntry(entry))
-        .filter(Boolean)
-        .slice(-HISTORY_MAX);
-      if (typeof stored.index === 'number') {
-        index = Math.min(Math.max(Math.floor(stored.index), -1), entries.length - 1);
-      } else {
-        index = entries.length - 1;
-      }
-      if (entries.length && index < 0) index = entries.length - 1;
-      persist();
-      notify();
-    };
-
-    const push = (entry) => {
-      if (!entry || typeof entry !== 'object') return;
-      if (silent) return;
-      const sanitized = sanitizeEntry(entry);
-      if (!sanitized) return;
-      if (index + 1 < entries.length) {
-        entries = entries.slice(0, index + 1);
-      }
-      entries.push(sanitized);
-      if (entries.length > HISTORY_MAX) {
-        const excess = entries.length - HISTORY_MAX;
-        entries.splice(0, excess);
-        index = Math.max(index - excess, -1);
-      }
-      index = entries.length - 1;
-      persist();
-      notify();
-    };
-
-    const runSilent = (fn) => {
-      silent += 1;
-      try {
-        return fn();
-      } finally {
-        silent -= 1;
-      }
-    };
-
-    const undo = () => {
-      if (index < 0) return false;
-      const entry = entries[index];
-      runSilent(() => applyHistoryUndo(entry));
-      index -= 1;
-      persist();
-      notify();
-      return true;
-    };
-
-    const redo = () => {
-      if (index + 1 >= entries.length) return false;
-      const entry = entries[index + 1];
-      runSilent(() => applyHistoryRedo(entry));
-      index += 1;
-      persist();
-      notify();
-      return true;
-    };
-
-    const clear = () => {
-      entries = [];
-      index = -1;
-      persist();
-      notify();
-    };
-
-    const setUpdate = (fn) => {
-      updateUi = typeof fn === 'function' ? fn : null;
-      notify();
-    };
-
-    return {
-      push,
-      undo,
-      redo,
-      clear,
-      load,
-      silence: runSilent,
-      isSilent: () => silent > 0,
-      setUpdate,
-      canUndo: () => index >= 0,
-      canRedo: () => index + 1 < entries.length,
-      emit: notify
-    };
-  })();
-
-  const slugifyGraphName = (text) => {
-    return String(text || 'hydra-graph')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .replace(/-{2,}/g, '-') || 'hydra-graph';
-  };
-
-  const graphTimestampTag = () => {
-    try {
-      return new Date().toISOString().replace(/[:.]/g, '-');
-    } catch (err) {
-      return String(Date.now());
-    }
-  };
-
-  function buildWorkspacePayload() {
-    const snapshot = exportWorkspaceSnapshot();
-    if (!snapshot || typeof snapshot !== 'object') return null;
-    const name = snapshot?.name && typeof snapshot.name === 'string' && snapshot.name.trim()
-      ? snapshot.name.trim()
-      : 'Hydra Graph';
-    const payload = deepClone(snapshot);
-    payload.savedAt = new Date().toISOString();
-    if (!payload.name) payload.name = name;
-    return { payload, name };
-  }
-
-  function downloadWorkspaceFile() {
-    try {
-      const bundle = buildWorkspacePayload();
-      if (!bundle) {
-        setBadge('Nothing to save', false);
-        return;
-      }
-      const { payload, name } = bundle;
-      const data = JSON.stringify(payload, null, 2);
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${slugifyGraphName(name)}-${graphTimestampTag()}.json`;
-      anchor.rel = 'noopener';
-      anchor.click();
-      URL.revokeObjectURL(url);
-      setBadge(`Graph saved${name ? ` as “${name}”` : ''}`);
-    } catch (err) {
-      setBadge(`Save failed: ${err?.message || err}`, false);
-    }
-  }
-
-  let fileImportInput = null;
-  let requestFlowSave = null;
-
-  const ensureImportInput = () => {
-    if (fileImportInput || typeof document === 'undefined') return fileImportInput;
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'application/json,.json';
-    input.style.display = 'none';
-    input.addEventListener('change', (event) => {
-      const target = event.target;
-      const files = target?.files ? Array.from(target.files) : [];
-      target.value = '';
-      if (!files.length) return;
-      const file = files[0];
-      if (!file) return;
-      file
-        .text()
-        .then((text) => {
-          let parsed;
-          try {
-            parsed = JSON.parse(text);
-          } catch (err) {
-            setBadge('Graph file is not valid JSON', false);
-            return;
-          }
-          const normalized = normalizeImportedGraph(parsed);
-          if (!normalized?.snapshot) {
-            setBadge('Selected file is not a compatible graph', false);
-            return;
-          }
-          const badgeText = normalized.name
-            ? `Imported “${normalized.name}”`
-            : 'Graph imported';
-          const ok = importWorkspaceSnapshot(normalized.snapshot, { badgeText });
-          if (!ok) setBadge('Graph import failed', false);
-        })
-        .catch((err) => {
-          setBadge(`Unable to read file: ${err?.message || err}`, false);
-        });
-    });
-    document.body.appendChild(input);
-    fileImportInput = input;
-    return fileImportInput;
-  };
-
-  function openGraphImportDialog() {
-    const input = ensureImportInput();
-    if (!input) {
-      setBadge('File import unavailable in this environment', false);
-      return;
-    }
-    input.click();
-  }
-
-  function saveWorkspaceAsInteractive() {
-    try {
-      const bundle = buildWorkspacePayload();
-      if (!bundle) {
-        setBadge('Nothing to save', false);
-        return;
-      }
-      const { payload, name } = bundle;
-      const data = JSON.stringify(payload, null, 2);
-      const suggestedBase = slugifyGraphName(name) || 'hydra-graph';
-      const suggestedName = `${suggestedBase}.json`;
-      if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
-        const opts = {
-          suggestedName,
-          types: [
-            {
-              description: 'Hydra Graph JSON',
-              accept: { 'application/json': ['.json'] }
-            }
-          ]
-        };
-        window.showSaveFilePicker(opts)
-          .then((handle) => {
-            if (!handle) return null;
-            return handle.createWritable()
-              .then((writable) => writable.write(data).then(() => writable.close()))
-              .then(() => {
-                const finalName = handle.name || suggestedName;
-                setBadge(`Graph saved as “${finalName}”`);
-                return null;
-              });
-          })
-          .catch((err) => {
-            if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
-              // user cancelled or denied permission; stay quiet
-              return;
-            }
-            setBadge(`Save failed: ${err?.message || err}`, false);
-          });
-        return;
-      }
-      downloadWorkspaceFile();
-    } catch (err) {
-      setBadge(`Save failed: ${err?.message || err}`, false);
-    }
-  }
+  const History = createHistory({ LS });
+  const audio = createAudioHelpers();
+  const {
+    downloadWorkspaceFile,
+    openGraphImportDialog,
+    saveWorkspaceAsInteractive,
+    setFlowSaveHandler: setWorkspaceFlowSaveHandler,
+    getFlowSaveHandler
+  } = createWorkspaceManager({
+    setBadge,
+    deepClone,
+    exportWorkspaceSnapshot,
+    importWorkspaceSnapshot
+  });
 
   function setFlowSaveHandler(fn) {
-    requestFlowSave = typeof fn === 'function' ? fn : null;
+    setWorkspaceFlowSaveHandler(fn);
   }
-
-  function normalizeImportedGraph(parsed) {
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (Array.isArray(parsed.nodes)) {
-      const name = typeof parsed.name === 'string' ? parsed.name.trim() : '';
-      return { snapshot: deepClone(parsed), name };
-    }
-    if (parsed.data && typeof parsed.data === 'object' && Array.isArray(parsed.data.nodes)) {
-      const inner = parsed.data;
-      const name = typeof parsed.name === 'string' && parsed.name.trim()
-        ? parsed.name.trim()
-        : typeof inner.name === 'string'
-          ? inner.name.trim()
-          : '';
-      return { snapshot: deepClone(inner), name };
-    }
-    return null;
-  }
-
-  const deepClone = (value) => {
-    if (value == null) return value;
-    try {
-      return JSON.parse(JSON.stringify(value));
-    } catch (_) {
-      if (Array.isArray(value)) return value.map((entry) => deepClone(entry));
-      if (typeof value === 'object') return { ...value };
-      return value;
-    }
-  };
-
-  const isEditableTarget = (target) => {
-    if (!(target instanceof Element)) return false;
-    const tag = target.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-    if (target.isContentEditable) return true;
-    return Boolean(target.closest('[contenteditable="true"]'));
-  };
 
   const ensureSelectionSet = () => {
     if (!WS.selectedNodes) WS.selectedNodes = new Set();
@@ -531,62 +188,15 @@ function createGraph({
   const GRID_SIZE = 14;
   const WIRE_ACTIVE_MS = 750;
   let zoomRefreshRaf = 0;
-  let uiAudioCtx = null;
 
   const currentScale = () => {
     const s = Number(WS.view?.scale);
     return Number.isFinite(s) && s > 0 ? s : 1;
   };
 
-  const ensureAudioCtx = () => {
-    if (typeof window === 'undefined') return null;
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return null;
-    if (!uiAudioCtx) {
-      try {
-        uiAudioCtx = new AudioCtx();
-      } catch (err) {
-        uiAudioCtx = null;
-      }
-    }
-    if (uiAudioCtx && uiAudioCtx.state === 'suspended') {
-      uiAudioCtx.resume().catch(() => { });
-    }
-    return uiAudioCtx;
-  };
-
-  const playBlip = (frequency, durationMs, gainValue) => {
-    try {
-      const ctx = ensureAudioCtx();
-      if (!ctx) return;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = frequency;
-      const now = ctx.currentTime;
-      const durationSec = Math.max(durationMs || 0, 1) / 1000;
-      const volume = Math.max(0.0001, gainValue ?? 0.04);
-      gain.gain.setValueAtTime(volume, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + durationSec);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + durationSec);
-    } catch (err) {
-      // ignore audio errors (likely autoplay restrictions)
-    }
-  };
-
-  const playMoveBlip = () => playBlip(12000, 50, 0.03);
-  const playResizeBlip = () => playBlip(200, 100, 0.05);
-
   const clampSize = (value, min, max) => {
     const numeric = Number.isFinite(value) ? value : min;
     return Math.min(Math.max(numeric, min), max);
-  };
-
-  const convertBooleanSelectsIn = (container) => {
-    if (!container) return;
-    container.querySelectorAll('select').forEach((sel) => convertBooleanSelect(sel));
   };
 
   function historySnapshotNode(nodeId) {
@@ -736,6 +346,8 @@ function createGraph({
         break;
     }
   }
+
+  History.setHandlers({ onUndo: applyHistoryUndo, onRedo: applyHistoryRedo });
 
   function ensureSvgLayer() {
     if (!WS.svg) return;
@@ -2326,7 +1938,7 @@ function refreshNodeResolution(force = false) {
         changed = true;
       }
       if (changed) {
-        playResizeBlip();
+        audio.playResizeBlip();
         requestRedraw();
       }
     });
@@ -2538,7 +2150,7 @@ function refreshNodeResolution(force = false) {
       });
       if (changed) {
         drag.moved = true;
-        playMoveBlip();
+        audio.playMoveBlip();
         requestRedraw();
       }
     };
@@ -3209,225 +2821,7 @@ function refreshNodeResolution(force = false) {
     }
   }
 
-  const GraphTypes = {
-    ASR: {
-      title: 'ASR',
-      supportsNkn: true,
-      relayKey: 'relay',
-      inputs: [{ name: 'mute', label: 'Mute' }],
-      outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }, { name: 'active', label: 'Active' }],
-      schema: [
-        { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8126' },
-        { key: 'relay', label: 'NKN Relay', type: 'text' },
-        { key: 'api', label: 'API Key', type: 'text' },
-        { key: 'model', label: 'Model', type: 'select', options: [] },
-        { key: 'mode', label: 'Mode', type: 'select', options: ['fast', 'accurate'], def: 'fast' },
-        { key: 'rate', label: 'Sample Rate', type: 'number', def: 16000 },
-        { key: 'chunk', label: 'Chunk (ms)', type: 'number', def: 120 },
-        { key: 'live', label: 'Live Mode', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'rms', label: 'RMS Threshold', type: 'text', def: 0.015 },
-        { key: 'hold', label: 'Hold (ms)', type: 'number', def: 250 },
-        { key: 'emaMs', label: 'EMA (ms)', type: 'number', def: 120 },
-        { key: 'phraseOn', label: 'Phrase Mode', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'phraseMin', label: 'Min Words', type: 'number', def: 3 },
-        { key: 'phraseStable', label: 'Stable (ms)', type: 'number', def: 350 },
-        { key: 'silence', label: 'Silence End (ms)', type: 'number', def: 900 },
-        { key: 'prevWin', label: 'Preview Window (s)', type: 'text', placeholder: '(server default)' },
-        { key: 'prevStep', label: 'Preview Step (s)', type: 'text', placeholder: '(server default)' },
-        { key: 'prevModel', label: 'Preview Model', type: 'select', options: [] },
-        { key: 'prompt', label: 'Prompt', type: 'textarea', placeholder: 'Bias decoding, names, spellings…' },
-        { key: 'muteSignalMode', label: 'Mute Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' },
-        { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
-      ]
-    },
-    LLM: {
-      title: 'LLM',
-      supportsNkn: true,
-      relayKey: 'relay',
-      inputs: [{ name: 'prompt' }, { name: 'image' }, { name: 'system' }],
-      outputs: [{ name: 'delta' }, { name: 'final' }, { name: 'memory' }],
-      schema: [
-        { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:11434' },
-        { key: 'relay', label: 'NKN Relay', type: 'text' },
-        { key: 'api', label: 'API Key', type: 'text' },
-        { key: 'model', label: 'Model', type: 'select', options: [] },
-        { key: 'stream', label: 'Stream', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'useSystem', label: 'Use System Message', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'system', label: 'System Prompt', type: 'textarea' },
-        { key: 'memoryOn', label: 'Use Chat Memory', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'persistMemory', label: 'Persist Memory', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'maxTurns', label: 'Max Turns', type: 'number', def: 16 }
-      ]
-    },
-    TTS: {
-      title: 'TTS',
-      supportsNkn: true,
-      relayKey: 'relay',
-      inputs: [{ name: 'text' }, { name: 'mute', label: 'Mute' }],
-      outputs: [{ name: 'active', label: 'Active' }],
-      schema: [
-        { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8123' },
-        { key: 'relay', label: 'NKN Relay', type: 'text' },
-        { key: 'api', label: 'API Key', type: 'text' },
-        { key: 'model', label: 'Voice/Model', type: 'select', options: [] },
-        { key: 'mode', label: 'Mode', type: 'select', options: ['stream', 'file'], def: 'stream' },
-        { key: 'filterTokens', label: 'Filter List', type: 'filterList', def: ['#'], placeholder: 'Character or phrase to strip', note: 'Emoji are always removed before synthesis.' },
-        { key: 'muteSignalMode', label: 'Mute Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' },
-        { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
-      ]
-    },
-    ImageInput: {
-      title: 'Image Input',
-      inputs: [],
-      outputs: [{ name: 'image' }],
-      schema: []
-    },
-    TextInput: {
-      title: 'Text Input',
-      inputs: [],
-      outputs: [{ name: 'text' }],
-      schema: [
-        { key: 'placeholder', label: 'Placeholder', type: 'text', placeholder: 'Type a message…' }
-      ]
-    },
-    TextDisplay: {
-      title: 'Text Display',
-      inputs: [{ name: 'text' }],
-      outputs: [],
-      schema: []
-    },
-    Template: {
-      title: 'Template',
-      inputs: [{ name: 'trigger' }],
-      outputs: [{ name: 'text' }],
-      schema: [
-        { key: 'template', label: 'Template Text', type: 'textarea', placeholder: 'Hello {name}, welcome to {place}.' }
-      ]
-    },
-    LogicGate: {
-      title: 'Logic Gate',
-      inputs: [],
-      outputs: [],
-      schema: [
-        { key: 'rules', label: 'Logic Rules', type: 'logicRules' }
-      ]
-    },
-    FileTransfer: {
-      title: 'File Transfer',
-      inputs: [{ name: 'incoming', label: 'Incoming DM' }, { name: 'file', label: 'File Input' }],
-      outputs: [
-        { name: 'packet', label: 'DM Packet' },
-        { name: 'outgoing', label: 'DM Packet (legacy)' },
-        { name: 'file', label: 'File' },
-        { name: 'status', label: 'Status' }
-      ],
-      schema: [
-        { key: 'chunkSize', label: 'Chunk Size (bytes)', type: 'number', def: 1024 },
-        { key: 'autoAccept', label: 'Auto-accept incoming', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'defaultKey', label: 'Default Passphrase', type: 'text', placeholder: '(optional shared key)' },
-        { key: 'preferRoute', label: 'Default Route Tag', type: 'text', placeholder: 'optional route identifier' }
-      ]
-    },
-    NknDM: {
-      title: 'NKN DM',
-      supportsNkn: true,
-      relayKey: 'address',
-      inputs: [{ name: 'text' }, { name: 'packet', label: 'DM Packet' }],
-      outputs: [{ name: 'incoming' }, { name: 'status' }, { name: 'raw' }],
-      schema: [
-        { key: 'address', label: 'Target Address', type: 'text', placeholder: 'nkn...' },
-        { key: 'chunkBytes', label: 'Chunk Size (bytes)', type: 'number', def: 50000 },
-        { key: 'heartbeatInterval', label: 'Heartbeat (s)', type: 'number', def: 15 }
-      ]
-    },
-    MediaStream: {
-      title: 'Media Stream',
-      supportsNkn: true,
-      inputs: [{ name: 'media' }],
-      outputs: [{ name: 'packet', label: 'DM Packet' }, { name: 'media', label: 'Media' }],
-      schema: [
-        { key: 'includeVideo', label: 'Include Video', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'includeAudio', label: 'Include Audio', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'frameRate', label: 'Frame Rate (fps)', type: 'number', def: 8 },
-        { key: 'videoWidth', label: 'Video Width', type: 'number', def: 640 },
-        { key: 'videoHeight', label: 'Video Height', type: 'number', def: 480 },
-        { key: 'compression', label: 'Compression (%)', type: 'range', def: 60, min: 0, max: 95, step: 5 },
-        { key: 'audioSampleRate', label: 'Audio Sample Rate', type: 'select', options: ['16000', '24000', '32000', '44100', '48000'], def: '48000' },
-        { key: 'audioChannels', label: 'Audio Channels', type: 'select', options: ['1', '2'], def: '1' },
-        { key: 'audioFormat', label: 'Audio Format', type: 'select', options: ['pcm16', 'opus'], def: 'pcm16' },
-        { key: 'audioBitsPerSecond', label: 'Audio Bitrate (bps)', type: 'number', def: 32000 }
-      ]
-    },
-    Meshtastic: {
-      title: 'Meshtastic',
-      supportsNkn: false,
-      inputs: [{ name: 'public', label: 'Send Public' }],
-      outputs: [{ name: 'public', label: 'Public Messages' }],
-      schema: [
-        { key: 'channel', label: 'Channel', type: 'number', def: 0 },
-        { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'defaultJson', label: 'Default JSON Output', type: 'select', options: ['true', 'false'], def: 'true' }
-      ]
-    },
-    WebSerial: {
-      title: 'WebSerial',
-      supportsNkn: false,
-      inputs: [{ name: 'send', label: 'Send' }],
-      outputs: [{ name: 'data', label: 'Data' }],
-      schema: [
-        { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'autoReconnect', label: 'Auto Reconnect', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'rememberPort', label: 'Remember Port', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'baudRate', label: 'Baud Rate', type: 'number', def: 115200 },
-        { key: 'encoding', label: 'Encoding', type: 'text', placeholder: 'utf-8', def: 'utf-8' },
-        { key: 'writeMode', label: 'Write Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
-        { key: 'readMode', label: 'Read Mode', type: 'select', options: ['text', 'hex'], def: 'text' },
-        { key: 'appendNewline', label: 'Append Newline', type: 'select', options: ['false', 'true'], def: 'false' },
-        { key: 'newline', label: 'Newline', type: 'text', def: '\\n', placeholder: '\\n' },
-        { key: 'maxLogLines', label: 'Max Log Lines', type: 'number', def: 500 }
-      ]
-    },
-    Orientation: {
-      title: 'Orientation',
-      inputs: [],
-      outputs: [{ name: 'orientation' }],
-      schema: [
-        { key: 'format', label: 'Output Format', type: 'select', options: ['raw', 'euler', 'quaternion'], def: 'raw' }
-      ]
-    },
-    Location: {
-      title: 'Location',
-      inputs: [],
-      outputs: [{ name: 'location' }],
-      schema: [
-        { key: 'format', label: 'Output Format', type: 'select', options: ['raw', 'geohash'], def: 'raw' },
-        { key: 'precision', label: 'Precision', type: 'range', min: 1, max: 12, step: 1, def: 6 }
-      ]
-    },
-    MCP: {
-      title: 'MCP Server',
-      supportsNkn: true,
-      relayKey: 'relay',
-      inputs: [{ name: 'query' }, { name: 'tool' }, { name: 'refresh' }],
-      outputs: [{ name: 'system' }, { name: 'prompt' }, { name: 'context' }, { name: 'resources' }, { name: 'status' }, { name: 'raw' }],
-      schema: [
-        { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:9003' },
-        { key: 'relay', label: 'NKN Relay', type: 'text' },
-        { key: 'api', label: 'API Key', type: 'text' },
-        { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'connectOnQuery', label: 'Connect on Query', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'protocolVersion', label: 'Protocol Version', type: 'text', def: '2024-05-31' },
-        { key: 'clientName', label: 'Client Name', type: 'text', def: 'hydra-graph' },
-        { key: 'clientVersion', label: 'Client Version', type: 'text', def: '0.1.0' },
-        { key: 'resourceFilters', label: 'Default Resource Tags', type: 'text', placeholder: 'llm,nkn' },
-        { key: 'toolFilters', label: 'Default Tools', type: 'text', placeholder: 'hydra.nkn.status' },
-        { key: 'augmentSystem', label: 'System Addendum', type: 'textarea', placeholder: 'Supplementary system instructions' },
-        { key: 'emitSystem', label: 'Emit System Prompt', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'emitContext', label: 'Emit Context', type: 'select', options: ['true', 'false'], def: 'true' },
-        { key: 'timeoutMs', label: 'Timeout (ms)', type: 'number', def: 20000 }
-      ]
-    }
-  };
+  const GraphTypes = graphTypes;
 
   const TEMPLATE_VAR_RE = /\{([a-zA-Z0-9_]+)\}/g;
 
@@ -5509,7 +4903,7 @@ function refreshNodeResolution(force = false) {
         }
         fields.appendChild(label);
         fields.appendChild(select);
-        convertBooleanSelect(select);
+        convertBooleanSelectsIn(select.parentElement || select);
       } else {
         const input = field.type === 'textarea' ? document.createElement('textarea') : document.createElement('input');
         if (field.type !== 'textarea') input.type = field.type || 'text';
@@ -5829,8 +5223,7 @@ function refreshNodeResolution(force = false) {
         for (const m of mutations) {
           m.addedNodes?.forEach((node) => {
             if (!(node instanceof HTMLElement)) return;
-            if (node.tagName === 'SELECT') convertBooleanSelect(node);
-            node.querySelectorAll?.('select').forEach((sel) => convertBooleanSelect(sel));
+            convertBooleanSelectsIn(node);
           });
         }
       });
@@ -6509,8 +5902,11 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       if (key === 's') {
         e.preventDefault();
         if (e.shiftKey) saveWorkspaceAsInteractive();
-        else if (requestFlowSave) requestFlowSave();
-        else downloadWorkspaceFile();
+        else {
+          const flowSave = getFlowSaveHandler();
+          if (flowSave) flowSave();
+          else downloadWorkspaceFile();
+        }
         return;
       }
 
