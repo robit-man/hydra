@@ -2536,14 +2536,17 @@ audio {
 .peer-left {
   flex: 1 1 45%;
   display: flex;
-  gap:0.5rem;
+  gap: 0.5rem;
   min-width: 280px;
+
+  flex-flow: column;
 }
 
 .peer-right {
   flex: 1 1 55%;
   min-width: 320px;
   display: flex;
+  flex-flow: column;
   flex-direction: column;
 }
 
