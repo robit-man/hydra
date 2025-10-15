@@ -115,6 +115,17 @@ function serviceNameFromConfig(cfg) {
 function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, log = noop }) {
   const stateMap = new Map();
 
+  function config(nodeId) {
+    const record = NodeStore.ensure(nodeId, 'WebScraper');
+    return record?.config || {};
+  }
+
+  function updateConfig(nodeId, patch) {
+    const next = { ...config(nodeId), ...patch };
+    NodeStore.saveCfg(nodeId, 'WebScraper', next);
+    return next;
+  }
+
   function ensureState(nodeId) {
     let state = stateMap.get(nodeId);
     const node = getNode(nodeId);
@@ -187,6 +198,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         frameOutputMode: 'wrapped',
         lastWheelTs: 0,
         busyCount: 0,
+        busyDisabled: null,
         logLines: [],
         eventGen: 0,
         eventsCancel: null,
@@ -451,8 +463,95 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         try { fn(); } catch (_) { /* ignore */ }
       }
     }
-    state.cleanup = [];
-    stateMap.delete(nodeId);
+      state.cleanup = [];
+      stateMap.delete(nodeId);
+  }
+
+  function setBusy(state, busy) {
+    if (!state) return;
+    if (busy) {
+      state.busyCount = (state.busyCount || 0) + 1;
+      if (state.busyCount === 1) {
+        const disabled = new Map();
+        const elements = state.elements || {};
+        const track = [
+          elements.connect,
+          elements.close,
+          elements.nav,
+          elements.back,
+          elements.forward,
+          elements.click,
+          elements.type,
+          elements.scroll,
+          elements.scrollUp,
+          elements.scrollDown,
+          elements.screenshot,
+          elements.dom
+        ];
+        for (const btn of track) {
+          if (!btn) continue;
+          disabled.set(btn, btn.disabled);
+          btn.disabled = true;
+        }
+        state.busyDisabled = disabled;
+      }
+    } else {
+      state.busyCount = Math.max(0, (state.busyCount || 0) - 1);
+      if (state.busyCount === 0) {
+        if (state.busyDisabled instanceof Map) {
+          for (const [btn, wasDisabled] of state.busyDisabled.entries()) {
+            if (!btn) continue;
+            btn.disabled = wasDisabled;
+          }
+        }
+        state.busyDisabled = null;
+      }
+    }
+    const isBusy = state.busyCount > 0;
+    const node = getNode(state.nodeId);
+    if (node?.el) {
+      if (isBusy) node.el.dataset.busy = 'busy';
+      else delete node.el.dataset.busy;
+    }
+    const root = state.elements?.root;
+    if (root) {
+      if (isBusy) root.classList.add('is-busy');
+      else root.classList.remove('is-busy');
+    }
+  }
+
+  function setStatus(nodeId, text, tone = '') {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const el = state.elements?.status;
+    if (!el) return;
+    el.textContent = text || '';
+    if (!el.classList) return;
+    const classes = ['ok', 'warn', 'err', 'pending', 'info'];
+    for (const cls of classes) el.classList.remove(cls);
+    const normalized = typeof tone === 'string' ? tone.trim().toLowerCase() : '';
+    if (normalized && classes.includes(normalized)) el.classList.add(normalized);
+  }
+
+  function appendLog(nodeId, message, cls = '') {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const logEl = state.elements?.log;
+    if (!logEl) return;
+    const line = document.createElement('div');
+    line.textContent = message || '';
+    if (cls && line.classList) line.classList.add(cls);
+    logEl.appendChild(line);
+    state.logLines.push(line);
+    while (state.logLines.length > MAX_LOG_LINES) {
+      const old = state.logLines.shift();
+      try {
+        old?.remove();
+      } catch (_) {
+        // ignore
+      }
+    }
+    logEl.scrollTop = logEl.scrollHeight;
   }
 
   function updateSessionLabel(state) {
