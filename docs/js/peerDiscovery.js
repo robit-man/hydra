@@ -1,10 +1,11 @@
-import { qs } from './utils.js';
+import { qs, LS } from './utils.js';
 
 const NATS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/nats.ws/+esm';
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const DEFAULT_HEARTBEAT_SEC = 12;
 const OFFLINE_AFTER_SECONDS = 45;
 const PING_TIMEOUT_MS = 8000;
+const USERNAME_KEY = 'hydra.peer.username';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -18,6 +19,15 @@ const normalizeKey = (value) => {
     // ignore
   }
   return text.trim();
+};
+
+const sanitizeUsername = (value) => {
+  if (typeof value !== 'string') return '';
+  let text = value.normalize?.('NFKC') ?? value;
+  text = text.replace(/[^\w\s.\-]/g, '');
+  text = text.trim();
+  if (text.length > 48) text = text.slice(0, 48);
+  return text;
 };
 
 class Store {
@@ -319,6 +329,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     discovery: null,
     connecting: null,
     meAddr: '',
+    username: '',
     room: derivedRoom,
     peers: new Map(),
     pendingPings: new Map(),
@@ -330,6 +341,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     remoteHashes: new Map()
   };
   state.store = sharedStore;
+
+  try {
+    const storedName = LS.get(USERNAME_KEY, '');
+    if (storedName) state.username = sanitizeUsername(storedName);
+  } catch (_) {
+    state.username = sanitizeUsername(state.username || '');
+  }
 
   sharedStore.all().forEach((peer) => {
     const normalized = normalizePeerEntry(peer);
@@ -355,6 +373,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     els.list = qs('#peerList');
     els.status = qs('#peerStatus');
     els.self = qs('#peerSelf');
+    els.nameInput = qs('#peerUsernameInput');
+    els.nameApply = qs('#peerUsernameApply');
+    els.nameBadge = qs('#peerSelfName');
+    els.badgeCount = qs('#peerOnlineBadge');
+    if (els.nameInput) els.nameInput.value = state.username || '';
+    updateSelf();
+    updateBadge();
   }
 
   function showModal() {
@@ -401,6 +426,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!els.status) return;
     if (state.statusOverride != null) {
       els.status.textContent = state.statusOverride;
+      updateBadge();
       return;
     }
     const total = state.peers.size;
@@ -411,6 +437,18 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         ? `Offline • ${total} known`
         : 'Discovery offline';
     els.status.textContent = message;
+    updateBadge();
+  }
+
+  function updateBadge() {
+    if (!els.badgeCount) return;
+    const online = Array.from(state.peers.values()).filter((peer) => peer?.online).length;
+    if (online > 0) {
+      els.badgeCount.textContent = String(online);
+      els.badgeCount.classList.remove('hidden');
+    } else {
+      els.badgeCount.classList.add('hidden');
+    }
   }
 
   function scheduleRender() {
@@ -429,12 +467,30 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!nknPub) return null;
     const addrValue = entry.addr || entry.address || rawPub || '';
     const addrTrimmed = typeof addrValue === 'string' ? addrValue.trim() : String(addrValue || '').trim();
+    const meta = entry.meta && typeof entry.meta === 'object' ? { ...entry.meta } : {};
+    if (meta.username) meta.username = sanitizeUsername(meta.username);
+    const sharedRaw = [];
+    if (Array.isArray(entry.sharedSources)) sharedRaw.push(...entry.sharedSources);
+    if (Array.isArray(entry.sharedFrom)) sharedRaw.push(...entry.sharedFrom);
+    else if (entry.sharedFrom) sharedRaw.push(entry.sharedFrom);
+    const sharedSources = sharedRaw
+      .map((value) => {
+        if (!value) return '';
+        if (typeof value === 'string') return value;
+        if (typeof value === 'object') {
+          return value.label || value.addr || value.from || value.id || '';
+        }
+        return String(value || '');
+      })
+      .map((value) => value.trim())
+      .filter(Boolean);
     return {
       nknPub,
       addr: addrTrimmed || rawPub || nknPub,
       originalPub: typeof rawPub === 'string' ? rawPub.trim() : String(rawPub || '').trim() || nknPub,
-      meta: entry.meta || {},
-      last: typeof entry.last === 'number' ? entry.last : nowSeconds()
+      meta,
+      last: typeof entry.last === 'number' ? entry.last : nowSeconds(),
+      sharedSources
     };
   }
 
@@ -445,6 +501,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     const payload = {
       type: 'peer-directory',
       pub: state.meAddr,
+      meta: { username: sanitizeUsername(state.username || ''), graphId: CFG.graphId || '' },
       peers: list
         .map(normalizePeerEntry)
         .filter(Boolean)
@@ -461,19 +518,25 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     const entries = [];
     state.peers.forEach((peer) => {
       if (!peer?.nknPub) return;
+      const username = sanitizeUsername(peer.meta?.username || peer.meta?.name || peer.displayName || '');
       entries.push({
         nknPub: peer.originalPub || peer.nknPub,
         addr: peer.addr || peer.originalPub || peer.nknPub,
-        meta: peer.meta || {},
-        last: peer.last || nowSeconds()
+        meta: {
+          ...(peer.meta || {}),
+          username
+        },
+        last: peer.last || nowSeconds(),
+        sharedSources: (peer.sharedSources || []).map(({ label }) => label)
       });
     });
     if (state.meAddr) {
       entries.push({
         nknPub: state.meAddr,
         addr: state.meAddr,
-        meta: { self: true },
-        last: nowSeconds()
+        meta: { self: true, username: sanitizeUsername(state.username || '') },
+        last: nowSeconds(),
+        sharedSources: []
       });
     }
     return entries;
@@ -521,7 +584,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }, delay);
   }
 
-  function upsertPeer(peer, { online, probing } = {}) {
+  function upsertPeer(peer, { online, probing, sharedFrom, sharedSources } = {}) {
     const key = normalizeKey(peer?.nknPub || peer?.addr || '');
     if (!key) return { added: false, entry: null };
     const existing = state.peers.get(key) || {};
@@ -544,13 +607,41 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     };
     if (online !== undefined) merged.online = online;
     if (probing !== undefined) merged.probing = probing;
+
+    const sharedMap = new Map();
+    const addSource = (value) => {
+      if (!value) return;
+      const label = String(value).trim();
+      if (!label) return;
+      const key = normalizeKey(label);
+      if (!key || key === merged.nknPub) return;
+      if (!sharedMap.has(key)) sharedMap.set(key, label);
+    };
+    if (Array.isArray(existing.sharedSources)) {
+      existing.sharedSources.forEach((item) => {
+        if (!item) return;
+        const label = typeof item === 'string' ? item : item.label || item.addr || item.key || '';
+        addSource(label);
+      });
+    }
+    if (Array.isArray(peer.sharedSources)) peer.sharedSources.forEach(addSource);
+    if (Array.isArray(sharedSources)) sharedSources.forEach(addSource);
+    if (peer.sharedFrom) addSource(peer.sharedFrom);
+    if (sharedFrom) addSource(sharedFrom);
+
+    const sharedArray = Array.from(sharedMap.entries()).map(([k, label]) => ({ key: k, label }));
+    merged.sharedSources = sharedArray;
+    merged.sharedFrom = sharedArray[0]?.key || null;
+    merged.sharedFromLabel = sharedArray[0]?.label || '';
+
     state.peers.set(key, merged);
     try {
       state.store.upsert({
         nknPub: merged.originalPub || merged.nknPub,
         addr: merged.addr,
         meta: merged.meta || {},
-        last: merged.last || nowSeconds()
+        last: merged.last || nowSeconds(),
+        sharedSources: sharedArray
       });
     } catch (_) {
       // ignore persistence errors
@@ -573,6 +664,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
     if (changed) renderPeers();
     else refreshStatus();
+    updateBadge();
   }
 
   function pingPeer(pub) {
@@ -632,14 +724,46 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
     els.self.textContent = `Your address: ${state.meAddr}`;
     els.self.classList.remove('hidden');
+    if (els.nameInput && document.activeElement !== els.nameInput) {
+      els.nameInput.value = state.username || '';
+    }
+    if (els.nameBadge) {
+      const name = (state.username || '').trim();
+      els.nameBadge.textContent = name ? `Presenting as ${name}` : '';
+      els.nameBadge.classList.toggle('hidden', !name);
+    }
+  }
+
+  function getDisplayName(peer) {
+    const name = peer.meta?.username && sanitizeUsername(peer.meta.username);
+    if (name) return name;
+    return formatAddress(peer.addr || peer.originalPub || peer.nknPub);
+  }
+
+  function getSortName(peer) {
+    const name = peer.meta?.username && sanitizeUsername(peer.meta.username);
+    if (name) return name.toLowerCase();
+    return (peer.addr || peer.originalPub || peer.nknPub || '').toLowerCase();
   }
 
   function renderPeers() {
     if (!els.list) return;
     els.list.innerHTML = '';
-    const peers = Array.from(state.peers.values())
-      .filter((peer) => peer?.nknPub)
-      .sort((a, b) => (b.last || 0) - (a.last || 0));
+    const now = nowSeconds();
+    const peers = Array.from(state.peers.values()).filter((peer) => peer?.nknPub);
+    peers.sort((a, b) => {
+      const lastA = a.last || now;
+      const lastB = b.last || now;
+      const deltaA = Math.max(0, now - lastA);
+      const deltaB = Math.max(0, now - lastB);
+      const bucketA = Math.floor(deltaA / 60);
+      const bucketB = Math.floor(deltaB / 60);
+      if (bucketA !== bucketB) return bucketA - bucketB;
+      const nameA = getSortName(a);
+      const nameB = getSortName(b);
+      if (nameA !== nameB) return nameA.localeCompare(nameB);
+      return (a.addr || a.nknPub || '').localeCompare(b.addr || b.nknPub || '');
+    });
     if (!peers.length) {
       const empty = document.createElement('div');
       empty.className = 'peer-empty';
@@ -652,6 +776,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     peers.forEach((peer) => {
       const entry = document.createElement('div');
       entry.className = 'peer-entry';
+      entry.dataset.peerId = peer.nknPub;
       entry.classList.toggle('offline', !peer.online);
       entry.classList.toggle('probing', !!peer.probing);
 
@@ -660,23 +785,48 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
       const nameEl = document.createElement('div');
       nameEl.className = 'peer-name';
-      nameEl.textContent = formatAddress(peer.addr || peer.nknPub);
+      nameEl.textContent = getDisplayName(peer);
       meta.appendChild(nameEl);
+
+      const addrEl = document.createElement('div');
+      addrEl.className = 'peer-address';
+      addrEl.textContent = peer.addr || peer.originalPub || peer.nknPub;
+      meta.appendChild(addrEl);
 
       const infoEl = document.createElement('div');
       infoEl.className = 'peer-info';
       const parts = [];
-      if (peer.meta?.graphId) parts.push(`Graph ${String(peer.meta.graphId).slice(0, 8)}`);
       const statusText = peer.online ? 'Online' : peer.probing ? 'Checking...' : 'Offline';
       const lastSeconds = peer.last
         ? peer.last
         : peer.lastSeenAt
           ? Math.floor(peer.lastSeenAt / 1000)
           : 0;
-      parts.push(`${statusText}`);
+      parts.push(statusText);
       parts.push(`Last seen ${formatLast(lastSeconds)}`);
+      if (peer.meta?.graphId) parts.push(`Graph ${String(peer.meta.graphId).slice(0, 8)}`);
       infoEl.textContent = parts.join(' • ');
       meta.appendChild(infoEl);
+
+      if (Array.isArray(peer.sharedSources) && peer.sharedSources.length) {
+        const sharedRow = document.createElement('div');
+        sharedRow.className = 'peer-shared';
+        sharedRow.append('Shared from ');
+        const first = peer.sharedSources[0];
+        const targetKey = first?.key || normalizeKey(first?.label) || '';
+        const label = first?.label || formatAddress(first?.key || '');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = formatAddress(label || targetKey);
+        btn.addEventListener('click', () => scrollToPeer(targetKey));
+        sharedRow.appendChild(btn);
+        if (peer.sharedSources.length > 1) {
+          const more = document.createElement('span');
+          more.textContent = ` (+${peer.sharedSources.length - 1} more)`;
+          sharedRow.appendChild(more);
+        }
+        entry.appendChild(sharedRow);
+      }
 
       entry.appendChild(meta);
 
@@ -687,7 +837,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       syncBtn.textContent = 'Sync';
       syncBtn.addEventListener('click', (e) => {
         e.preventDefault();
-        const target = peer.addr || peer.nknPub;
+        const target = peer.addr || peer.originalPub || peer.nknPub;
         if (!target) return;
         WorkspaceSync.promptSync(target);
         hideModal();

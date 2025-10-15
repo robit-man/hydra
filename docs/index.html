@@ -26,14 +26,17 @@
             <div id="workspaceWrap" class="">
                 <div class="menu-row">
                     <div class="node-row">
-                    <div class="node-menu">
-                        <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
-                        <div id="nodeMenuList" class="node-menu-list hidden"></div>
+                        <div class="node-menu">
+                            <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
+                            <div id="nodeMenuList" class="node-menu-list hidden"></div>
+                        </div>
+                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
+                        <button id="peerListButton" class="ghost">
+                            <img src="img/network.svg" alt="" class="icon inverted">
+                            <span id="peerOnlineBadge" class="peer-badge hidden">0</span>
+                        </button>
+                        <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
                     </div>
-                    <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
-                    <button id="peerListButton" class="ghost"><img src="img/network.svg" alt="" class="icon inverted"></button>
-                    <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
-                </div>
                 <div class="header-actions">
                     <a class="router-download" href="/router.py" download="router.py">
                         <button><img src="img/code.svg" alt="" class="icon"></button>
@@ -205,7 +208,15 @@
             </div>
             <div class="modal-body peer-modal-body">
                 <div class="help" id="peerStatus">Initializing discovery...</div>
-                <div class="peer-self muted" id="peerSelf"></div>
+                <div class="peer-identity">
+                    <label for="peerUsernameInput">Display Name</label>
+                    <div class="peer-identity-row">
+                        <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48" autocomplete="off" spellcheck="false">
+                        <button type="button" class="secondary" id="peerUsernameApply">Save</button>
+                    </div>
+                    <div class="peer-self muted" id="peerSelf"></div>
+                    <div class="peer-self-name muted" id="peerSelfName"></div>
+                </div>
                 <div class="peer-list" id="peerList"></div>
             </div>
         </div>

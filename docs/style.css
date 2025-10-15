@@ -2531,6 +2531,41 @@ audio {
   overflow-y: auto;
 }
 
+.peer-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+
+.peer-identity label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.peer-identity-row {
+  display: flex;
+  gap: 8px;
+}
+
+.peer-identity-row input {
+  flex: 1;
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.peer-self-name {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .peer-entry {
   display: flex;
   align-items: flex-start;
@@ -2548,6 +2583,26 @@ audio {
 
 .peer-entry.probing {
   opacity: 0.65;
+}
+
+.peer-entry .peer-shared {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.peer-entry .peer-shared button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.peer-entry .peer-shared button:hover {
+  opacity: 0.8;
 }
 
 .peer-actions {
@@ -2664,6 +2719,21 @@ audio {
   color: var(--muted);
   text-align: center;
   padding: 16px 0;
+}
+
+.peer-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #000;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .face-viewer {
