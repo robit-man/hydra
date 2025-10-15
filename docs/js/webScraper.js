@@ -10,11 +10,23 @@ const ACTION_ALIASES = {
   nav: 'nav',
   navigate: 'nav',
   go: 'nav',
+  back: 'back',
+  previous: 'back',
+  forward: 'forward',
+  next: 'forward',
   click: 'click',
   tap: 'click',
   type: 'type',
   input: 'type',
   scroll: 'scroll',
+  scroll_up: 'scroll_up',
+  scrollup: 'scroll_up',
+  'scroll-up': 'scroll_up',
+  up: 'scroll_up',
+  scroll_down: 'scroll_down',
+  scrolldown: 'scroll_down',
+  'scroll-down': 'scroll_down',
+  down: 'scroll_down',
   screenshot: 'screenshot',
   shot: 'screenshot',
   capture: 'screenshot',
@@ -89,9 +101,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       connect: el.querySelector('[data-ws-connect]'),
       close: el.querySelector('[data-ws-close]'),
       nav: el.querySelector('[data-ws-nav]'),
+      back: el.querySelector('[data-ws-back]'),
+      forward: el.querySelector('[data-ws-forward]'),
       click: el.querySelector('[data-ws-click]'),
       type: el.querySelector('[data-ws-type]'),
       scroll: el.querySelector('[data-ws-scroll-btn]'),
+      scrollUp: el.querySelector('[data-ws-scroll-up]'),
+      scrollDown: el.querySelector('[data-ws-scroll-down]'),
       screenshot: el.querySelector('[data-ws-screenshot]'),
       dom: el.querySelector('[data-ws-dom]'),
       url: el.querySelector('[data-ws-url]'),
@@ -150,6 +166,14 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       e.preventDefault();
       performNavigate(nodeId);
     });
+    bind(elements.back, 'click', (e) => {
+      e.preventDefault();
+      performBack(nodeId);
+    });
+    bind(elements.forward, 'click', (e) => {
+      e.preventDefault();
+      performForward(nodeId);
+    });
     bind(elements.click, 'click', (e) => {
       e.preventDefault();
       performClick(nodeId);
@@ -161,6 +185,14 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     bind(elements.scroll, 'click', (e) => {
       e.preventDefault();
       performScroll(nodeId);
+    });
+    bind(elements.scrollUp, 'click', (e) => {
+      e.preventDefault();
+      performScrollUp(nodeId);
+    });
+    bind(elements.scrollDown, 'click', (e) => {
+      e.preventDefault();
+      performScrollDown(nodeId);
     });
     bind(elements.screenshot, 'click', (e) => {
       e.preventDefault();
@@ -304,9 +336,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       elm.disabled = !sid;
     };
     disableIfNoSid(elements.nav);
+    disableIfNoSid(elements.back);
+    disableIfNoSid(elements.forward);
     disableIfNoSid(elements.click);
     disableIfNoSid(elements.type);
     disableIfNoSid(elements.scroll);
+    disableIfNoSid(elements.scrollUp);
+    disableIfNoSid(elements.scrollDown);
     disableIfNoSid(elements.screenshot);
     disableIfNoSid(elements.dom);
     if (elements.close) elements.close.disabled = !hasSession;
@@ -440,6 +476,122 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     } catch (err) {
       const message = err?.message || String(err);
       setStatus(nodeId, `Click failed: ${message}`, 'err');
+      appendLog(nodeId, `error: ${message}`, 'error');
+    } finally {
+      setBusy(state, false);
+    }
+  }
+
+  async function performBack(nodeId) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    if (!viaNkn) {
+      try {
+        await ensureLocalNetworkAccess({ requireGesture: false });
+      } catch (_) {
+        // ignore
+      }
+    }
+    setBusy(state, true);
+    setStatus(nodeId, 'Going back…', 'pending');
+    try {
+      const res = await Net.postJSON(base, '/history/back', { sid }, api, viaNkn, relay, 30000);
+      appendLog(nodeId, res?.message || 'navigated back');
+      setStatus(nodeId, 'Went back', 'ok');
+      if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
+    } catch (err) {
+      const message = err?.message || String(err);
+      setStatus(nodeId, `Back failed: ${message}`, 'err');
+      appendLog(nodeId, `error: ${message}`, 'error');
+    } finally {
+      setBusy(state, false);
+    }
+  }
+
+  async function performForward(nodeId) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    if (!viaNkn) {
+      try {
+        await ensureLocalNetworkAccess({ requireGesture: false });
+      } catch (_) {
+        // ignore
+      }
+    }
+    setBusy(state, true);
+    setStatus(nodeId, 'Going forward…', 'pending');
+    try {
+      const res = await Net.postJSON(base, '/history/forward', { sid }, api, viaNkn, relay, 30000);
+      appendLog(nodeId, res?.message || 'navigated forward');
+      setStatus(nodeId, 'Went forward', 'ok');
+      if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
+    } catch (err) {
+      const message = err?.message || String(err);
+      setStatus(nodeId, `Forward failed: ${message}`, 'err');
+      appendLog(nodeId, `error: ${message}`, 'error');
+    } finally {
+      setBusy(state, false);
+    }
+  }
+
+  async function performScrollUp(nodeId, amountOverride) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const amount = Math.abs(Number.isFinite(amountOverride) ? amountOverride : state.inputs.amount || 600);
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    setBusy(state, true);
+    setStatus(nodeId, `Scroll up ${amount}`, 'pending');
+    try {
+      const res = await Net.postJSON(base, '/scroll/up', { sid, amount }, api, viaNkn, relay, 30000);
+      appendLog(nodeId, res?.message || `scroll up ${amount}`);
+      setStatus(nodeId, 'Scroll up done', 'ok');
+      if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
+    } catch (err) {
+      const message = err?.message || String(err);
+      setStatus(nodeId, `Scroll up failed: ${message}`, 'err');
+      appendLog(nodeId, `error: ${message}`, 'error');
+    } finally {
+      setBusy(state, false);
+    }
+  }
+
+  async function performScrollDown(nodeId, amountOverride) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const amount = Math.abs(Number.isFinite(amountOverride) ? amountOverride : state.inputs.amount || 600);
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    setBusy(state, true);
+    setStatus(nodeId, `Scroll down ${amount}`, 'pending');
+    try {
+      const res = await Net.postJSON(base, '/scroll/down', { sid, amount }, api, viaNkn, relay, 30000);
+      appendLog(nodeId, res?.message || `scroll down ${amount}`);
+      setStatus(nodeId, 'Scroll down done', 'ok');
+      if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
+    } catch (err) {
+      const message = err?.message || String(err);
+      setStatus(nodeId, `Scroll down failed: ${message}`, 'err');
       appendLog(nodeId, `error: ${message}`, 'error');
     } finally {
       setBusy(state, false);
@@ -921,6 +1073,12 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       case 'nav':
         performNavigate(nodeId, payload?.url || payload?.target);
         break;
+      case 'back':
+        performBack(nodeId);
+        break;
+      case 'forward':
+        performForward(nodeId);
+        break;
       case 'click':
         performClick(nodeId, payload?.selector);
         break;
@@ -929,6 +1087,12 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         break;
       case 'scroll':
         performScroll(nodeId, payload?.amount);
+        break;
+      case 'scroll_up':
+        performScrollUp(nodeId, payload?.amount);
+        break;
+      case 'scroll_down':
+        performScrollDown(nodeId, payload?.amount);
         break;
       case 'screenshot':
         captureScreenshot(nodeId);

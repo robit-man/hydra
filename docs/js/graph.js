@@ -1611,6 +1611,10 @@ function refreshNodeResolution(force = false) {
                 <button type="button" class="ghost" data-ws-nav>Go</button>
               </div>
             </div>
+            <div class="wscraper-buttons secondary">
+              <button type="button" class="ghost" data-ws-back>◀ Back</button>
+              <button type="button" class="ghost" data-ws-forward>Forward ▶</button>
+            </div>
             <div class="wscraper-field-grid">
               <label>
                 Selector
@@ -1629,6 +1633,8 @@ function refreshNodeResolution(force = false) {
               <button type="button" class="ghost" data-ws-click>Click</button>
               <button type="button" class="ghost" data-ws-type>Type</button>
               <button type="button" class="ghost" data-ws-scroll-btn>Scroll</button>
+              <button type="button" class="ghost" data-ws-scroll-up>Scroll Up</button>
+              <button type="button" class="ghost" data-ws-scroll-down>Scroll Down</button>
             </div>
             <div class="wscraper-preview" data-ws-preview>
               <div class="wscraper-preview-placeholder" data-ws-preview-placeholder>(no frame)</div>

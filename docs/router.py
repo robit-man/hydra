@@ -1891,6 +1891,40 @@ def req_from_browser_events(msg: dict) -> dict:
     return _browser_request(msg, path, method="GET", headers=headers, stream="lines", default_timeout_ms=300000)
 
 
+def req_from_browser_back(msg: dict) -> dict:
+    payload = _with_sid_json(msg, {})
+    return _browser_request(msg, "/history/back", method="POST", json_body=payload)
+
+
+def req_from_browser_forward(msg: dict) -> dict:
+    payload = _with_sid_json(msg, {})
+    return _browser_request(msg, "/history/forward", method="POST", json_body=payload)
+
+
+def req_from_browser_scroll_up(msg: dict) -> dict:
+    amount = msg.get("amount")
+    payload: dict = {}
+    if amount is not None:
+        try:
+            payload["amount"] = abs(int(amount))
+        except Exception as exc:
+            raise ValueError("browser.scroll_up amount must be int") from exc
+    payload = _with_sid_json(msg, payload)
+    return _browser_request(msg, "/scroll/up", method="POST", json_body=payload)
+
+
+def req_from_browser_scroll_down(msg: dict) -> dict:
+    amount = msg.get("amount")
+    payload: dict = {}
+    if amount is not None:
+        try:
+            payload["amount"] = abs(int(amount))
+        except Exception as exc:
+            raise ValueError("browser.scroll_down amount must be int") from exc
+    payload = _with_sid_json(msg, payload)
+    return _browser_request(msg, "/scroll/down", method="POST", json_body=payload)
+
+
 # ──────────────────────────────────────────────────────────────
 # RelayNode combining bridge + HTTP workers
 # ──────────────────────────────────────────────────────────────
@@ -2049,6 +2083,14 @@ class RelayNode:
                     req = req_from_browser_screenshot(body)
                 elif event == "browser.events":
                     req = req_from_browser_events(body)
+                elif event == "browser.back":
+                    req = req_from_browser_back(body)
+                elif event == "browser.forward":
+                    req = req_from_browser_forward(body)
+                elif event == "browser.scroll_up":
+                    req = req_from_browser_scroll_up(body)
+                elif event == "browser.scroll_down":
+                    req = req_from_browser_scroll_down(body)
                 else:
                     return
                 if self._check_assignment("web_scrape", src, rid):
