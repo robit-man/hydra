@@ -27,6 +27,7 @@ const ACTION_ALIASES = {
   scrolldown: 'scroll_down',
   'scroll-down': 'scroll_down',
   down: 'scroll_down',
+  drag: 'drag',
   screenshot: 'screenshot',
   shot: 'screenshot',
   capture: 'screenshot',
@@ -131,6 +132,9 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       manualSid: '',
       previewUrl: '',
       autoScreenshot: false,
+      autoCapture: false,
+      captureTimer: null,
+      capturePending: false,
       busyCount: 0,
       logLines: [],
       eventGen: 0,
@@ -143,7 +147,8 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         sid: '',
         xy: null
       },
-      lastFrameMeta: null
+      lastFrameMeta: null,
+      dragInfo: null
     };
 
     const bind = (elm, evt, handler) => {
@@ -214,25 +219,71 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     bind(elements.amount, 'change', (e) => {
       state.inputs.amount = asNumber(e.target?.value, 600);
     });
-    bind(elements.frame, 'click', (e) => {
+    const finishPointer = (event, canceled = false) => {
+      const info = state.dragInfo;
+      const img = elements.frame;
+      state.dragInfo = null;
+      if (img) {
+        try { img.releasePointerCapture?.(event.pointerId); } catch (_) { /* ignore */ }
+      }
+      if (!info || (info.pointerId !== undefined && info.pointerId !== event.pointerId) || canceled) return;
+      const rect = info.rect;
+      const naturalW = info.naturalW || rect.width;
+      const naturalH = info.naturalH || rect.height;
+      const endX = event.clientX - rect.left;
+      const endY = event.clientY - rect.top;
+      const distance = Math.hypot(event.clientX - info.startClientX, event.clientY - info.startClientY);
+      if (distance > 5) {
+        performDrag(nodeId, {
+          startX: Math.max(0, Math.round(info.x)),
+          startY: Math.max(0, Math.round(info.y)),
+          endX: Math.max(0, Math.round(endX)),
+          endY: Math.max(0, Math.round(endY)),
+          viewportW: Math.round(rect.width),
+          viewportH: Math.round(rect.height),
+          naturalW,
+          naturalH
+        });
+        return;
+      }
+      performClickXY(nodeId, {
+        x: Math.max(0, Math.round(info.x)),
+        y: Math.max(0, Math.round(info.y)),
+        viewportW: Math.round(rect.width),
+        viewportH: Math.round(rect.height),
+        naturalW,
+        naturalH
+      });
+    };
+
+    bind(elements.frame, 'pointerdown', (e) => {
       if (!state.lastFrameMeta) return;
       const img = elements.frame;
       if (!img) return;
       const rect = img.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
-      const naturalW = img.naturalWidth || rect.width;
-      const naturalH = img.naturalHeight || rect.height;
+      const naturalW = img.naturalWidth || state.lastFrameMeta?.width || rect.width;
+      const naturalH = img.naturalHeight || state.lastFrameMeta?.height || rect.height;
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      const payload = {
-        x: Math.max(0, Math.round(x)),
-        y: Math.max(0, Math.round(y)),
-        viewportW: Math.round(rect.width),
-        viewportH: Math.round(rect.height),
+      state.dragInfo = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        x,
+        y,
+        rect,
         naturalW,
-        naturalH
+        naturalH,
+        startTime: performance.now()
       };
-      performClickXY(nodeId, payload);
+      try { img.setPointerCapture?.(e.pointerId); } catch (_) { /* ignore */ }
+    });
+
+    bind(elements.frame, 'pointerup', (e) => finishPointer(e, false));
+    bind(elements.frame, 'pointercancel', (e) => finishPointer(e, true));
+    bind(elements.frame, 'pointerleave', (e) => {
+      if (state.dragInfo) finishPointer(e, true);
     });
 
     stateMap.set(nodeId, state);
@@ -243,6 +294,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = stateMap.get(nodeId);
     if (!state) return;
     stopEvents(state);
+    if (state.captureTimer) {
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+    }
+    state.capturePending = false;
     if (state.previewUrl && state.previewUrl.startsWith('blob:')) {
       try { URL.revokeObjectURL(state.previewUrl); } catch (_) { /* ignore */ }
     }
@@ -350,6 +406,29 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
 
   function boolConfig(nodeId, key, fallback = false) {
     return boolFromConfig(config(nodeId)[key], fallback);
+  }
+
+  function scheduleAutoCapture(nodeId) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    if (state.captureTimer) {
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+    }
+    const cfg = config(nodeId);
+    state.autoCapture = boolFromConfig(cfg.autoCapture, false);
+    const fpsRaw = Number(cfg.frameRate || 0);
+    const fps = Number.isFinite(fpsRaw) ? Math.max(0, fpsRaw) : 0;
+    if (!state.autoCapture || fps <= 0) return;
+    const intervalMs = Math.max(1000 / fps, 100);
+    state.captureTimer = setInterval(() => {
+      if (state.capturePending) return;
+      state.capturePending = true;
+      captureScreenshot(nodeId, { silent: true }).finally(() => {
+        const s = ensureState(nodeId);
+        if (s) s.capturePending = false;
+      });
+    }, intervalMs);
   }
 
   function requestEnv(nodeId) {
@@ -476,6 +555,54 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     } catch (err) {
       const message = err?.message || String(err);
       setStatus(nodeId, `Click failed: ${message}`, 'err');
+      appendLog(nodeId, `error: ${message}`, 'error');
+    } finally {
+      setBusy(state, false);
+    }
+  }
+
+  async function performDrag(nodeId, coords) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const body = {
+      sid,
+      startX: coords.startX,
+      startY: coords.startY,
+      endX: coords.endX,
+      endY: coords.endY,
+      viewportW: coords.viewportW,
+      viewportH: coords.viewportH,
+      naturalW: coords.naturalW,
+      naturalH: coords.naturalH
+    };
+    if ((!body.viewportW || !body.viewportH) && state.lastFrameMeta) {
+      body.viewportW = body.viewportW || state.lastFrameMeta.width || 0;
+      body.viewportH = body.viewportH || state.lastFrameMeta.height || 0;
+    }
+    if ((!body.naturalW || !body.naturalH) && state.lastFrameMeta) {
+      body.naturalW = body.naturalW || state.lastFrameMeta.width || 0;
+      body.naturalH = body.naturalH || state.lastFrameMeta.height || 0;
+    }
+    if (!body.viewportW || !body.viewportH) {
+      appendLog(nodeId, 'drag skipped: missing viewport size', 'warn');
+      return;
+    }
+    setBusy(state, true);
+    setStatus(nodeId, 'Drag…', 'pending');
+    try {
+      const res = await Net.postJSON(base, '/drag', body, api, viaNkn, relay, 45000);
+      appendLog(nodeId, res?.message || 'drag completed');
+      setStatus(nodeId, res?.message || 'Drag ok', 'ok');
+      if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
+    } catch (err) {
+      const message = err?.message || String(err);
+      setStatus(nodeId, `Drag failed: ${message}`, 'err');
       appendLog(nodeId, `error: ${message}`, 'error');
     } finally {
       setBusy(state, false);
@@ -714,6 +841,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (!state) return;
     const sid = getActiveSid(state);
     if (!sid) {
+      if (markPending) state.capturePending = false;
       if (!silent) setStatus(nodeId, 'No session id', 'warn');
       return;
     }
@@ -726,6 +854,8 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         // ignore
       }
     }
+    const markPending = silent && !state.capturePending;
+    if (markPending) state.capturePending = true;
     if (!silent) {
       setBusy(state, true);
       setStatus(nodeId, 'Capturing screenshot…', 'pending');
@@ -752,6 +882,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       if (!silent) {
         setBusy(state, false);
       }
+      if (markPending) state.capturePending = false;
     }
   }
 
@@ -976,6 +1107,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     state.inputs.amount = Number(cfg.lastAmount || 600);
     state.inputs.sid = cfg.sid || '';
     state.autoScreenshot = boolFromConfig(cfg.autoScreenshot, false);
+    state.autoCapture = boolFromConfig(cfg.autoCapture, false);
 
     if (state.elements.url && state.inputs.url) state.elements.url.value = state.inputs.url;
     if (state.elements.selector && state.inputs.selector) state.elements.selector.value = state.inputs.selector;
@@ -991,6 +1123,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       updateSessionLabel(state);
     }
     refreshControls(nodeId);
+    scheduleAutoCapture(nodeId);
   }
 
   function init(nodeId) {
@@ -1003,6 +1136,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (!state) return;
     const cfg = config(nodeId);
     state.autoScreenshot = boolFromConfig(cfg.autoScreenshot, false);
+    state.autoCapture = boolFromConfig(cfg.autoCapture, false);
     const overrideSid = (cfg.sid || '').trim();
     if (overrideSid !== state.manualSid) {
       state.manualSid = overrideSid;
@@ -1010,6 +1144,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       subscribeEvents(nodeId);
     }
     refreshControls(nodeId);
+    scheduleAutoCapture(nodeId);
   }
 
   function onInput(nodeId, portName, payload) {
@@ -1093,6 +1228,28 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         break;
       case 'scroll_down':
         performScrollDown(nodeId, payload?.amount);
+        break;
+      case 'drag':
+        if (payload && typeof payload === 'object') {
+          const startX = asNumber(payload.startX ?? payload.start_x ?? payload.fromX ?? payload.from_x, NaN);
+          const startY = asNumber(payload.startY ?? payload.start_y ?? payload.fromY ?? payload.from_y, NaN);
+          const endX = asNumber(payload.endX ?? payload.end_x ?? payload.toX ?? payload.to_x, NaN);
+          const endY = asNumber(payload.endY ?? payload.end_y ?? payload.toY ?? payload.to_y, NaN);
+          if (!Number.isFinite(startX) || !Number.isFinite(startY) || !Number.isFinite(endX) || !Number.isFinite(endY)) {
+            appendLog(nodeId, 'drag action missing coordinates', 'warn');
+            break;
+          }
+          performDrag(nodeId, {
+            startX,
+            startY,
+            endX,
+            endY,
+            viewportW: asNumber(payload.viewportW ?? payload.viewport_w ?? payload.width ?? 0),
+            viewportH: asNumber(payload.viewportH ?? payload.viewport_h ?? payload.height ?? 0),
+            naturalW: asNumber(payload.naturalW ?? payload.natural_w ?? payload.naturalWidth ?? payload.width ?? 0),
+            naturalH: asNumber(payload.naturalH ?? payload.natural_h ?? payload.naturalHeight ?? payload.height ?? 0)
+          });
+        }
         break;
       case 'screenshot':
         captureScreenshot(nodeId);

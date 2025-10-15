@@ -91,6 +91,8 @@ const GraphTypes = {
       { key: 'api', label: 'API Key / Bearer', type: 'text', placeholder: '(optional)' },
       { key: 'headless', label: 'Headless', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'autoScreenshot', label: 'Auto Screenshot After Actions', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'autoCapture', label: 'Continuous Capture', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'frameRate', label: 'Capture FPS', type: 'number', def: 1 },
       { key: 'sid', label: 'Session Override', type: 'text', placeholder: '(external SID)' }
     ]
   },

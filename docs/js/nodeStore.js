@@ -93,7 +93,9 @@ const NodeStore = {
       sid: '',
       lastSid: '',
       lastFrame: '',
-      lastDom: ''
+      lastDom: '',
+      autoCapture: 'false',
+      frameRate: 1
     },
     ImageInput: {
       image: '',

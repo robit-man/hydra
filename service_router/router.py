@@ -1880,6 +1880,24 @@ def req_from_browser_scroll_down(msg: dict) -> dict:
     return _browser_request(msg, "/scroll/down", method="POST", json_body=payload)
 
 
+def req_from_browser_drag(msg: dict) -> dict:
+    for key in ("startX", "startY", "endX", "endY"):
+        if key not in msg and key.lower() not in msg:
+            raise ValueError(f"browser.drag missing {key}")
+    payload = {
+        "sid": _browser_sid(msg),
+        "startX": msg.get("startX") or msg.get("start_x") or msg.get("fromX") or msg.get("from_x"),
+        "startY": msg.get("startY") or msg.get("start_y") or msg.get("fromY") or msg.get("from_y"),
+        "endX": msg.get("endX") or msg.get("end_x") or msg.get("toX") or msg.get("to_x"),
+        "endY": msg.get("endY") or msg.get("end_y") or msg.get("toY") or msg.get("to_y"),
+        "viewportW": msg.get("viewportW") or msg.get("viewport_w") or msg.get("width"),
+        "viewportH": msg.get("viewportH") or msg.get("viewport_h") or msg.get("height"),
+        "naturalW": msg.get("naturalW") or msg.get("natural_w") or msg.get("naturalWidth") or msg.get("width"),
+        "naturalH": msg.get("naturalH") or msg.get("natural_h") or msg.get("naturalHeight") or msg.get("height"),
+    }
+    return _browser_request(msg, "/drag", method="POST", json_body=payload)
+
+
 # ──────────────────────────────────────────────────────────────
 # RelayNode combining bridge + HTTP workers
 # ──────────────────────────────────────────────────────────────
@@ -2046,6 +2064,8 @@ class RelayNode:
                     req = req_from_browser_scroll_up(body)
                 elif event == "browser.scroll_down":
                     req = req_from_browser_scroll_down(body)
+                elif event == "browser.drag":
+                    req = req_from_browser_drag(body)
                 else:
                     return
                 if self._check_assignment("web_scrape", src, rid):
