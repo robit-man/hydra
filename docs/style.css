@@ -1323,6 +1323,7 @@ button.toggle-boolean:focus-visible {
 button:hover {
   opacity: 0.8;
   user-select: none;
+  cursor: pointer;
 }
 
 button.secondary {
