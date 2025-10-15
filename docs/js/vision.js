@@ -351,6 +351,208 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
     });
   }
 
+  function sanitizeBlendshapeCategories(list) {
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        return {
+          categoryName: typeof entry.categoryName === 'string' ? entry.categoryName : '',
+          score: typeof entry.score === 'number' ? entry.score : 0,
+          index: typeof entry.index === 'number' ? entry.index : -1,
+          displayName: typeof entry.displayName === 'string' ? entry.displayName : ''
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function normalizeMatrixEntries(input) {
+    if (!input) return null;
+    const entries = extractMatrixEntries(input);
+    if (!Array.isArray(entries) || entries.length < 16) return null;
+    const slice = entries.slice(0, 16);
+    return slice instanceof Float32Array ? slice : Float32Array.from(slice);
+  }
+
+  function deliverSyntheticFace(nodeId, state) {
+    if (!state?.synthetic) return;
+    const synthetic = state.synthetic;
+    const result = {};
+    let hasData = false;
+
+    if (Array.isArray(synthetic.landmarks) && synthetic.landmarks.length) {
+      result.faceLandmarks = [
+        synthetic.landmarks.map((lm) => {
+          const out = { x: lm.x ?? 0, y: lm.y ?? 0 };
+          if (lm.z != null) out.z = lm.z;
+          if (lm.visibility != null) out.visibility = lm.visibility;
+          if (lm.presence != null) out.presence = lm.presence;
+          return out;
+        })
+      ];
+      hasData = true;
+    }
+
+    if (Array.isArray(synthetic.categories)) {
+      result.faceBlendshapes = [
+        {
+          categories: synthetic.categories.map((cat) => ({
+            categoryName: cat.categoryName || '',
+            score: typeof cat.score === 'number' ? cat.score : 0,
+            index: typeof cat.index === 'number' ? cat.index : -1,
+            displayName: cat.displayName || ''
+          }))
+        }
+      ];
+      hasData = true;
+    }
+
+    const matrices = [];
+    if (Array.isArray(synthetic.matrices)) {
+      synthetic.matrices.forEach((mat) => {
+        if (mat && mat.length >= 16) matrices.push(mat instanceof Float32Array ? mat : Float32Array.from(mat));
+      });
+    }
+    if (synthetic.orientation?.matrix && synthetic.orientation.matrix.length >= 16) {
+      const matrix = synthetic.orientation.matrix;
+      matrices.push(matrix instanceof Float32Array ? matrix : Float32Array.from(matrix));
+    }
+    if (matrices.length) {
+      result.facialTransformationMatrixes = matrices;
+      hasData = true;
+    }
+
+    if (!hasData) return;
+
+    const ts = typeof synthetic.ts === 'number' && Number.isFinite(synthetic.ts) ? synthetic.ts : Date.now();
+    const frame = {
+      width: typeof synthetic.width === 'number' ? synthetic.width : 0,
+      height: typeof synthetic.height === 'number' ? synthetic.height : 0,
+      synthetic: true,
+      ts
+    };
+
+    state.lastSyntheticResult = result;
+    state.lastSyntheticFrame = frame;
+    state.lastViewResult = result;
+    state.lastViewFrame = frame;
+
+    notifyFaceViews(nodeId, state, result, frame);
+  }
+
+  function handleFaceInputPort(nodeId, port, payload) {
+    const state = ensureState(nodeId, 'face');
+    if (!state) return;
+    if (!state.synthetic) state.synthetic = {};
+    const synthetic = state.synthetic;
+    let updated = false;
+
+    if (payload && typeof payload === 'object') {
+      if (payload.ts != null) {
+        const ts = Number(payload.ts);
+        if (Number.isFinite(ts)) {
+          synthetic.ts = ts;
+          updated = true;
+        }
+      }
+      if (payload.width != null) {
+        const width = Number(payload.width);
+        if (Number.isFinite(width) && width > 0) {
+          synthetic.width = width;
+          updated = true;
+        }
+      }
+      if (payload.height != null) {
+        const height = Number(payload.height);
+        if (Number.isFinite(height) && height > 0) {
+          synthetic.height = height;
+          updated = true;
+        }
+      }
+    }
+
+    switch (port) {
+      case 'face': {
+        const landmarks = mapLandmarks(payload?.landmarks, false);
+        if (landmarks.length) {
+          synthetic.landmarks = landmarks;
+          updated = true;
+        }
+        break;
+      }
+      case 'blendshapes': {
+        const categories = sanitizeBlendshapeCategories(payload?.categories);
+        if (categories.length || (Array.isArray(payload?.categories) && !categories.length)) {
+          synthetic.categories = categories;
+          updated = true;
+        }
+        break;
+      }
+      case 'world': {
+        if (Array.isArray(payload?.matrices)) {
+          const matrices = payload.matrices
+            .map((mat) => normalizeMatrixEntries(mat?.entries ?? mat))
+            .filter(Boolean);
+          if (matrices.length) {
+            synthetic.matrices = matrices;
+            updated = true;
+          }
+        }
+        break;
+      }
+      case 'orientation': {
+        if (payload && typeof payload === 'object') {
+          const orientation = {};
+          const matrix = normalizeMatrixEntries(payload.matrix ?? payload.entries ?? payload);
+          if (matrix) orientation.matrix = matrix;
+          if (payload.quaternion && typeof payload.quaternion === 'object') {
+            orientation.quaternion = {
+              w: typeof payload.quaternion.w === 'number' ? payload.quaternion.w : 0,
+              x: typeof payload.quaternion.x === 'number' ? payload.quaternion.x : 0,
+              y: typeof payload.quaternion.y === 'number' ? payload.quaternion.y : 0,
+              z: typeof payload.quaternion.z === 'number' ? payload.quaternion.z : 0
+            };
+          }
+          if (payload.radians && typeof payload.radians === 'object') {
+            orientation.radians = {
+              pitch: typeof payload.radians.pitch === 'number' ? payload.radians.pitch : 0,
+              yaw: typeof payload.radians.yaw === 'number' ? payload.radians.yaw : 0,
+              roll: typeof payload.radians.roll === 'number' ? payload.radians.roll : 0
+            };
+          }
+          if (payload.degrees && typeof payload.degrees === 'object') {
+            orientation.degrees = {
+              pitch: typeof payload.degrees.pitch === 'number' ? payload.degrees.pitch : 0,
+              yaw: typeof payload.degrees.yaw === 'number' ? payload.degrees.yaw : 0,
+              roll: typeof payload.degrees.roll === 'number' ? payload.degrees.roll : 0
+            };
+          }
+          if (payload.position && typeof payload.position === 'object') {
+            orientation.position = {
+              x: typeof payload.position.x === 'number' ? payload.position.x : 0,
+              y: typeof payload.position.y === 'number' ? payload.position.y : 0,
+              z: typeof payload.position.z === 'number' ? payload.position.z : 0
+            };
+          }
+          if (Object.keys(orientation).length) {
+            synthetic.orientation = orientation;
+            updated = true;
+          }
+        }
+        break;
+      }
+      case 'ts': {
+        // Already captured above, no additional handling needed.
+        updated = true;
+        break;
+      }
+      default:
+        return;
+    }
+
+    if (updated) deliverSyntheticFace(nodeId, state);
+  }
+
   function emitFace(nodeId, state, result, frame) {
     if (!result || !Array.isArray(result.faceLandmarks)) return;
     const ts = Date.now();
@@ -668,12 +870,14 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
     state.processing = true;
     Promise.resolve()
       .then(async () => {
+        state.synthetic = null;
         const frame = await prepareFrame(payload);
         if (!frame) return;
-        state.lastFrameMs = throttle.timestamp;
+        const timestamp = throttle.timestamp ?? nowMs();
+        frame.ts = timestamp;
+        state.lastFrameMs = timestamp;
         const instance = await ensureInstance(nodeId, state);
         if (!instance) return;
-        const timestamp = nowMs();
         let result = null;
         const source = frame.source;
         if (!source) return;
@@ -687,6 +891,13 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           try { frame.cleanup(); } catch (_) { /* ignore */ }
         }
         if (result) {
+          state.lastViewResult = result;
+          state.lastViewFrame = {
+            width: frame.width || 0,
+            height: frame.height || 0,
+            ts: frame.ts || throttle.timestamp || nowMs(),
+            synthetic: false
+          };
           emitFace(nodeId, state, result, frame);
           notifyFaceViews(nodeId, state, result, frame);
         }
@@ -788,14 +999,34 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
       STATE.delete(key);
     },
     onInput(nodeId, port, payload) {
-      if (port !== 'media' && port !== 'image') return;
-      processFace(nodeId, port, payload);
+      if (port === 'media' || port === 'image') {
+        processFace(nodeId, port, payload);
+        return;
+      }
+      if (port === 'face' || port === 'blendshapes' || port === 'world' || port === 'orientation' || port === 'ts') {
+        handleFaceInputPort(nodeId, port, payload);
+      }
     },
     attachView(nodeId, listener) {
       const state = ensureState(nodeId, 'face');
       if (!state || !listener) return () => {};
       if (!state.listeners) state.listeners = new Set();
       state.listeners.add(listener);
+      try {
+        const lastResult = state.lastViewResult || state.lastSyntheticResult;
+        if (lastResult) {
+          const lastFrame = state.lastViewFrame || state.lastSyntheticFrame || {
+            width: 0,
+            height: 0,
+            synthetic: true,
+            ts: Date.now()
+          };
+          if (typeof listener === 'function') listener(lastResult, lastFrame, state.cfg);
+          else if (listener && typeof listener.update === 'function') listener.update(lastResult, lastFrame, state.cfg);
+        }
+      } catch (err) {
+        // ignore listener priming errors
+      }
       return () => {
         const key = stateKey(nodeId);
         const current = STATE.get(key);

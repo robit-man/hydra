@@ -127,7 +127,7 @@ const NodeStore = {
     },
     NknDM: {
       address: '',
-      chunkBytes: 1800,
+      chunkBytes: 64000,
       heartbeatInterval: 15,
       componentId: '',
       handshake: { status: 'idle', peer: '', direction: 'idle', remoteId: '', graphId: '' },

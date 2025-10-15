@@ -146,6 +146,7 @@ const Vision = createVision({
   getNode: (id) => graphAccess.getNode(id),
   Router,
   NodeStore,
+  FaceViewer: null,
   setBadge,
   log
 });

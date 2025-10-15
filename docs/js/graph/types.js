@@ -163,7 +163,15 @@ const GraphTypes = {
   FaceLandmarks: {
     title: 'Face Landmarks',
     supportsNkn: false,
-    inputs: [{ name: 'media' }, { name: 'image' }],
+    inputs: [
+      { name: 'media' },
+      { name: 'image' },
+      { name: 'face' },
+      { name: 'blendshapes' },
+      { name: 'world' },
+      { name: 'orientation' },
+      { name: 'ts' }
+    ],
     outputs: [
       { name: 'face', label: '2D Landmarks' },
       { name: 'blendshapes', label: 'Blendshapes' },

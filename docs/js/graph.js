@@ -821,8 +821,7 @@ function refreshNodeResolution(force = false) {
       return handleLogicGateInput(node.id, portName, payload);
     }
     if (node.type === 'FaceLandmarks') {
-      if (portName === 'media' || portName === 'image') return Vision?.Face?.onInput?.(node.id, portName, payload);
-      return;
+      return Vision?.Face?.onInput?.(node.id, portName, payload);
     }
     if (node.type === 'PoseLandmarks') {
       if (portName === 'media' || portName === 'image') return Vision?.Pose?.onInput?.(node.id, portName, payload);
