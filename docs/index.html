@@ -212,7 +212,11 @@
                 <div class="modal-title">Discovered Peers</div>
                 <button class="ghost" id="peerClose">✕</button>
             </div>
-            <div class="modal-body peer-modal-body two-col">
+            <div class="modal-body peer-modal-body two-col" id="peerModalBody">
+                <div class="peer-tabs" id="peerTabs">
+                    <button type="button" class="peer-tab active" data-pane="list">Peers</button>
+                    <button type="button" class="peer-tab" data-pane="chat">Chat</button>
+                </div>
                 <div class="peer-left">
                     <div class="help" id="peerStatus">Initializing discovery...</div>
                     <div class="peer-identity">
@@ -224,6 +228,11 @@
                         </div>
                         <div class="peer-self muted" id="peerSelf"></div>
                         <div class="peer-self-name muted" id="peerSelfName"></div>
+                    </div>
+                    <div class="peer-filters">
+                        <input id="peerSearchInput" type="text" placeholder="Search peers" autocomplete="off"
+                            spellcheck="false">
+                        <button type="button" class="ghost" id="peerFavoritesToggle" title="Show favorites only">Favorites</button>
                     </div>
                     <div class="peer-list" id="peerList"></div>
                 </div>

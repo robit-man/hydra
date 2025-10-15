@@ -357,6 +357,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     directoryTimer: null,
     sharedHashes: new Map(),
     remoteHashes: new Map(),
+    filters: {
+      search: '',
+      onlyFavorites: false
+    },
+    layout: {
+      activePane: 'list'
+    },
     chat: {
       activePeer: null,
       sessions: new Map(),
@@ -365,7 +372,9 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       favorites: new Set(),
       promptMessage: null
     },
-    pokeNoticeTimer: null
+    pokeNoticeTimer: null,
+    nknListenerAttached: false,
+    nknMessageHandler: null
   };
   state.store = sharedStore;
 
@@ -492,6 +501,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     modal: null,
     backdrop: null,
     close: null,
+    body: null,
     list: null,
     status: null,
     self: null,
@@ -502,7 +512,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     chatTyping: null,
     chatInput: null,
     chatSend: null,
-    chatFav: null
+    chatFav: null,
+    search: null,
+    favToggle: null,
+    tabs: null,
+    tabButtons: []
   };
 
   function assignElements() {
@@ -510,6 +524,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     els.modal = qs('#peerModal');
     els.backdrop = qs('#peerBackdrop');
     els.close = qs('#peerClose');
+    els.body = qs('#peerModalBody');
     els.list = qs('#peerList');
     els.status = qs('#peerStatus');
     els.self = qs('#peerSelf');
@@ -525,7 +540,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     els.chatInput = qs('#chatInput');
     els.chatSend = qs('#chatSend');
     els.chatFav = qs('#chatFavoriteBtn');
+    els.search = qs('#peerSearchInput');
+    els.favToggle = qs('#peerFavoritesToggle');
+    els.tabs = qs('#peerTabs');
+    els.tabButtons = els.tabs ? Array.from(els.tabs.querySelectorAll('.peer-tab')) : [];
     if (els.nameInput) els.nameInput.value = state.username || '';
+    if (els.search) els.search.value = state.filters.search || '';
+    if (els.favToggle) els.favToggle.classList.toggle('active', !!state.filters.onlyFavorites);
+    setActivePane(state.layout.activePane);
     updateSelf();
     updateBadge();
     renderChat();
@@ -1098,6 +1120,30 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     return history;
   }
 
+  function isMobileView() {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    try {
+      return window.matchMedia('(max-width: 768px)').matches;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setActivePane(pane) {
+    const normalized = pane === 'chat' ? 'chat' : 'list';
+    state.layout.activePane = normalized;
+    if (els.body) {
+      els.body.classList.remove('mobile-pane-list', 'mobile-pane-chat');
+      els.body.classList.add(`mobile-pane-${normalized}`);
+    }
+    if (els.tabButtons && els.tabButtons.length) {
+      els.tabButtons.forEach((btn) => {
+        const target = (btn.dataset?.pane || 'list') === normalized;
+        btn.classList.toggle('active', target);
+      });
+    }
+  }
+
   function clearInlineChatDecision() {
     const row = els.chatWrap?.querySelector('.chat-decision-row');
     if (row) row.remove();
@@ -1220,6 +1266,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     const key = normalizePeerKey(peer);
     if (!key) return;
     setActiveChat(key);
+    if (isMobileView()) setActivePane('chat');
     const proceed = state.discovery ? Promise.resolve(state.discovery) : ensureDiscovery();
     proceed
       .then(() => {
@@ -1279,8 +1326,26 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   function renderPeers() {
     if (!els.list) return;
     els.list.innerHTML = '';
+    setActivePane(state.layout.activePane);
+    if (els.search && els.search.value !== state.filters.search) {
+      els.search.value = state.filters.search || '';
+    }
+    if (els.favToggle) {
+      els.favToggle.classList.toggle('active', !!state.filters.onlyFavorites);
+    }
     const now = nowSeconds();
-    const peers = Array.from(state.peers.values()).filter((peer) => peer?.nknPub);
+    let peers = Array.from(state.peers.values()).filter((peer) => peer?.nknPub);
+    if (state.filters.onlyFavorites) {
+      peers = peers.filter((peer) => state.chat.favorites.has(normalizePeerKey(peer)));
+    }
+    const searchTerm = (state.filters.search || '').trim().toLowerCase();
+    if (searchTerm) {
+      peers = peers.filter((peer) => {
+        const display = (getDisplayName(peer) || '').toLowerCase();
+        const addr = (peer.addr || peer.originalPub || peer.nknPub || '').toLowerCase();
+        return display.includes(searchTerm) || addr.includes(searchTerm);
+      });
+    }
     peers.sort((a, b) => {
       const lastA = a.last || now;
       const lastB = b.last || now;
@@ -1297,7 +1362,15 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!peers.length) {
       const empty = document.createElement('div');
       empty.className = 'peer-empty';
-      empty.textContent = state.discovery ? 'No peers discovered yet.' : 'Discovery offline.';
+      if (state.filters.onlyFavorites && !state.chat.favorites.size) {
+        empty.textContent = 'No favorites saved yet.';
+      } else if (state.filters.onlyFavorites) {
+        empty.textContent = 'No favorites match your filters.';
+      } else if (searchTerm) {
+        empty.textContent = 'No peers match your search.';
+      } else {
+        empty.textContent = state.discovery ? 'No peers discovered yet.' : 'Discovery offline.';
+      }
       els.list.appendChild(empty);
       refreshStatus();
       return;
@@ -1515,6 +1588,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
           state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
           setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
           setActiveChat(senderKey);
+          if (isMobileView()) setActivePane('chat');
           setBadge?.(`Chat request from ${label}`);
           showInlineChatDecision(senderKey);
           renderChat();
@@ -1767,6 +1841,38 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         el._peerBound = true;
       }
     });
+
+    if (els.search && !els.search._peerBound) {
+      els.search.addEventListener('input', (e) => {
+        const value = (e.target?.value || '').slice(0, 120);
+        if (state.filters.search === value) return;
+        state.filters.search = value;
+        scheduleRender();
+      });
+      els.search._peerBound = true;
+    }
+
+    if (els.favToggle && !els.favToggle._peerBound) {
+      els.favToggle.addEventListener('click', (e) => {
+        e.preventDefault();
+        state.filters.onlyFavorites = !state.filters.onlyFavorites;
+        els.favToggle.classList.toggle('active', state.filters.onlyFavorites);
+        scheduleRender();
+      });
+      els.favToggle._peerBound = true;
+    }
+
+    if (els.tabButtons && els.tabButtons.length) {
+      els.tabButtons.forEach((btn) => {
+        if (btn._peerBound) return;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const pane = btn.dataset?.pane === 'chat' ? 'chat' : 'list';
+          setActivePane(pane);
+        });
+        btn._peerBound = true;
+      });
+    }
 
     if (els.chatFav && !els.chatFav._peerBound) {
       els.chatFav.addEventListener('click', () => {
