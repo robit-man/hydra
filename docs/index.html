@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Hydra</title>
+    <title>HYDRA</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
@@ -27,33 +27,39 @@
                 <div class="menu-row">
                     <div class="node-row">
                         <div class="node-menu">
-                            <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
+                            <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg"
+                                    alt=""></button>
                             <div id="nodeMenuList" class="node-menu-list hidden"></div>
                         </div>
-                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
+                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt=""
+                                class="icon inverted"></button>
                         <button id="peerListButton" class="ghost">
                             <img src="img/network.svg" alt="" class="icon inverted">
                             <span id="peerOnlineBadge" class="peer-badge hidden">0</span>
                         </button>
-                        <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
+                        <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt=""
+                                class="icon inverted"></button>
                     </div>
-                <div class="header-actions">
-                    <a class="router-download" href="/router.py" download="router.py">
-                        <button><img src="img/code.svg" alt="" class="icon"></button>
+                    <div class="header-actions">
+                        <a class="router-download" href="/router.py" download="router.py">
+                            <button><img src="img/code.svg" alt="" class="icon"></button>
                         </a>
-                        <button id="transportToggle" class="transport-btn">HTTP</button>
+                        <button id="transportToggle" class="transport-btn">NKN</button>
                     </div>
                 </div>
                 <svg id="linksSvg" width="100%" height="100%" preserveAspectRatio="none"></svg>
                 <div id="workspace">
-                    <div id="wsCanvas"  class="dot-bg"></div>
+                    <div id="wsCanvas" class="dot-bg"></div>
                 </div>
                 <div class="logdata" id="logdata">
                     <div class="log-controls">
-                        <button type="button" id="logToggleBtn" class="ghost"><img src="img/chevron-down.svg" alt="" class="icon inverted"></button>
+                        <button type="button" id="logToggleBtn" class="ghost"><img src="img/chevron-down.svg" alt=""
+                                class="icon inverted"></button>
                         <div class="history-buttons">
-                            <button type="button" id="undoBtn" class="ghost" disabled><img src="img/chevron-left-double.svg" alt="" class="icon inverted"></button>
-                            <button type="button" id="redoBtn" class="ghost" disabled><img src="img/chevron-right-double.svg" alt="" class="icon inverted"></button>
+                            <button type="button" id="undoBtn" class="ghost" disabled><img
+                                    src="img/chevron-left-double.svg" alt="" class="icon inverted"></button>
+                            <button type="button" id="redoBtn" class="ghost" disabled><img
+                                    src="img/chevron-right-double.svg" alt="" class="icon inverted"></button>
                         </div>
                     </div>
                     <div class="log-panels" id="logPanels">
@@ -211,7 +217,8 @@
                 <div class="peer-identity">
                     <label for="peerUsernameInput">Display Name</label>
                     <div class="peer-identity-row">
-                        <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48" autocomplete="off" spellcheck="false">
+                        <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48"
+                            autocomplete="off" spellcheck="false">
                         <button type="button" class="secondary" id="peerUsernameApply">Save</button>
                     </div>
                     <div class="peer-self muted" id="peerSelf"></div>
@@ -239,6 +246,102 @@
             </div>
         </div>
     </div>
+    <script>
+        (() => {
+            if (window.__hydraTitleStatusPatch) return;
+            window.__hydraTitleStatusPatch = true;
+
+            const BASE_TITLE = document.title;
+
+            const statusEmoji = (cls) => {
+                if (!cls) return '⚪️';
+                if (cls.includes('err')) return '⛔';
+                if (cls.includes('warn')) return '⚠️';
+                if (cls.includes('ok')) return '✅';
+                return '⚪️';
+            };
+
+            const getDotSpan = () => {
+                const toggle = document.getElementById('transportToggle');
+                if (!toggle) return null;
+                // Prefer an explicit .dot span; otherwise fall back to first span
+                return toggle.querySelector('span.dot') || toggle.querySelector('span') || null;
+            };
+
+            const getStatus = () => {
+                const dot = getDotSpan();
+                const cls = dot ? (dot.className || '') : '';
+                return statusEmoji(cls);
+            };
+
+            const getOnlineCount = () => {
+                const badge = document.getElementById('peerOnlineBadge');
+                if (!badge) return 0;
+                const txt = (badge.textContent || '').trim();
+                const n = parseInt(txt, 10);
+                return Number.isFinite(n) ? n : 0;
+            };
+
+            const applyTitle = () => {
+                const emoji = getStatus();
+                const count = getOnlineCount();
+                document.title = `${emoji} | ${count} | ${BASE_TITLE}`;
+            };
+
+            // Attach observers once elements exist
+            const tryAttachObservers = () => {
+                const toggle = document.getElementById('transportToggle');
+                const badge = document.getElementById('peerOnlineBadge');
+
+                let attached = false;
+
+                if (toggle) {
+                    // Watch for class/text changes anywhere under the toggle (including the dot span)
+                    const obsToggle = new MutationObserver(applyTitle);
+                    obsToggle.observe(toggle, {
+                        subtree: true,
+                        attributes: true,
+                        attributeFilter: ['class'],
+                        childList: true,
+                        characterData: true
+                    });
+                    attached = true;
+                }
+
+                if (badge) {
+                    // Watch for number changes inside the badge
+                    const obsBadge = new MutationObserver(applyTitle);
+                    obsBadge.observe(badge, {
+                        subtree: true,
+                        childList: true,
+                        characterData: true
+                    });
+                    attached = true;
+                }
+
+                if (attached) applyTitle();
+                return attached;
+            };
+
+            const onReady = () => {
+                if (tryAttachObservers()) return;
+                // If elements aren’t there yet, watch for them to appear
+                const rootObs = new MutationObserver(() => {
+                    if (tryAttachObservers()) rootObs.disconnect();
+                });
+                rootObs.observe(document.documentElement, { subtree: true, childList: true });
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', onReady);
+            } else {
+                onReady();
+            }
+
+            // Light safety net in case something mutates without firing observers
+            setInterval(applyTitle, 3000);
+        })();
+    </script>
 
     <script type="module">
         import QRCode from "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm";
