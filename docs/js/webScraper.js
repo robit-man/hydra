@@ -199,6 +199,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         lastWheelTs: 0,
         busyCount: 0,
         busyDisabled: null,
+        scrollRefreshTimer: null,
         logLines: [],
         eventGen: 0,
         eventsCancel: null,
@@ -450,6 +451,10 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = stateMap.get(nodeId);
     if (!state) return;
     stopEvents(state);
+    if (state.scrollRefreshTimer) {
+      clearTimeout(state.scrollRefreshTimer);
+      state.scrollRefreshTimer = null;
+    }
     if (state.captureTimer) {
       clearInterval(state.captureTimer);
       state.captureTimer = null;
@@ -952,6 +957,18 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     };
     try {
       await Net.postJSON(base, '/scroll/point', body, api, viaNkn, relay, 20000);
+      if (state.autoScreenshot || state.autoCapture) {
+        if (state.scrollRefreshTimer) {
+          clearTimeout(state.scrollRefreshTimer);
+          state.scrollRefreshTimer = null;
+        }
+        state.scrollRefreshTimer = setTimeout(() => {
+          const fresh = ensureState(nodeId);
+          if (!fresh) return;
+          fresh.scrollRefreshTimer = null;
+          captureScreenshot(nodeId, { silent: true }).catch(() => {});
+        }, 160);
+      }
     } catch (err) {
       const message = err?.message || String(err);
       appendLog(nodeId, `scroll point failed: ${message}`, 'warn');
