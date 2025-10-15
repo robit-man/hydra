@@ -534,7 +534,12 @@ function createWorkspaceSync({
   }
 
   return {
-    init
+    init,
+    promptSync(targetHex, options = {}) {
+      if (!targetHex) return;
+      ensureNknTransport();
+      promptShare(targetHex, options);
+    }
   };
 }
 

@@ -2507,6 +2507,69 @@ audio {
   height: 32px
 }
 
+.peer-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.peer-self {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.peer-entry {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 12px;
+}
+
+.peer-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.peer-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.peer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.peer-info {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.peer-empty {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px 0;
+}
+
 .face-viewer {
   position: relative;
   margin-top: 12px;

@@ -26,16 +26,17 @@
             <div id="workspaceWrap" class="">
                 <div class="menu-row">
                     <div class="node-row">
-                        <div class="node-menu">
-                            <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
-                            <div id="nodeMenuList" class="node-menu-list hidden"></div>
-                        </div>
-                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
-                        <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
+                    <div class="node-menu">
+                        <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg" alt=""></button>
+                        <div id="nodeMenuList" class="node-menu-list hidden"></div>
                     </div>
-                    <div class="header-actions">
-                        <a class="router-download" href="/router.py" download="router.py">
-                            <button><img src="img/code.svg" alt="" class="icon"></button>
+                    <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt="" class="icon inverted"></button>
+                    <button id="peerListButton" class="ghost"><img src="img/network.svg" alt="" class="icon inverted"></button>
+                    <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt="" class="icon inverted"></button>
+                </div>
+                <div class="header-actions">
+                    <a class="router-download" href="/router.py" download="router.py">
+                        <button><img src="img/code.svg" alt="" class="icon"></button>
                         </a>
                         <button id="transportToggle" class="transport-btn">HTTP</button>
                     </div>
@@ -191,6 +192,21 @@
                     <button id="syncReceiveYes" class="secondary">Accept</button>
                     <button id="syncReceiveNo" class="ghost">Decline</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="peerModal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" id="peerBackdrop"></div>
+        <div class="modal-panel" style="max-width:420px;">
+            <div class="modal-head">
+                <div class="modal-title">Discovered Peers</div>
+                <button class="ghost" id="peerClose">✕</button>
+            </div>
+            <div class="modal-body peer-modal-body">
+                <div class="help" id="peerStatus">Initializing discovery…</div>
+                <div class="peer-self muted" id="peerSelf"></div>
+                <div class="peer-list" id="peerList"></div>
             </div>
         </div>
     </div>

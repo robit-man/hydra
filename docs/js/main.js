@@ -22,6 +22,7 @@ import { createMeshtastic } from './meshtastic.js';
 import { createWebSerial } from './webSerial.js';
 import { createVision } from './vision.js';
 import { primeLocalNetworkRequest } from './localNetwork.js';
+import { createPeerDiscovery } from './peerDiscovery.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -189,6 +190,14 @@ const WorkspaceSync = createWorkspaceSync({
   setBadge,
   log,
   updateTransportButton
+});
+
+const PeerDiscovery = createPeerDiscovery({
+  Net,
+  CFG,
+  WorkspaceSync,
+  setBadge,
+  log
 });
 
 const graphDropEls = {
@@ -413,6 +422,7 @@ function init() {
   Router.render();
   if (CFG.transport === 'nkn') Net.ensureNkn();
   WorkspaceSync.init();
+  PeerDiscovery.init();
   bindGlobalDrop();
   setBadge('Ready');
 }
