@@ -837,6 +837,7 @@ function refreshNodeResolution(force = false) {
       if (portName === 'refresh') return MCP.onRefresh(node.id, payload);
       return;
     }
+
     if (node.type === 'MediaStream') {
       if (portName === 'media') return Media.onInput(node.id, payload);
       return;
@@ -4408,8 +4409,351 @@ function refreshNodeResolution(force = false) {
     const fields = qs('#settingsFields');
     const help = qs('#settingsHelp');
     const form = qs('#settingsForm');
+    const isLlm = node.type === 'LLM';
+    let memoryManagerSetup = null;
     fields.innerHTML = '';
     const schema = GraphTypes[node.type].schema || [];
+
+    if (isLlm) {
+      memoryManagerSetup = () => {
+        if (fields.querySelector('.llm-memory-section')) return;
+
+        const memoryLabel = document.createElement('label');
+        memoryLabel.textContent = 'Chat history';
+        fields.appendChild(memoryLabel);
+
+        const memorySection = document.createElement('div');
+        memorySection.className = 'llm-memory-section llm-memory-hidden';
+
+        const memoryDetails = document.createElement('details');
+        memoryDetails.className = 'llm-memory-details';
+        const memorySummary = document.createElement('summary');
+        memorySummary.className = 'llm-memory-summary';
+        memorySummary.textContent = 'Chat History (0)';
+        memoryDetails.appendChild(memorySummary);
+
+        const memoryNote = document.createElement('div');
+        memoryNote.className = 'llm-memory-note';
+        memoryNote.textContent = 'Drag entries to reorder. Edit or remove items to curate what persists between turns.';
+        memoryDetails.appendChild(memoryNote);
+
+        const memoryList = document.createElement('ul');
+        memoryList.className = 'llm-memory-list';
+        memoryDetails.appendChild(memoryList);
+
+        const memoryEmpty = document.createElement('div');
+        memoryEmpty.className = 'llm-memory-empty';
+        memoryEmpty.textContent = 'No chat history yet.';
+        memoryDetails.appendChild(memoryEmpty);
+
+        memorySection.appendChild(memoryDetails);
+
+        const memoryFooter = document.createElement('div');
+        memoryFooter.className = 'llm-memory-footer';
+        const memoryClearBtn = document.createElement('button');
+        memoryClearBtn.type = 'button';
+        memoryClearBtn.className = 'ghost danger';
+        memoryClearBtn.textContent = 'Clear history';
+        memoryFooter.appendChild(memoryClearBtn);
+        memorySection.appendChild(memoryFooter);
+
+        fields.appendChild(memorySection);
+
+        const sanitizeEntry = (entry) => {
+          const roleRaw = entry && typeof entry.role === 'string' ? entry.role.trim().toLowerCase() : '';
+          const role = roleRaw === 'assistant' || roleRaw === 'system' ? roleRaw : 'user';
+          const content = entry && entry.content != null ? String(entry.content) : '';
+          return { role, content };
+        };
+
+        const getMemory = () => {
+          const current = NodeStore.ensure(nodeId, 'LLM').config || {};
+          const list = Array.isArray(current.memory) ? current.memory : [];
+          return list.map(sanitizeEntry);
+        };
+
+        const formatRoleLabel = (role) => {
+          const normalized = String(role || '').toLowerCase();
+          if (normalized === 'system') return 'System';
+          if (normalized === 'assistant') return 'Assistant';
+          if (normalized === 'user') return 'User';
+          if (!normalized) return 'User';
+          return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+        };
+
+        let editingIndex = null;
+        let suppressToggleEvent = false;
+
+        const setDetailsOpen = (value) => {
+          if (memoryDetails.open === value) return;
+          suppressToggleEvent = true;
+          memoryDetails.open = value;
+          suppressToggleEvent = false;
+        };
+
+        memoryDetails.addEventListener('toggle', () => {
+          if (suppressToggleEvent) return;
+          if (memoryDetails.open) memoryDetails.dataset.userToggled = 'true';
+          else delete memoryDetails.dataset.userToggled;
+        });
+
+        const updateSummary = (size) => {
+          memorySummary.textContent = `Chat History (${size})`;
+        };
+
+        const isMemoryEnabled = () => {
+          const hiddenToggle = fields.querySelector('input[name="memoryOn"]');
+          if (hiddenToggle) return hiddenToggle.value === 'true';
+          const selectToggle = fields.querySelector('select[name="memoryOn"]');
+          if (selectToggle) return selectToggle.value === 'true';
+          return !!cfg.memoryOn;
+        };
+
+        const renderMemoryList = () => {
+          const memory = getMemory();
+          let focusEditor = null;
+          memoryList.innerHTML = '';
+          updateSummary(memory.length);
+          if (!memory.length) memoryEmpty.classList.remove('hidden');
+          else memoryEmpty.classList.add('hidden');
+
+          memory.forEach((entry, index) => {
+            const item = document.createElement('li');
+            item.className = 'llm-memory-item';
+            item.dataset.memoryIdx = String(index);
+
+            if (editingIndex === index) {
+              item.classList.add('editing');
+              item.draggable = false;
+
+              const editorBody = document.createElement('div');
+              editorBody.className = 'llm-memory-editor-body';
+
+              const roleSelect = document.createElement('select');
+              roleSelect.className = 'llm-memory-role-select';
+              ['system', 'user', 'assistant'].forEach((roleKey) => {
+                const opt = document.createElement('option');
+                opt.value = roleKey;
+                opt.textContent = formatRoleLabel(roleKey);
+                if (entry.role === roleKey) opt.selected = true;
+                roleSelect.appendChild(opt);
+              });
+              editorBody.appendChild(roleSelect);
+
+              const textarea = document.createElement('textarea');
+              textarea.className = 'llm-memory-editor';
+              textarea.value = entry.content || '';
+              textarea.rows = Math.min(10, Math.max(3, (textarea.value.match(/\n/g) || []).length + 1));
+              editorBody.appendChild(textarea);
+
+              item.appendChild(editorBody);
+
+              const editActions = document.createElement('div');
+              editActions.className = 'llm-memory-actions editing';
+
+              const saveBtn = document.createElement('button');
+              saveBtn.type = 'button';
+              saveBtn.className = 'secondary';
+              saveBtn.textContent = 'Save';
+              saveBtn.addEventListener('click', () => {
+                const next = getMemory();
+                if (!next[index]) return;
+                next[index] = { role: roleSelect.value, content: textarea.value };
+                commitMemory(next, 'Chat entry updated');
+              });
+              editActions.appendChild(saveBtn);
+
+              const cancelBtn = document.createElement('button');
+              cancelBtn.type = 'button';
+              cancelBtn.className = 'ghost';
+              cancelBtn.textContent = 'Cancel';
+              cancelBtn.addEventListener('click', () => {
+                editingIndex = null;
+                renderMemoryList();
+                syncVisibility();
+              });
+              editActions.appendChild(cancelBtn);
+
+              item.appendChild(editActions);
+              memoryList.appendChild(item);
+
+              focusEditor = () => {
+                textarea.focus();
+                const len = textarea.value.length;
+                textarea.setSelectionRange(len, len);
+              };
+              return;
+            }
+
+            item.draggable = true;
+
+            const handle = document.createElement('div');
+            handle.className = 'llm-memory-handle';
+            handle.textContent = '☰';
+            handle.title = 'Drag to reorder';
+            item.appendChild(handle);
+
+            const body = document.createElement('div');
+            body.className = 'llm-memory-body';
+            const meta = document.createElement('div');
+            meta.className = 'llm-memory-meta';
+            meta.textContent = formatRoleLabel(entry.role);
+            body.appendChild(meta);
+            const content = document.createElement('div');
+            content.className = 'llm-memory-content';
+            content.textContent = entry.content || '';
+            body.appendChild(content);
+            item.appendChild(body);
+
+            const actions = document.createElement('div');
+            actions.className = 'llm-memory-actions';
+
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'ghost';
+            editBtn.title = 'Edit entry';
+            editBtn.textContent = '✎';
+            editBtn.addEventListener('click', () => {
+              editingIndex = index;
+              renderMemoryList();
+              syncVisibility();
+            });
+            actions.appendChild(editBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'ghost danger';
+            deleteBtn.title = 'Remove entry';
+            deleteBtn.textContent = '✕';
+            deleteBtn.addEventListener('click', () => {
+              const next = getMemory();
+              if (!next[index]) return;
+              next.splice(index, 1);
+              if (!next.length) delete memoryDetails.dataset.userToggled;
+              commitMemory(next, 'Removed chat entry');
+            });
+            actions.appendChild(deleteBtn);
+
+            item.appendChild(actions);
+            memoryList.appendChild(item);
+          });
+
+          const enabled = isMemoryEnabled();
+          memoryClearBtn.disabled = !enabled || getMemory().length === 0;
+
+          if (!memoryDetails.dataset.userToggled) {
+            if (enabled && getMemory().length) setDetailsOpen(true);
+            else setDetailsOpen(false);
+          }
+
+          if (focusEditor) requestAnimationFrame(focusEditor);
+        };
+
+        let dragIndex = null;
+
+        memoryList.addEventListener('dragstart', (ev) => {
+          const item = ev.target.closest('.llm-memory-item');
+          if (!item || item.classList.contains('editing')) return;
+          dragIndex = Number(item.dataset.memoryIdx);
+          item.classList.add('dragging');
+          ev.dataTransfer.effectAllowed = 'move';
+          ev.dataTransfer.setData('text/plain', String(dragIndex));
+        });
+
+        memoryList.addEventListener('dragend', (ev) => {
+          const item = ev.target.closest('.llm-memory-item');
+          if (item) item.classList.remove('dragging');
+          dragIndex = null;
+          memoryList.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
+        });
+
+        memoryList.addEventListener('dragover', (ev) => {
+          const item = ev.target.closest('.llm-memory-item');
+          if (!item || item.classList.contains('editing')) return;
+          ev.preventDefault();
+          item.classList.add('drag-over');
+        });
+
+        memoryList.addEventListener('dragleave', (ev) => {
+          const item = ev.target.closest('.llm-memory-item');
+          if (!item) return;
+          item.classList.remove('drag-over');
+        });
+
+        memoryList.addEventListener('drop', (ev) => {
+          ev.preventDefault();
+          memoryList.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
+          const memory = getMemory();
+          if (!memory.length) return;
+          const fromIndex = dragIndex != null ? dragIndex : Number(ev.dataTransfer?.getData('text/plain'));
+          if (!Number.isFinite(fromIndex)) return;
+          const targetItem = ev.target.closest('.llm-memory-item');
+          let insertIndex = memory.length;
+          if (targetItem && targetItem.dataset.memoryIdx !== undefined) {
+            insertIndex = Number(targetItem.dataset.memoryIdx);
+            if (!Number.isFinite(insertIndex)) insertIndex = memory.length;
+          }
+          let finalIndex = insertIndex;
+          if (fromIndex < insertIndex) finalIndex = Math.max(0, insertIndex - 1);
+          if (finalIndex < 0) finalIndex = 0;
+          if (finalIndex > memory.length) finalIndex = memory.length;
+          if (finalIndex === fromIndex) {
+            dragIndex = null;
+            return;
+          }
+          const [moved] = memory.splice(fromIndex, 1);
+          memory.splice(finalIndex, 0, moved);
+          commitMemory(memory, 'Reordered chat entry');
+          dragIndex = null;
+        });
+
+        const syncVisibility = () => {
+          const enabled = isMemoryEnabled();
+          memorySection.classList.toggle('llm-memory-hidden', !enabled);
+          memoryClearBtn.disabled = !enabled || getMemory().length === 0;
+          if (!memoryDetails.dataset.userToggled) {
+            if (enabled) setDetailsOpen(true);
+            else setDetailsOpen(false);
+          } else if (!enabled) {
+            setDetailsOpen(false);
+          }
+        };
+
+        const commitMemory = (entries, message) => {
+          const sanitized = entries.map(sanitizeEntry);
+          NodeStore.update(nodeId, { memory: sanitized });
+          Router.sendFrom(nodeId, 'memory', { type: 'updated', size: sanitized.length });
+          if (message) setBadge(message);
+          editingIndex = null;
+          renderMemoryList();
+          syncVisibility();
+        };
+
+        memoryClearBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          if (!getMemory().length) return;
+          delete memoryDetails.dataset.userToggled;
+          commitMemory([], 'Chat history cleared');
+        });
+
+        const hiddenToggle = fields.querySelector('input[name="memoryOn"]');
+        const selectToggle = fields.querySelector('select[name="memoryOn"]');
+        const toggleButton = hiddenToggle?.parentElement?.querySelector('.toggle-boolean');
+
+        if (toggleButton && !toggleButton._llmMemoryToggleBound) {
+          toggleButton.addEventListener('click', () => {
+            setTimeout(syncVisibility, 0);
+          });
+          toggleButton._llmMemoryToggleBound = true;
+        } else if (selectToggle && !selectToggle._llmMemoryToggleBound) {
+          selectToggle.addEventListener('change', syncVisibility);
+          selectToggle._llmMemoryToggleBound = true;
+        }
+
+        renderMemoryList();
+        syncVisibility();
+      };
+    }
     for (const field of schema) {
       const label = document.createElement('label');
       label.textContent = field.label;
@@ -5291,6 +5635,7 @@ function refreshNodeResolution(force = false) {
     }
 
     convertBooleanSelectsIn(fields);
+    if (typeof memoryManagerSetup === 'function') memoryManagerSetup();
     if (!fields._boolToggleObserver) {
       const observer = new MutationObserver((mutations) => {
         for (const m of mutations) {

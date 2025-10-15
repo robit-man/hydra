@@ -2504,3 +2504,176 @@ audio {
   width: 100%;
   height: 32px
 }
+
+.llm-memory-section {
+  margin-top: 16px;
+}
+
+.llm-memory-section.llm-memory-hidden {
+  display: none;
+}
+
+.llm-memory-details {
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 12px;
+  padding: 0 12px 12px;
+}
+
+.llm-memory-summary {
+  list-style: none;
+  padding: 12px 4px;
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.llm-memory-note {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.llm-memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llm-memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 8px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.llm-memory-item.dragging {
+  opacity: 0.6;
+}
+
+.llm-memory-item.drag-over {
+  border-color: var(--accent);
+  background: rgba(94, 227, 166, 0.12);
+}
+
+.llm-memory-item.editing {
+  border-style: dashed;
+}
+
+.llm-memory-handle {
+  cursor: grab;
+  font-size: 16px;
+  line-height: 1;
+  user-select: none;
+  color: var(--muted);
+  padding-top: 2px;
+  margin: auto;
+  opacity: 0.5;
+}
+
+.llm-memory-item.editing .llm-memory-handle {
+  display: none;
+}
+
+.llm-memory-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.llm-memory-meta {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.llm-memory-content {
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.llm-memory-actions {
+  display: flex;
+  flex-flow: row;
+  gap: 6px;
+}
+
+.llm-memory-actions button {
+  min-width: 30px;
+  text-align: center;
+  margin: auto;
+  display: flex;
+  flex-flow: column;
+}
+
+.llm-memory-actions.editing {
+  flex-direction: row;
+  justify-content: flex-end;
+}
+
+.llm-memory-editor-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.llm-memory-role-select {
+  width: 160px;
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.llm-memory-editor {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, .15);
+  background: rgba(255, 255, 255, .04);
+  color: var(--text);
+  padding: 8px;
+  font: inherit;
+}
+
+.llm-memory-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 2px 0;
+}
+
+.llm-memory-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+button.ghost.danger {
+  background: transparent;
+  color: var(--err);
+}
+
+button.ghost.danger:disabled {
+  border-color: rgba(255, 255, 255, .12);
+  color: rgba(255, 255, 255, .3);
+}
