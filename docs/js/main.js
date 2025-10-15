@@ -24,6 +24,7 @@ import { createVision } from './vision.js';
 import { primeLocalNetworkRequest } from './localNetwork.js';
 import { createPeerDiscovery } from './peerDiscovery.js';
 import { createPayments } from './payments.js';
+import { createWebScraper } from './webScraper.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -136,6 +137,15 @@ const Payments = createPayments({
   log
 });
 
+const WebScraper = createWebScraper({
+  getNode: (id) => graphAccess.getNode(id),
+  NodeStore,
+  Router,
+  Net,
+  setBadge,
+  log
+});
+
 const Meshtastic = createMeshtastic({
   getNode: (id) => graphAccess.getNode(id),
   NodeStore,
@@ -176,6 +186,7 @@ const Graph = createGraph({
   MCP,
   Meshtastic,
   WebSerial,
+  WebScraper,
   Vision,
   Net,
   CFG,

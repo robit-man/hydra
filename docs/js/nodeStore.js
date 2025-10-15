@@ -83,6 +83,18 @@ const NodeStore = {
       muteSignalMode: 'true/false',
       activeSignalMode: 'true/false'
     },
+    WebScraper: {
+      base: 'http://127.0.0.1:8130',
+      relay: '',
+      service: 'web_scrape',
+      api: '',
+      headless: 'true',
+      autoScreenshot: 'false',
+      sid: '',
+      lastSid: '',
+      lastFrame: '',
+      lastDom: ''
+    },
     ImageInput: {
       image: '',
       b64: '',

@@ -65,6 +65,35 @@ const GraphTypes = {
       { key: 'activeSignalMode', label: 'Active Signal', type: 'select', options: ['true/false', 'true/empty'], def: 'true/false' }
     ]
   },
+  WebScraper: {
+    title: 'Web Scraper',
+    supportsNkn: true,
+    relayKey: 'relay',
+    inputs: [
+      { name: 'url' },
+      { name: 'action' },
+      { name: 'selector' },
+      { name: 'text' },
+      { name: 'amount' },
+      { name: 'xy' },
+      { name: 'sid' }
+    ],
+    outputs: [
+      { name: 'status' },
+      { name: 'frame' },
+      { name: 'dom' },
+      { name: 'log' }
+    ],
+    schema: [
+      { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:8130' },
+      { key: 'relay', label: 'NKN Relay', type: 'text', placeholder: 'graph.router' },
+      { key: 'service', label: 'Service Alias', type: 'text', placeholder: 'web_scrape' },
+      { key: 'api', label: 'API Key / Bearer', type: 'text', placeholder: '(optional)' },
+      { key: 'headless', label: 'Headless', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'autoScreenshot', label: 'Auto Screenshot After Actions', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'sid', label: 'Session Override', type: 'text', placeholder: '(external SID)' }
+    ]
+  },
   ImageInput: {
     title: 'Image Input',
     inputs: [],

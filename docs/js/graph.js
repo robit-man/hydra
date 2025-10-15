@@ -27,6 +27,7 @@ function createGraph({
   MCP,
   Meshtastic,
   WebSerial,
+  WebScraper,
   Vision,
   Net,
   CFG,
@@ -894,6 +895,10 @@ function refreshNodeResolution(force = false) {
       return Payments.onInput?.(node.id, portName, payload);
     }
 
+    if (node.type === 'WebScraper') {
+      return WebScraper.onInput?.(node.id, portName, payload);
+    }
+
     if (node.type === 'MediaStream') {
       if (portName === 'media') return Media.onInput(node.id, payload);
       return;
@@ -1584,6 +1589,54 @@ function refreshNodeResolution(force = false) {
             <div class="tiny media-remote-empty" data-media-remote-empty>(no remote streams)</div>
           </div>
           <div class="muted" data-media-status style="pointer-events:auto;">Ready</div>
+        ` : ''}
+        ${node.type === 'WebScraper' ? `
+          <div class="wscraper" data-webscraper-root>
+            <div class="wscraper-top">
+              <div class="wscraper-buttons">
+                <button type="button" class="ghost" data-ws-connect>Connect</button>
+                <button type="button" class="ghost" data-ws-close disabled>Close</button>
+                <button type="button" class="ghost" data-ws-screenshot>Screenshot</button>
+                <button type="button" class="ghost" data-ws-dom>DOM</button>
+              </div>
+              <div class="wscraper-session">
+                <span class="muted">SID</span>
+                <span class="code" data-ws-sid>(none)</span>
+              </div>
+            </div>
+            <div class="wscraper-field">
+              <label class="muted">URL</label>
+              <div class="wscraper-input-row">
+                <input type="text" data-ws-url placeholder="https://example.com" autocapitalize="none" autocomplete="off" spellcheck="false" />
+                <button type="button" class="ghost" data-ws-nav>Go</button>
+              </div>
+            </div>
+            <div class="wscraper-field-grid">
+              <label>
+                Selector
+                <input type="text" data-ws-selector placeholder="#submit" autocapitalize="none" autocomplete="off" spellcheck="false" />
+              </label>
+              <label>
+                Text
+                <input type="text" data-ws-text placeholder="hello" />
+              </label>
+              <label>
+                Scroll
+                <input type="number" data-ws-scroll value="600" />
+              </label>
+            </div>
+            <div class="wscraper-buttons secondary">
+              <button type="button" class="ghost" data-ws-click>Click</button>
+              <button type="button" class="ghost" data-ws-type>Type</button>
+              <button type="button" class="ghost" data-ws-scroll-btn>Scroll</button>
+            </div>
+            <div class="wscraper-preview" data-ws-preview>
+              <div class="wscraper-preview-placeholder" data-ws-preview-placeholder>(no frame)</div>
+              <img data-ws-frame alt="Screenshot preview" />
+            </div>
+            <div class="tiny" data-ws-status>(idle)</div>
+            <div class="code wscraper-log" data-ws-log>(log)</div>
+          </div>
         ` : ''}
         ${node.type === 'Meshtastic' ? `
           <div class="meshtastic-node" data-mesh-root>
@@ -5841,6 +5894,9 @@ function refreshNodeResolution(force = false) {
     if (nodeType === 'MediaStream') {
       Media.refresh(nodeId);
     }
+    if (nodeType === 'WebScraper') {
+      WebScraper.refresh?.(nodeId);
+    }
     if (nodeType === 'LLM') {
       refreshLlmControls(nodeId);
     }
@@ -6078,6 +6134,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
     if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
     if (type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
+    if (type === 'WebScraper') requestAnimationFrame(() => WebScraper.init(id));
     if (type === 'FaceLandmarks') requestAnimationFrame(() => Vision?.Face?.init?.(id));
     if (type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(id));
     if (opts.select) setSelectedNode(id, { focus: true });
@@ -6149,6 +6206,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'WebSerial') {
       WebSerial.dispose?.(nodeId);
     }
+    if (node.type === 'WebScraper') {
+      WebScraper.dispose?.(nodeId);
+    }
     if (node.type === 'FaceLandmarks') {
       FaceViewer?.dispose?.(nodeId);
       Vision?.Face?.dispose?.(nodeId);
@@ -6188,6 +6248,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'Payments', label: 'Payments', x: 820, y: 260 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
+      { type: 'WebScraper', label: 'Web Scraper', x: 380, y: 220 },
       { type: 'FaceLandmarks', label: 'Face Viewer', x: 360, y: 300 },
       { type: 'PoseLandmarks', label: 'Pose Landmarks', x: 360, y: 360 },
       { type: 'Meshtastic', label: 'Meshtastic', x: 260, y: 120 },

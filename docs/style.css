@@ -2977,3 +2977,104 @@ button.ghost.danger:disabled {
   border-color: rgba(255, 255, 255, .12);
   color: rgba(255, 255, 255, .3);
 }
+
+.wscraper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.wscraper-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wscraper-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.wscraper-buttons.secondary {
+  justify-content: flex-start;
+}
+
+.wscraper-session {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-small);
+}
+
+.wscraper-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wscraper-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.wscraper-input-row input {
+  flex: 1 1 auto;
+}
+
+.wscraper-field-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.wscraper-field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wscraper-preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  min-height: 160px;
+  overflow: hidden;
+}
+
+.wscraper-preview img {
+  display: none;
+  width: 100%;
+  height: auto;
+  cursor: crosshair;
+}
+
+.wscraper-preview img.active {
+  display: block;
+}
+
+.wscraper-preview-placeholder {
+  font-size: var(--font-small);
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+  padding: 12px;
+}
+
+.wscraper-preview-placeholder.hidden {
+  display: none;
+}
+
+.wscraper-log {
+  min-height: 48px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+

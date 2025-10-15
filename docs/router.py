@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, IO, List, Optional, Tuple
@@ -101,6 +102,7 @@ DEFAULT_TARGETS = {
     "asr": "http://127.0.0.1:8126",
     "tts": "http://127.0.0.1:8123",
     "mcp": "http://127.0.0.1:9003",
+    "web_scrape": "http://127.0.0.1:8130",
 }
 
 SERVICE_TARGETS = {
@@ -119,6 +121,10 @@ SERVICE_TARGETS = {
     "mcp_server": {
         "target": "mcp",
         "aliases": ["mcp_server", "mcp", "context"],
+    },
+    "web_scrape": {
+        "target": "web_scrape",
+        "aliases": ["web_scrape", "browser", "chrome", "scrape"],
     },
 }
 
@@ -327,6 +333,12 @@ class ServiceWatchdog:
             repo_url="https://github.com/robit-man/hydra-mcp-server.git",
             script_path="mcp_server/mcp_service.py",
             description="Hydra MCP context server with WebSocket + REST APIs",
+        ),
+        ServiceDefinition(
+            name="web_scrape",
+            repo_url="https://github.com/robit-man/web-scrape-service.git",
+            script_path="scrape/web_scrape.py",
+            description="Headless Chrome scrape/control service",
         ),
     ]
 
@@ -579,6 +591,8 @@ class ServiceWatchdog:
             return [11434, 8080]
         if service_name == "mcp_server":
             return [9003]
+        if service_name == "web_scrape":
+            return [8130]
         return []
 
     def _terminate_process(self, state: ServiceState) -> None:
@@ -1708,6 +1722,176 @@ def req_from_asr_events(msg: dict) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────
+# Helpers for browser automation requests
+# ──────────────────────────────────────────────────────────────
+def _browser_opts(msg: dict) -> dict:
+    raw = msg.get("opts")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _browser_service(opts: dict) -> str:
+    return (opts.get("service") or "web_scrape").strip() or "web_scrape"
+
+
+def _browser_headers(opts: dict, base: Optional[dict] = None) -> dict:
+    headers = {}
+    if base:
+        headers.update(base)
+    extra = opts.get("headers")
+    if isinstance(extra, dict):
+        headers.update(extra)
+    return headers
+
+
+def _browser_timeout(opts: dict, default_ms: int) -> int:
+    raw = opts.get("timeout_ms")
+    if raw is None:
+        return default_ms
+    try:
+        return int(raw)
+    except Exception:
+        return default_ms
+
+
+def _browser_sid(msg: dict) -> str:
+    sid = (msg.get("sid") or "").strip()
+    if sid:
+        return sid
+    opts = _browser_opts(msg)
+    sid_opt = opts.get("sid")
+    return (sid_opt or "").strip()
+
+
+def _browser_path_with_sid(base_path: str, sid: str) -> str:
+    if not sid:
+        return base_path
+    return f"{base_path}?sid={urllib.parse.quote_plus(sid)}"
+
+
+def _browser_request(msg: dict, path: str, *, method: str = "GET", json_body: Optional[dict] = None,
+                     headers: Optional[dict] = None, stream: Optional[str] = None, default_timeout_ms: int = 45000) -> dict:
+    opts = _browser_opts(msg)
+    req = {
+        "service": _browser_service(opts),
+        "path": path,
+        "method": method,
+        "headers": _browser_headers(opts, headers or {}),
+        "timeout_ms": _browser_timeout(opts, default_timeout_ms),
+    }
+    if json_body is not None:
+        req["json"] = json_body
+    if stream:
+        req["stream"] = stream
+    if isinstance(opts.get("verify"), bool):
+        req["verify"] = bool(opts["verify"])
+    if opts.get("insecure_tls") in (True, "1", "true", "on"):
+        req["insecure_tls"] = True
+    return req
+
+
+def _with_sid_json(msg: dict, payload: dict) -> dict:
+    sid = _browser_sid(msg)
+    if sid:
+        payload.setdefault("sid", sid)
+    return payload
+
+
+def req_from_browser_open(msg: dict) -> dict:
+    opts = _browser_opts(msg)
+    headless = msg.get("headless")
+    if headless is None:
+        headless = opts.get("headless")
+    if headless is None:
+        headless = True
+    return _browser_request(
+        msg,
+        "/session/start",
+        method="POST",
+        json_body={"headless": bool(headless)},
+        default_timeout_ms=_browser_timeout(opts, 60000),
+    )
+
+
+def req_from_browser_close(msg: dict) -> dict:
+    return _browser_request(msg, "/session/close", method="POST", json_body={})
+
+
+def req_from_browser_nav(msg: dict) -> dict:
+    url = (msg.get("url") or "").strip()
+    if not url:
+        raise ValueError("browser.nav missing url")
+    body = _with_sid_json(msg, {"url": url})
+    return _browser_request(msg, "/navigate", method="POST", json_body=body)
+
+
+def req_from_browser_click(msg: dict) -> dict:
+    selector = (msg.get("selector") or "").strip()
+    if not selector:
+        raise ValueError("browser.click missing selector")
+    body = _with_sid_json(msg, {"selector": selector})
+    return _browser_request(msg, "/click", method="POST", json_body=body)
+
+
+def req_from_browser_type(msg: dict) -> dict:
+    selector = (msg.get("selector") or "").strip()
+    if not selector:
+        raise ValueError("browser.type missing selector")
+    if "text" not in msg:
+        raise ValueError("browser.type missing text")
+    body = _with_sid_json(msg, {"selector": selector, "text": msg.get("text")})
+    return _browser_request(msg, "/type", method="POST", json_body=body)
+
+
+def req_from_browser_scroll(msg: dict) -> dict:
+    amount = msg.get("amount", 600)
+    try:
+        amount = int(amount)
+    except Exception:
+        raise ValueError("browser.scroll amount must be int") from None
+    body = _with_sid_json(msg, {"amount": amount})
+    return _browser_request(msg, "/scroll", method="POST", json_body=body)
+
+
+def req_from_browser_click_xy(msg: dict) -> dict:
+    for key in ("x", "y", "viewportW", "viewportH"):
+        if key not in msg:
+            raise ValueError(f"browser.click_xy missing {key}")
+    body = _with_sid_json(
+        msg,
+        {
+            "x": msg.get("x"),
+            "y": msg.get("y"),
+            "viewportW": msg.get("viewportW"),
+            "viewportH": msg.get("viewportH"),
+            "naturalW": msg.get("naturalW") or msg.get("naturalWidth"),
+            "naturalH": msg.get("naturalH") or msg.get("naturalHeight"),
+        },
+    )
+    return _browser_request(msg, "/click_xy", method="POST", json_body=body)
+
+
+def req_from_browser_dom(msg: dict) -> dict:
+    sid = _browser_sid(msg)
+    path = _browser_path_with_sid("/dom", sid)
+    return _browser_request(msg, path, method="GET", headers={"Accept": "application/json"}, default_timeout_ms=60000)
+
+
+def req_from_browser_screenshot(msg: dict) -> dict:
+    sid = _browser_sid(msg)
+    path = _browser_path_with_sid("/screenshot", sid)
+    return _browser_request(msg, path, method="GET", default_timeout_ms=90000)
+
+
+def req_from_browser_events(msg: dict) -> dict:
+    sid = _browser_sid(msg)
+    if not sid:
+        raise ValueError("browser.events missing sid")
+    path = _browser_path_with_sid("/events", sid)
+    headers = {"Accept": "text/event-stream", "Cache-Control": "no-cache", "X-Relay-Stream": "lines"}
+    return _browser_request(msg, path, method="GET", headers=headers, stream="lines", default_timeout_ms=300000)
+
+
+# ──────────────────────────────────────────────────────────────
 # RelayNode combining bridge + HTTP workers
 # ──────────────────────────────────────────────────────────────
 class RelayNode:
@@ -1758,6 +1942,10 @@ class RelayNode:
                 "mcp": "mcp_server",
                 "context": "mcp_server",
                 "mcp_server": "mcp_server",
+                "web_scrape": "web_scrape",
+                "browser": "web_scrape",
+                "chrome": "web_scrape",
+                "scrape": "web_scrape",
             }
         self.alias_map = alias_map
         self.current_address: Optional[str] = None
@@ -1838,6 +2026,32 @@ class RelayNode:
             if event == "asr.events":
                 req = req_from_asr_events(body)
                 if self._check_assignment("whisper_asr", src, rid):
+                    self._enqueue_request(src, rid, req)
+                return
+            if event.startswith("browser."):
+                if event == "browser.open":
+                    req = req_from_browser_open(body)
+                elif event == "browser.close":
+                    req = req_from_browser_close(body)
+                elif event == "browser.nav":
+                    req = req_from_browser_nav(body)
+                elif event == "browser.click":
+                    req = req_from_browser_click(body)
+                elif event == "browser.type":
+                    req = req_from_browser_type(body)
+                elif event == "browser.scroll":
+                    req = req_from_browser_scroll(body)
+                elif event == "browser.click_xy":
+                    req = req_from_browser_click_xy(body)
+                elif event == "browser.dom":
+                    req = req_from_browser_dom(body)
+                elif event == "browser.screenshot":
+                    req = req_from_browser_screenshot(body)
+                elif event == "browser.events":
+                    req = req_from_browser_events(body)
+                else:
+                    return
+                if self._check_assignment("web_scrape", src, rid):
                     self._enqueue_request(src, rid, req)
                 return
         except Exception as e:
