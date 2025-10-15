@@ -1632,6 +1632,7 @@ function refreshNodeResolution(force = false) {
             <div class="wscraper-buttons secondary">
               <button type="button" class="ghost" data-ws-click>Click</button>
               <button type="button" class="ghost" data-ws-type>Type</button>
+              <button type="button" class="ghost" data-ws-enter>Enter</button>
               <button type="button" class="ghost" data-ws-scroll-btn>Scroll</button>
               <button type="button" class="ghost" data-ws-scroll-up>Scroll Up</button>
               <button type="button" class="ghost" data-ws-scroll-down>Scroll Down</button>
@@ -2828,15 +2829,20 @@ function refreshNodeResolution(force = false) {
         });
         if (node.type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(node.id));
         if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
-        if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
-        if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
-        if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
-        if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
-        if (node.type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
-      }
-      for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
-      requestRedraw();
-    };
+      if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
+      if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
+      if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
+      if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
+      if (node.type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
+    }
+    for (const node of WS.nodes.values()) {
+      const rec = NodeStore.ensure(node.id, node.type);
+      const cfg = rec?.config || {};
+      runNodeConfigSideEffects(node, cfg, { quiet: true });
+    }
+    for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
+    requestRedraw();
+  };
     History.silence(performLoad);
   }
 

@@ -37,7 +37,10 @@ const ACTION_ALIASES = {
   dom: 'dom',
   html: 'dom',
   events: 'events',
-  subscribe: 'events'
+  subscribe: 'events',
+  enter: 'enter',
+  submit: 'enter',
+  return: 'enter'
 };
 const MAX_LOG_LINES = 80;
 
@@ -97,6 +100,12 @@ function asNumber(value, def = 0) {
   return Number.isFinite(num) ? num : def;
 }
 
+function cssEscape(value) {
+  if (typeof value !== 'string') value = value == null ? '' : String(value);
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
+  return value.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1');
+}
+
 function asAction(payload) {
   if (payload === null || payload === undefined) return '';
   if (typeof payload === 'string') return ACTION_ALIASES[payload.trim().toLowerCase()] || payload.trim().toLowerCase();
@@ -140,6 +149,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       forward: el.querySelector('[data-ws-forward]'),
       click: el.querySelector('[data-ws-click]'),
       type: el.querySelector('[data-ws-type]'),
+      enter: el.querySelector('[data-ws-enter]'),
       scroll: el.querySelector('[data-ws-scroll-btn]'),
       scrollUp: el.querySelector('[data-ws-scroll-up]'),
       scrollDown: el.querySelector('[data-ws-scroll-down]'),
@@ -166,6 +176,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       'forward',
       'click',
       'type',
+      'enter',
       'scroll',
       'scrollUp',
       'scrollDown',
@@ -199,7 +210,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         lastWheelTs: 0,
         busyCount: 0,
         busyDisabled: null,
-        scrollRefreshTimer: null,
+        frameRefreshTimer: null,
+        activeInput: null,
+        inputSyncTimer: null,
+        pendingInputValue: null,
+        pendingInputMeta: null,
         logLines: [],
         eventGen: 0,
         eventsCancel: null,
@@ -253,6 +268,8 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       });
     };
 
+    if (elements.connect) elements.connect.disabled = false;
+
     bind(elements.connect, 'click', (e) => {
       e.preventDefault();
       openSession(nodeId);
@@ -281,6 +298,10 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       e.preventDefault();
       performType(nodeId);
     });
+    bind(elements.enter, 'click', (e) => {
+      e.preventDefault();
+      performEnter(nodeId);
+    });
     bind(elements.scroll, 'click', (e) => {
       e.preventDefault();
       performScroll(nodeId);
@@ -306,9 +327,25 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     });
     bind(elements.selector, 'change', (e) => {
       state.inputs.selector = asString(e.target?.value || '').trim();
+      updateConfig(nodeId, { lastSelector: state.inputs.selector });
+      if (state.activeInput) state.activeInput.selector = state.inputs.selector;
+    });
+    bind(elements.text, 'input', (e) => {
+      const val = asString(e.target?.value || '');
+      state.inputs.text = val;
+      const meta = { inputType: e.inputType || '', data: 'data' in e ? e.data : null };
+      scheduleInputSync(nodeId, { value: state.inputs.text, inputType: meta.inputType, data: meta.data });
     });
     bind(elements.text, 'change', (e) => {
       state.inputs.text = asString(e.target?.value || '');
+      updateConfig(nodeId, { lastText: state.inputs.text });
+      flushInputSync(nodeId, { value: state.inputs.text, inputType: 'insertText', data: null }).catch(() => {});
+    });
+    bind(elements.text, 'keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        performEnter(nodeId);
+      }
     });
     bind(elements.amount, 'change', (e) => {
       state.inputs.amount = asNumber(e.target?.value, 600);
@@ -451,10 +488,16 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = stateMap.get(nodeId);
     if (!state) return;
     stopEvents(state);
-    if (state.scrollRefreshTimer) {
-      clearTimeout(state.scrollRefreshTimer);
-      state.scrollRefreshTimer = null;
+    if (state.frameRefreshTimer) {
+      clearTimeout(state.frameRefreshTimer);
+      state.frameRefreshTimer = null;
     }
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
     if (state.captureTimer) {
       clearInterval(state.captureTimer);
       state.captureTimer = null;
@@ -468,8 +511,8 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         try { fn(); } catch (_) { /* ignore */ }
       }
     }
-      state.cleanup = [];
-      stateMap.delete(nodeId);
+    state.cleanup = [];
+    stateMap.delete(nodeId);
   }
 
   function setBusy(state, busy) {
@@ -525,6 +568,156 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     }
   }
 
+  function queueFrameRefresh(nodeId, delay = 160) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    if (state.frameRefreshTimer) {
+      clearTimeout(state.frameRefreshTimer);
+      state.frameRefreshTimer = null;
+    }
+    state.frameRefreshTimer = setTimeout(() => {
+      const fresh = ensureState(nodeId);
+      if (!fresh) return;
+      fresh.frameRefreshTimer = null;
+      captureScreenshot(nodeId, { silent: true }).catch(() => {});
+    }, delay);
+  }
+
+  function isTextualDetail(detail) {
+    if (!detail || typeof detail !== 'object') return false;
+    if (detail.contentEditable) return true;
+    const tag = (detail.tag || '').toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag !== 'input') return false;
+    const type = (detail.type || '').toLowerCase();
+    return !['button', 'checkbox', 'radio', 'submit', 'reset', 'file', 'image', 'range', 'color', 'hidden'].includes(type);
+  }
+
+  function selectorFromDetail(detail) {
+    if (!detail || typeof detail !== 'object') return '';
+    if (detail.selector) return detail.selector;
+    if (detail.id) return `#${cssEscape(detail.id)}`;
+    const tag = (detail.tag || '').toLowerCase();
+    if (detail.name && tag) {
+      const safeName = String(detail.name).replace(/"/g, '\\"');
+      return `${tag}[name="${safeName}"]`;
+    }
+    return '';
+  }
+
+  function handleRemoteTarget(nodeId, detail) {
+    const state = ensureState(nodeId);
+    if (!state || !detail || typeof detail !== 'object') return;
+    const selector = selectorFromDetail(detail);
+    const isText = isTextualDetail(detail);
+    if (isText) {
+      state.activeInput = {
+        selector,
+        tag: (detail.tag || '').toLowerCase(),
+        id: detail.id || '',
+        name: detail.name || '',
+        value: typeof detail.value === 'string' ? detail.value : ''
+      };
+      if (state.inputSyncTimer) {
+        clearTimeout(state.inputSyncTimer);
+        state.inputSyncTimer = null;
+      }
+      state.pendingInputValue = null;
+      state.pendingInputMeta = null;
+      if (selector && state.inputs.selector !== selector) {
+        state.inputs.selector = selector;
+        if (state.elements.selector) state.elements.selector.value = selector;
+        updateConfig(nodeId, { lastSelector: selector });
+      }
+      const remoteValue = typeof detail.value === 'string' ? detail.value : '';
+      state.inputs.text = remoteValue;
+      if (state.elements.text && document.activeElement !== state.elements.text) {
+        state.elements.text.value = remoteValue;
+      }
+      if (state.elements.text) {
+        setTimeout(() => {
+          const refreshed = ensureState(nodeId);
+          if (!refreshed) return;
+          refreshed.elements?.text?.focus();
+        }, 0);
+      }
+    } else {
+      state.activeInput = null;
+      if (state.inputSyncTimer) {
+        clearTimeout(state.inputSyncTimer);
+        state.inputSyncTimer = null;
+      }
+      state.pendingInputValue = null;
+      state.pendingInputMeta = null;
+    }
+  }
+
+  async function syncActiveInput(nodeId, { value, submit = false, inputType = '', data = null } = {}) {
+    const state = ensureState(nodeId);
+    if (!state) return null;
+    const sid = getActiveSid(state);
+    if (!sid) return null;
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const selector = state.activeInput?.selector || state.inputs.selector || '';
+    if (!selector && !state.activeInput) return null;
+    const payload = {
+      sid,
+      value: value == null ? '' : String(value),
+      submit: Boolean(submit),
+      inputType: inputType || '',
+      data: data === undefined ? null : data,
+      selector
+    };
+    try {
+      const res = await Net.postJSON(base, '/input/sync', payload, api, viaNkn, relay, 20000);
+      if (state.activeInput) state.activeInput.value = payload.value;
+      if (submit || state.autoScreenshot || state.autoCapture) {
+        queueFrameRefresh(nodeId, submit ? 40 : 160);
+      }
+      return res;
+    } catch (err) {
+      const message = err?.message || err;
+      appendLog(nodeId, `input sync failed: ${message}`, 'warn');
+      return null;
+    }
+  }
+
+  function scheduleInputSync(nodeId, { value, inputType = '', data = null } = {}) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    if (!state.activeInput && !state.inputs.selector) return;
+    const stringValue = value == null ? '' : String(value);
+    if (state.activeInput && state.activeInput.value === stringValue) return;
+    state.pendingInputValue = stringValue;
+    state.pendingInputMeta = { inputType, data };
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.inputSyncTimer = setTimeout(() => {
+      flushInputSync(nodeId).catch(() => {});
+    }, 30);
+  }
+
+  async function flushInputSync(nodeId, { submit = false, value, inputType = '', data = null } = {}) {
+    const state = ensureState(nodeId);
+    if (!state) return null;
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    const hasExplicit = value !== undefined;
+    const pendingValue = hasExplicit ? value : state.pendingInputValue;
+    const pendingMeta = hasExplicit ? { inputType, data } : (state.pendingInputMeta || {});
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
+    const finalValue = pendingValue != null ? pendingValue : (state.elements.text?.value ?? state.inputs.text ?? '');
+    const finalType = pendingMeta?.inputType || inputType || '';
+    const finalData = pendingMeta && Object.prototype.hasOwnProperty.call(pendingMeta, 'data') ? pendingMeta.data : data;
+    const res = await syncActiveInput(nodeId, { value: finalValue, submit, inputType: finalType, data: finalData });
+    return res;
+  }
+
   function setStatus(nodeId, text, tone = '') {
     const state = ensureState(nodeId);
     if (!state) return;
@@ -568,6 +761,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = ensureState(nodeId);
     if (!state) return;
     state.sessionId = sid || '';
+    state.activeInput = null;
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
     if (persist) {
       updateConfig(nodeId, { lastSid: state.sessionId });
     }
@@ -582,6 +782,15 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = ensureState(nodeId);
     if (!state) return;
     state.manualSid = sid || '';
+    if (!state.manualSid) {
+      state.activeInput = null;
+      if (state.inputSyncTimer) {
+        clearTimeout(state.inputSyncTimer);
+        state.inputSyncTimer = null;
+      }
+      state.pendingInputValue = null;
+      state.pendingInputMeta = null;
+    }
     updateConfig(nodeId, { sid: state.manualSid });
     updateSessionLabel(state);
     subscribeEvents(nodeId);
@@ -594,23 +803,26 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
   function refreshControls(nodeId) {
     const state = ensureState(nodeId);
     if (!state) return;
-    const sid = getActiveSid(state);
     const hasSession = Boolean(state.sessionId);
     const elements = state.elements;
-    const disableIfNoSid = (elm) => {
-      if (!elm) return;
-      elm.disabled = !sid;
-    };
-    disableIfNoSid(elements.nav);
-    disableIfNoSid(elements.back);
-    disableIfNoSid(elements.forward);
-    disableIfNoSid(elements.click);
-    disableIfNoSid(elements.type);
-    disableIfNoSid(elements.scroll);
-    disableIfNoSid(elements.scrollUp);
-    disableIfNoSid(elements.scrollDown);
-    disableIfNoSid(elements.screenshot);
-    disableIfNoSid(elements.dom);
+    const alwaysEnabled = [
+      elements.connect,
+      elements.nav,
+      elements.back,
+      elements.forward,
+      elements.click,
+      elements.type,
+      elements.enter,
+      elements.scroll,
+      elements.scrollUp,
+      elements.scrollDown,
+      elements.screenshot,
+      elements.dom
+    ];
+    for (const elm of alwaysEnabled) {
+      if (!elm) continue;
+      elm.disabled = false;
+    }
     if (elements.close) elements.close.disabled = !hasSession;
   }
 
@@ -726,6 +938,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'Enter a URL first', 'warn');
       return;
     }
+    state.activeInput = null;
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
     const { base, relay, api, viaNkn } = requestEnv(nodeId);
     const body = { url, sid };
     setBusy(state, true);
@@ -764,6 +983,20 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       const res = await Net.postJSON(base, '/click', { selector, sid }, api, viaNkn, relay, 30000);
       appendLog(nodeId, res?.msg || `click ${selector}`);
       setStatus(nodeId, 'Click ok', 'ok');
+      state.activeInput = { selector, value: state.inputs.text || '' };
+      if (state.inputSyncTimer) {
+        clearTimeout(state.inputSyncTimer);
+        state.inputSyncTimer = null;
+      }
+      state.pendingInputValue = null;
+      state.pendingInputMeta = null;
+      if (state.elements.text) {
+        setTimeout(() => {
+          const refreshed = ensureState(nodeId);
+          if (!refreshed) return;
+          refreshed.elements?.text?.focus();
+        }, 0);
+      }
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
     } catch (err) {
       const message = err?.message || String(err);
@@ -838,6 +1071,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         // ignore
       }
     }
+    state.activeInput = null;
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
     setBusy(state, true);
     setStatus(nodeId, 'Going back…', 'pending');
     try {
@@ -870,6 +1110,13 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         // ignore
       }
     }
+    state.activeInput = null;
+    if (state.inputSyncTimer) {
+      clearTimeout(state.inputSyncTimer);
+      state.inputSyncTimer = null;
+    }
+    state.pendingInputValue = null;
+    state.pendingInputMeta = null;
     setBusy(state, true);
     setStatus(nodeId, 'Going forward…', 'pending');
     try {
@@ -958,16 +1205,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     try {
       await Net.postJSON(base, '/scroll/point', body, api, viaNkn, relay, 20000);
       if (state.autoScreenshot || state.autoCapture) {
-        if (state.scrollRefreshTimer) {
-          clearTimeout(state.scrollRefreshTimer);
-          state.scrollRefreshTimer = null;
-        }
-        state.scrollRefreshTimer = setTimeout(() => {
-          const fresh = ensureState(nodeId);
-          if (!fresh) return;
-          fresh.scrollRefreshTimer = null;
-          captureScreenshot(nodeId, { silent: true }).catch(() => {});
-        }, 160);
+        queueFrameRefresh(nodeId);
       }
     } catch (err) {
       const message = err?.message || String(err);
@@ -985,10 +1223,35 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     }
     const selector = selectorOverride || state.inputs.selector || asString(state.elements.selector?.value || '').trim();
     const text = textOverride !== undefined ? textOverride : state.inputs.text || asString(state.elements.text?.value || '');
+    const normalizedText = text == null ? '' : String(text);
+    state.inputs.text = normalizedText;
     if (!selector) {
-      setStatus(nodeId, 'Selector required', 'warn');
+      if (!state.activeInput && !state.inputs.selector) {
+        setStatus(nodeId, 'Selector required', 'warn');
+        return;
+      }
+      setBusy(state, true);
+      setStatus(nodeId, 'Typing…', 'pending');
+      const res = await flushInputSync(nodeId, { value: normalizedText, inputType: 'insertText', data: null });
+      setBusy(state, false);
+      if (res) {
+        if (state.activeInput) state.activeInput.value = normalizedText;
+        appendLog(nodeId, res?.message || 'type synced');
+        setStatus(nodeId, res?.message || 'Type ok', 'ok');
+      } else {
+        setStatus(nodeId, 'Type failed', 'err');
+        appendLog(nodeId, 'error: type sync failed', 'error');
+      }
+      if (state.elements.text) {
+        setTimeout(() => {
+          const refreshed = ensureState(nodeId);
+          if (!refreshed) return;
+          refreshed.elements?.text?.focus();
+        }, 0);
+      }
       return;
     }
+    state.activeInput = { selector };
     const { base, relay, api, viaNkn } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Type into ${selector}`, 'pending');
@@ -996,6 +1259,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       const res = await Net.postJSON(base, '/type', { selector, text, sid }, api, viaNkn, relay, 45000);
       appendLog(nodeId, res?.msg || `type ${selector}`);
       setStatus(nodeId, 'Type ok', 'ok');
+      if (state.activeInput) state.activeInput.value = normalizedText;
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
     } catch (err) {
       const message = err?.message || String(err);
@@ -1003,6 +1267,47 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       appendLog(nodeId, `error: ${message}`, 'error');
     } finally {
       setBusy(state, false);
+    }
+    if (state.elements.text) {
+      setTimeout(() => {
+        const refreshed = ensureState(nodeId);
+        if (!refreshed) return;
+        refreshed.elements?.text?.focus();
+      }, 0);
+    }
+  }
+
+  async function performEnter(nodeId) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) {
+      setStatus(nodeId, 'No session id', 'warn');
+      return;
+    }
+    const currentValue = state.elements.text ? asString(state.elements.text.value || '') : state.inputs.text || '';
+    state.inputs.text = currentValue;
+    setBusy(state, true);
+    setStatus(nodeId, 'Submitting…', 'pending');
+    try {
+      const res = await flushInputSync(nodeId, { submit: true, value: currentValue, inputType: 'insertLineBreak', data: '\n' });
+      if (res) {
+        if (state.activeInput) state.activeInput.value = currentValue;
+        appendLog(nodeId, res?.message || 'enter submitted');
+        setStatus(nodeId, res?.message || 'Submitted', 'ok');
+      } else {
+        setStatus(nodeId, 'Submit failed', 'err');
+        appendLog(nodeId, 'error: submit failed', 'error');
+      }
+    } finally {
+      setBusy(state, false);
+      if (state.elements.text) {
+        setTimeout(() => {
+          const refreshed = ensureState(nodeId);
+          if (!refreshed) return;
+          refreshed.elements?.text?.focus();
+        }, 0);
+      }
     }
   }
 
@@ -1048,6 +1353,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       const res = await Net.postJSON(base, '/click_xy', body, api, viaNkn, relay, 45000);
       appendLog(nodeId, res?.message || 'click_xy');
       setStatus(nodeId, 'Click ok', 'ok');
+      if (res?.detail) {
+        handleRemoteTarget(nodeId, res.detail);
+      } else {
+        state.activeInput = null;
+      }
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
     } catch (err) {
       const message = err?.message || String(err);
@@ -1089,6 +1399,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
   async function captureScreenshot(nodeId, { silent = false } = {}) {
     const state = ensureState(nodeId);
     if (!state) return;
+    const markPending = silent && !state.capturePending;
     const sid = getActiveSid(state);
     if (!sid) {
       if (markPending) state.capturePending = false;
@@ -1104,7 +1415,6 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         // ignore
       }
     }
-    const markPending = silent && !state.capturePending;
     if (markPending) state.capturePending = true;
     if (!silent) {
       setBusy(state, true);
@@ -1435,6 +1745,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         state.inputs.text = asString(payload);
         if (state.elements.text) state.elements.text.value = state.inputs.text;
         updateConfig(nodeId, { lastText: state.inputs.text });
+        flushInputSync(nodeId, { value: state.inputs.text, inputType: 'insertText', data: null }).catch(() => {});
         break;
       case 'amount':
         state.inputs.amount = asNumber(payload, state.inputs.amount || 600);
@@ -1489,6 +1800,9 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         break;
       case 'type':
         performType(nodeId, payload?.selector, payload?.text);
+        break;
+      case 'enter':
+        performEnter(nodeId);
         break;
       case 'scroll':
         performScroll(nodeId, payload?.amount);
