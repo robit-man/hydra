@@ -44,6 +44,33 @@ const NodeStore = {
       think: false,
       tools: []
     },
+    FaceLandmarks: {
+      delegate: 'GPU',
+      numFaces: 1,
+      outputBlendshapes: true,
+      outputWorld: false,
+      outputHeadPose: true,
+      runningMode: 'VIDEO',
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+      maxFPS: 30,
+      smoothing: true,
+      minFaceDetectionConfidence: 0.5,
+      minFacePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    },
+    PoseLandmarks: {
+      delegate: 'GPU',
+      runningMode: 'VIDEO',
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+      minPoseDetectionConfidence: 0.5,
+      minPoseTrackingConfidence: 0.5,
+      segmentation: false,
+      outputWorld: true,
+      maxFPS: 30,
+      smoothing: true
+    },
     TTS: {
       base: 'http://localhost:8123',
       relay: '',

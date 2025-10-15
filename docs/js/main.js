@@ -20,6 +20,7 @@ import { createGraph } from './graph.js';
 import { createFlowsLibrary } from './flows.js';
 import { createMeshtastic } from './meshtastic.js';
 import { createWebSerial } from './webSerial.js';
+import { createVision } from './vision.js';
 import { primeLocalNetworkRequest } from './localNetwork.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
@@ -141,6 +142,14 @@ const WebSerial = createWebSerial({
   setBadge
 });
 
+const Vision = createVision({
+  getNode: (id) => graphAccess.getNode(id),
+  Router,
+  NodeStore,
+  setBadge,
+  log
+});
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -155,6 +164,7 @@ const Graph = createGraph({
   MCP,
   Meshtastic,
   WebSerial,
+  Vision,
   Net,
   CFG,
   saveCFG,

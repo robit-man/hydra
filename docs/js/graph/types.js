@@ -160,6 +160,89 @@ const GraphTypes = {
       { key: 'defaultJson', label: 'Default JSON Output', type: 'select', options: ['true', 'false'], def: 'true' }
     ]
   },
+  FaceLandmarks: {
+    title: 'Face Landmarks',
+    supportsNkn: false,
+    inputs: [{ name: 'media' }, { name: 'image' }],
+    outputs: [
+      { name: 'face', label: '2D Landmarks' },
+      { name: 'blendshapes', label: 'Blendshapes' },
+      { name: 'world', label: 'World Landmarks' },
+      { name: 'orientation', label: 'Head Pose' },
+      { name: 'ts', label: 'Timestamp' }
+    ],
+    schema: [
+      { key: 'delegate', label: 'Delegate', type: 'select', options: ['GPU', 'CPU'], def: 'GPU' },
+      { key: 'numFaces', label: 'Max Faces', type: 'number', def: 1 },
+      {
+        key: 'minFaceDetectionConfidence',
+        label: 'Min Detection Confidence',
+        type: 'number',
+        def: 0.5
+      },
+      {
+        key: 'minFacePresenceConfidence',
+        label: 'Min Presence Confidence',
+        type: 'number',
+        def: 0.5
+      },
+      {
+        key: 'minTrackingConfidence',
+        label: 'Min Tracking Confidence',
+        type: 'number',
+        def: 0.5
+      },
+      { key: 'outputBlendshapes', label: 'Output Blendshapes', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'outputWorld', label: 'Output World Landmarks', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'runningMode', label: 'Running Mode', type: 'select', options: ['VIDEO', 'IMAGE'], def: 'VIDEO' },
+      {
+        key: 'modelAssetPath',
+        label: 'Model URL',
+        type: 'text',
+        placeholder: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+      },
+      { key: 'maxFPS', label: 'Max FPS', type: 'number', def: 30 },
+      { key: 'smoothing', label: 'Smoothing', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'outputHeadPose', label: 'Output Head Pose', type: 'select', options: ['true', 'false'], def: 'true' }
+    ]
+  },
+  PoseLandmarks: {
+    title: 'Pose Landmarks',
+    supportsNkn: false,
+    inputs: [{ name: 'media' }, { name: 'image' }],
+    outputs: [
+      { name: 'pose', label: '2D Landmarks' },
+      { name: 'world', label: 'World Landmarks' },
+      { name: 'segmentation', label: 'Segmentation' },
+      { name: 'ts', label: 'Timestamp' }
+    ],
+    schema: [
+      { key: 'delegate', label: 'Delegate', type: 'select', options: ['GPU', 'CPU'], def: 'GPU' },
+      { key: 'runningMode', label: 'Running Mode', type: 'select', options: ['VIDEO', 'IMAGE'], def: 'VIDEO' },
+      {
+        key: 'modelAssetPath',
+        label: 'Model URL',
+        type: 'text',
+        placeholder: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'
+      },
+      {
+        key: 'minPoseDetectionConfidence',
+        label: 'Min Detection Confidence',
+        type: 'number',
+        def: 0.5
+      },
+      {
+        key: 'minPoseTrackingConfidence',
+        label: 'Min Tracking Confidence',
+        type: 'number',
+        def: 0.5
+      },
+      { key: 'segmentation', label: 'Output Segmentation', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'outputWorld', label: 'Output World Landmarks', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'maxFPS', label: 'Max FPS', type: 'number', def: 30 },
+      { key: 'smoothing', label: 'Smoothing', type: 'select', options: ['true', 'false'], def: 'true' }
+    ]
+  },
   WebSerial: {
     title: 'WebSerial',
     supportsNkn: false,

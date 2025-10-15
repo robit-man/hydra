@@ -10,6 +10,7 @@ import {
 import { GraphTypes as graphTypes } from './graph/types.js';
 import { createAudioHelpers } from './graph/audio.js';
 import { createWorkspaceManager } from './graph/workspace.js';
+import { createFaceViewer } from './faceViewer.js';
 
 function createGraph({
   Router,
@@ -25,6 +26,7 @@ function createGraph({
   MCP,
   Meshtastic,
   WebSerial,
+  Vision,
   Net,
   CFG,
   saveCFG,
@@ -54,6 +56,7 @@ function createGraph({
   const LOG_COLLAPSED_KEY = 'graph.logCollapsed';
   const History = createHistory({ LS });
   const audio = createAudioHelpers();
+  const FaceViewer = Vision ? createFaceViewer({ Vision }) : null;
   const {
     downloadWorkspaceFile,
     openGraphImportDialog,
@@ -672,6 +675,35 @@ function refreshNodeResolution(force = false) {
     });
   }
 
+  function initFaceLandmarksNode(node) {
+    if (!node?.el || node.type !== 'FaceLandmarks') return;
+    const body = node.el.querySelector('.body');
+    if (!body) return;
+    if (body.querySelector('[data-face-viewer]')) return;
+
+    const viewerWrap = document.createElement('div');
+    viewerWrap.className = 'face-viewer';
+    viewerWrap.dataset.faceViewer = 'true';
+
+    const status = document.createElement('div');
+    status.className = 'face-viewer-status';
+    status.textContent = 'Initializing 3D face…';
+    viewerWrap.appendChild(status);
+
+    const ports = body.querySelector('.ports');
+    if (ports && ports.parentElement === body) {
+      body.insertBefore(viewerWrap, ports.nextSibling);
+    } else {
+      body.appendChild(viewerWrap);
+    }
+
+    if (FaceViewer && typeof FaceViewer.init === 'function') {
+      FaceViewer.init(node.id, viewerWrap, status);
+    } else if (status) {
+      status.textContent = '3D viewer unavailable';
+    }
+  }
+
   function scheduleModelPrefetch(nodeId, nodeType, delay = 200) {
     const run = MODEL_PREFETCHERS[nodeType];
     if (typeof run !== 'function') return;
@@ -787,6 +819,14 @@ function refreshNodeResolution(force = false) {
     if (!node) return;
     if (node.type === 'LogicGate') {
       return handleLogicGateInput(node.id, portName, payload);
+    }
+    if (node.type === 'FaceLandmarks') {
+      if (portName === 'media' || portName === 'image') return Vision?.Face?.onInput?.(node.id, portName, payload);
+      return;
+    }
+    if (node.type === 'PoseLandmarks') {
+      if (portName === 'media' || portName === 'image') return Vision?.Pose?.onInput?.(node.id, portName, payload);
+      return;
     }
     if (node.type === 'Meshtastic') {
       if (portName === 'public') return Meshtastic.sendPublic?.(node.id, payload);
@@ -2707,6 +2747,11 @@ function refreshNodeResolution(force = false) {
           setupLogicGateNode(node, leftSide);
         });
         if (node.type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
+        if (node.type === 'FaceLandmarks') requestAnimationFrame(() => {
+          initFaceLandmarksNode(node);
+          Vision?.Face?.init?.(node.id);
+        });
+        if (node.type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(node.id));
         if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
         if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
         if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
@@ -5782,6 +5827,12 @@ function refreshNodeResolution(force = false) {
     if (nodeType === 'LLM') {
       refreshLlmControls(nodeId);
     }
+    if (nodeType === 'FaceLandmarks') {
+      Promise.resolve(Vision?.Face?.refresh?.(nodeId, config)).catch(() => {});
+    }
+    if (nodeType === 'PoseLandmarks') {
+      Promise.resolve(Vision?.Pose?.refresh?.(nodeId, config)).catch(() => {});
+    }
     scheduleModelPrefetch(nodeId, nodeType, quiet ? 0 : 150);
   }
 
@@ -5991,6 +6042,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     });
     if (type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
     if (type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
+    if (type === 'FaceLandmarks') requestAnimationFrame(() => initFaceLandmarksNode(node));
     if (type === 'MCP') requestAnimationFrame(() => MCP.init(id));
     if (type === 'MediaStream') {
       requestAnimationFrame(() => Media.init(id));
@@ -6005,6 +6057,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (type === 'Orientation') requestAnimationFrame(() => Orientation.init(id));
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
     if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
+    if (type === 'FaceLandmarks') requestAnimationFrame(() => Vision?.Face?.init?.(id));
+    if (type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(id));
     if (opts.select) setSelectedNode(id, { focus: true });
     if (!History.isSilent()) {
       const snapshot = historySnapshotNode(id);
@@ -6071,6 +6125,13 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'WebSerial') {
       WebSerial.dispose?.(nodeId);
     }
+    if (node.type === 'FaceLandmarks') {
+      FaceViewer?.dispose?.(nodeId);
+      Vision?.Face?.dispose?.(nodeId);
+    }
+    if (node.type === 'PoseLandmarks') {
+      Vision?.Pose?.dispose?.(nodeId);
+    }
 
     connectedWires.forEach((w) => detachWire(w));
     node.el.remove();
@@ -6102,6 +6163,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'FileTransfer', label: 'File Transfer', x: 780, y: 200 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
+      { type: 'FaceLandmarks', label: 'Face Viewer', x: 360, y: 300 },
+      { type: 'PoseLandmarks', label: 'Pose Landmarks', x: 360, y: 360 },
       { type: 'Meshtastic', label: 'Meshtastic', x: 260, y: 120 },
       { type: 'WebSerial', label: 'Web Serial', x: 320, y: 120 },
       { type: 'Orientation', label: 'Orientation', x: 220, y: 260 },
