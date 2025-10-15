@@ -2538,13 +2538,14 @@ audio {
   display: flex;
   gap: 0.5rem;
   min-width: 280px;
-
   flex-flow: column;
+  flex-direction: column;
 }
 
 .peer-right {
   flex: 1 1 55%;
   min-width: 320px;
+  gap: 0.5rem;
   display: flex;
   flex-flow: column;
   flex-direction: column;
@@ -2589,7 +2590,6 @@ audio {
 }
 
 .chat-status {
-  margin: 6px 0;
   min-height: 20px;
 }
 

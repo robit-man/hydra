@@ -3,7 +3,7 @@ import { qs, LS } from './utils.js';
 const NATS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/nats.ws/+esm';
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const DEFAULT_HEARTBEAT_SEC = 12;
-const OFFLINE_AFTER_SECONDS = 45;
+const OFFLINE_AFTER_SECONDS = 150; // allow longer grace to reduce list flapping
 const PING_TIMEOUT_MS = 8000;
 const USERNAME_KEY = 'hydra.peer.username';
 
@@ -357,6 +357,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     directoryTimer: null,
     sharedHashes: new Map(),
     remoteHashes: new Map(),
+    peerOrder: new Map(),
+    peerSeq: 0,
     filters: {
       search: '',
       onlyFavorites: false
@@ -374,7 +376,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     },
     pokeNoticeTimer: null,
     nknListenerAttached: false,
-    nknMessageHandler: null
+    nknMessageHandler: null,
+    nknClient: null
   };
   state.store = sharedStore;
 
@@ -473,6 +476,149 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
   };
 
+  function normalizeAddressForSend(value) {
+    if (!value) return '';
+    try {
+      const text = typeof value === 'string' ? value : String(value);
+      return text.trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function ensurePeerOrder(key) {
+    const normalized = normalizeKey(key);
+    if (!normalized) return;
+    if (state.peerOrder.has(normalized)) return;
+    state.peerSeq += 1;
+    state.peerOrder.set(normalized, state.peerSeq);
+  }
+
+  function parseNknPeerPayload(packet, payload) {
+    let data = payload;
+    if (packet && typeof packet === 'object' && packet.payload !== undefined) {
+      data = packet.payload;
+    }
+    if (data == null) return null;
+    try {
+      const text = data && typeof data === 'object' && data.toString ? data.toString() : String(data);
+      return JSON.parse(text);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function attachNknMessageHandler(client) {
+    if (!client) return;
+    if (state.nknListenerAttached && state.nknClient === client) return;
+    // reset listener state if client instance changed
+    if (state.nknClient && state.nknClient !== client) {
+      state.nknListenerAttached = false;
+      state.nknMessageHandler = null;
+    }
+    const handler = (packet, payload) => {
+      const msg = parseNknPeerPayload(packet, payload);
+      if (!msg || typeof msg !== 'object') return;
+      const type = msg.type || msg.event;
+      if (!type || !PEER_MESSAGE_TYPES.has(type)) return;
+      const sourceAddr = normalizeAddressForSend(
+        (packet && packet.src) || msg.from || msg.pub || msg.addr || msg.address || ''
+      );
+      handlePeerMessage(msg, { transport: 'nkn', sourceAddr });
+    };
+    try {
+      client.on('message', handler);
+      state.nknListenerAttached = true;
+      state.nknMessageHandler = handler;
+      state.nknClient = client;
+    } catch (err) {
+      log?.(`[peers] failed to attach NKN listener: ${err?.message || err}`);
+    }
+  }
+
+  async function waitForNknClient(timeout = 20000) {
+    try {
+      Net.ensureNkn();
+    } catch (_) {
+      // ignore; ensureNkn may throw when SDK absent
+    }
+    if (Net.nkn?.client && Net.nkn.ready) {
+      attachNknMessageHandler(Net.nkn.client);
+      return Net.nkn.client;
+    }
+    const start = Date.now();
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        try {
+          Net.ensureNkn();
+        } catch (_) {
+          // ignore, we'll retry
+        }
+        if (Net.nkn?.client && Net.nkn.ready) {
+          attachNknMessageHandler(Net.nkn.client);
+          resolve(Net.nkn.client);
+          return;
+        }
+        if (Date.now() - start >= timeout) {
+          reject(new Error('NKN client unavailable'));
+          return;
+        }
+        setTimeout(check, 250);
+      };
+      check();
+    });
+  }
+
+  async function sendPeerPayload(targetAddr, payload, { fallback = false, attachMeta = false, timeout = 20000 } = {}) {
+    const destination = normalizeAddressForSend(targetAddr);
+    if (!destination) return false;
+    const message = { ...(payload || {}) };
+    if (!message.ts) message.ts = nowSeconds();
+    let fromAddr = state.meAddr || Net.nkn?.addr || '';
+    if (!fromAddr) {
+      try {
+        fromAddr = await waitForNknAddress(Math.min(timeout, 20000));
+        if (!state.meAddr) {
+          state.meAddr = fromAddr;
+          updateSelf();
+        }
+      } catch (err) {
+        if (fallback && state.discovery) {
+          try {
+            state.discovery.dm(destination, message);
+            return true;
+          } catch (_) {
+            // ignore fallback failure
+          }
+        }
+        log?.(`[peers] nkn send failed: ${err?.message || err}`);
+        return false;
+      }
+    }
+    if (fromAddr && !message.pub) message.pub = fromAddr;
+    if (fromAddr && !message.addr) message.addr = fromAddr;
+    if ((attachMeta || message.meta) && !message.meta) {
+      message.meta = getPresenceMeta();
+    }
+    message.transport = 'nkn';
+    try {
+      const client = await waitForNknClient(timeout);
+      await client.send(destination, JSON.stringify(message), { noReply: true, maxHoldingSeconds: 120 });
+      return true;
+    } catch (err) {
+      if (fallback && state.discovery) {
+        try {
+          state.discovery.dm(destination, message);
+          return true;
+        } catch (_) {
+          // ignore fallback failure
+        }
+      }
+      log?.(`[peers] nkn send failed: ${err?.message || err}`);
+      return false;
+    }
+  }
+
   try {
     const storedName = LS.get(USERNAME_KEY, '');
     if (storedName) state.username = sanitizeUsername(storedName);
@@ -481,6 +627,17 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
   state.username = sanitizeUsername(state.username || '');
   state.chat.favorites = loadFavorites();
+
+  const PEER_MESSAGE_TYPES = new Set([
+    'peer-ping',
+    'peer-pong',
+    'peer-meta',
+    'peer-poke',
+    'chat-request',
+    'chat-response',
+    'chat-typing',
+    'chat-message'
+  ]);
 
   function getPresenceMeta() {
     return {
@@ -638,7 +795,10 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
     if (state.store?.remove) state.store.remove(state.meAddr);
     if (!toDelete.length) return false;
-    toDelete.forEach((key) => state.peers.delete(key));
+    toDelete.forEach((key) => {
+      state.peers.delete(key);
+      state.peerOrder.delete(normalizeKey(key));
+    });
     return true;
   }
 
@@ -884,6 +1044,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
     const existing = state.peers.get(key) || {};
     const added = !existing.nknPub;
+    ensurePeerOrder(key);
     const lastSeconds = typeof peer.last === 'number' ? peer.last : existing.last || 0;
     const lastSeenAt =
       typeof peer.lastSeenAt === 'number'
@@ -984,45 +1145,43 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
   function pingPeer(pub) {
     const key = normalizeKey(pub);
-    if (!key || !state.discovery) return;
+    if (!key) return;
     if (state.pendingPings.has(key)) return;
     const peer = state.peers.get(key);
     const target = peer?.addr || peer?.originalPub || pub;
     if (!target) return;
-    try {
-      const payload = {
-        type: 'peer-ping',
-        addr: state.meAddr || Net.nkn?.addr || '',
-        meta: getPresenceMeta(),
-        ts: nowSeconds()
-      };
-      state.discovery.dm(target, payload);
-      state.pendingPings.set(key, Date.now());
-      if (peer) {
-        peer.probing = true;
-        state.peers.set(key, peer);
-      }
-      scheduleRender();
-      setTimeout(() => {
-        const started = state.pendingPings.get(key);
-        if (!started) return;
-        if (Date.now() - started >= PING_TIMEOUT_MS) {
-          state.pendingPings.delete(key);
-          const current = state.peers.get(key);
-          if (current && !current.online) {
-            current.probing = false;
-            state.peers.set(key, current);
-            scheduleRender();
-          }
-        }
-      }, PING_TIMEOUT_MS);
-    } catch (err) {
-      log?.(`[peers] ping failed: ${err?.message || err}`);
+    state.pendingPings.set(key, Date.now());
+    if (peer) {
+      peer.probing = true;
+      state.peers.set(key, peer);
     }
+    sendPeerPayload(target, { type: 'peer-ping' }, { attachMeta: true })
+      .catch((err) => {
+        state.pendingPings.delete(key);
+        if (peer) {
+          peer.probing = false;
+          state.peers.set(key, peer);
+          scheduleRender();
+        }
+        if (err) log?.(`[peers] ping failed: ${err.message || err}`);
+      });
+    scheduleRender();
+    setTimeout(() => {
+      const started = state.pendingPings.get(key);
+      if (!started) return;
+      if (Date.now() - started >= PING_TIMEOUT_MS) {
+        state.pendingPings.delete(key);
+        const current = state.peers.get(key);
+        if (current && !current.online) {
+          current.probing = false;
+          state.peers.set(key, current);
+          scheduleRender();
+        }
+      }
+    }, PING_TIMEOUT_MS);
   }
 
   function pingAllPeers() {
-    if (!state.discovery) return;
     state.peers.forEach((peer) => {
       if (!peer?.nknPub) return;
       if (peer.online) return;
@@ -1149,17 +1308,18 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (row) row.remove();
   }
 
-  function respondToChat(peerKey, accept) {
+  async function respondToChat(peerKey, accept) {
     const normalized = normalizeKey(peerKey);
     if (!normalized) return;
     if (state.chat.promptMessage?.key === normalized) state.chat.promptMessage = null;
     const addr = targetAddress(normalized);
-    if (addr && state.discovery) {
-      try {
-        state.discovery.dm(addr, { type: 'chat-response', accepted: !!accept });
-      } catch (_) {
-        // ignore send failure
-      }
+    let ok = false;
+    if (addr) {
+      ok = await sendPeerPayload(addr, { type: 'chat-response', accepted: !!accept });
+    }
+    if (!ok) {
+      setBadge?.('Chat response failed to send', false);
+      return;
     }
     const session = setSession(normalized, { status: accept ? 'accepted' : 'declined', lastTs: nowSeconds() });
     if (accept) {
@@ -1183,11 +1343,15 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       const accept = document.createElement('button');
       accept.className = 'secondary';
       accept.textContent = 'Accept';
-      accept.addEventListener('click', () => respondToChat(fromKey, true));
+      accept.addEventListener('click', async () => {
+        await respondToChat(fromKey, true);
+      });
       const decline = document.createElement('button');
       decline.className = 'ghost';
       decline.textContent = 'Decline';
-      decline.addEventListener('click', () => respondToChat(fromKey, false));
+      decline.addEventListener('click', async () => {
+        await respondToChat(fromKey, false);
+      });
       row.appendChild(accept);
       row.appendChild(decline);
       els.chatStatus?.insertAdjacentElement('afterend', row);
@@ -1262,36 +1426,34 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
   }
 
-  function openChatWithPeer(peer) {
+  async function openChatWithPeer(peer) {
     const key = normalizePeerKey(peer);
     if (!key) return;
     setActiveChat(key);
     if (isMobileView()) setActivePane('chat');
-    const proceed = state.discovery ? Promise.resolve(state.discovery) : ensureDiscovery();
-    proceed
-      .then(() => {
-        const session = ensureChatSession(key);
-        if (session?.status === 'accepted' || session?.status === 'pending') {
-          renderChat();
-          return;
-        }
-        const addr = targetAddress(peer) || targetAddress(key);
-        if (!addr || !state.discovery) {
-          renderChat();
-          return;
-        }
-        const fromName = sanitizeUsername(state.username || '');
-        try {
-          state.discovery.dm(addr, { type: 'chat-request', fromName });
-          setSession(key, { status: 'pending', lastTs: nowSeconds() });
-        } catch (_) {
-          // ignore send failure
-        }
-        renderChat();
-      })
-      .catch(() => {
-        renderChat();
-      });
+    try {
+      await ensureDiscovery();
+    } catch (_) {
+      // discovery may fail; continue to attempt NKN send so the user can retry later
+    }
+    const session = ensureChatSession(key);
+    if (session?.status === 'accepted' || session?.status === 'pending') {
+      renderChat();
+      return;
+    }
+    const addr = targetAddress(peer) || targetAddress(key);
+    if (!addr) {
+      renderChat();
+      return;
+    }
+    const fromName = sanitizeUsername(state.username || '');
+    const ok = await sendPeerPayload(addr, { type: 'chat-request', fromName });
+    if (ok) {
+      setSession(key, { status: 'pending', lastTs: nowSeconds() });
+    } else {
+      setBadge?.('Chat request failed', false);
+    }
+    renderChat();
   }
 
   function getDisplayName(peer) {
@@ -1347,13 +1509,15 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       });
     }
     peers.sort((a, b) => {
+      const onlineA = a.online ? 1 : 0;
+      const onlineB = b.online ? 1 : 0;
+      if (onlineA !== onlineB) return onlineB - onlineA;
+      const orderA = state.peerOrder.get(normalizeKey(a.nknPub || a.addr)) || Number.MAX_SAFE_INTEGER;
+      const orderB = state.peerOrder.get(normalizeKey(b.nknPub || b.addr)) || Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) return orderA - orderB;
       const lastA = a.last || now;
       const lastB = b.last || now;
-      const deltaA = Math.max(0, now - lastA);
-      const deltaB = Math.max(0, now - lastB);
-      const bucketA = Math.floor(deltaA / 60);
-      const bucketB = Math.floor(deltaB / 60);
-      if (bucketA !== bucketB) return bucketA - bucketB;
+      if (lastA !== lastB) return lastB - lastA;
       const nameA = getSortName(a);
       const nameB = getSortName(b);
       if (nameA !== nameB) return nameA.localeCompare(nameB);
@@ -1459,16 +1623,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       pokeBtn.className = 'ghost';
       pokeBtn.textContent = 'Poke';
       pokeBtn.title = 'Send a notification ping';
-      pokeBtn.addEventListener('click', (e) => {
+      pokeBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         const target = targetAddress(peer);
-        if (!target || !state.discovery) return;
-        try {
-          state.discovery.dm(target, { type: 'peer-poke', note: '👋' });
-          setBadge?.('Poke sent');
-        } catch (_) {
-          // ignore send failure
-        }
+        if (!target) return;
+        const ok = await sendPeerPayload(target, { type: 'peer-poke', note: '👋' });
+        if (ok) setBadge?.('Poke sent');
+        else setBadge?.('Poke failed', false);
       });
       actions.appendChild(pokeBtn);
 
@@ -1476,9 +1637,9 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       chatBtn.className = 'ghost';
       chatBtn.textContent = 'Chat';
       chatBtn.title = 'Request to chat';
-      chatBtn.addEventListener('click', (e) => {
+      chatBtn.addEventListener('click', async (e) => {
         e.preventDefault();
-        openChatWithPeer(peer);
+        await openChatWithPeer(peer);
       });
       actions.appendChild(chatBtn);
 
@@ -1541,188 +1702,226 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         refreshStatus();
       }
     });
-    client.on('dm', (payload) => {
-      if (!payload || typeof payload !== 'object') return;
-      const senderKey = normalizeKey(payload.pub || payload.from);
-      let peer = senderKey ? state.peers.get(senderKey) : null;
-      if (!peer && senderKey) {
-        const result = upsertPeer(
-          {
-            nknPub: senderKey,
-            addr: payload.pub || payload.from || senderKey,
-            last: payload.ts || nowSeconds(),
-            meta: payload.meta || {}
-          },
-          {}
-        );
-        peer = result.entry;
-        if (result.added) scheduleRender();
-      } else if (peer && payload.ts) {
-        peer.last = payload.ts;
-        peer.lastSeenAt = payload.ts * 1000;
-        peer.online = true;
-        state.peers.set(senderKey, peer);
-      }
 
-      switch (payload.type) {
-        case 'peer-poke': {
-          if (els.button) {
-            els.button.classList.add('poke-notice');
-            clearTimeout(state.pokeNoticeTimer);
-            state.pokeNoticeTimer = setTimeout(() => {
-              els.button?.classList?.remove('poke-notice');
-            }, 8000);
+  function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
+    if (!payload || typeof payload !== 'object') return false;
+    const type = payload.type;
+    if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
+
+    const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
+    const senderKey = normalizeKey(payload.pub || payload.from || senderAddr);
+    if (!senderKey) return false;
+
+    const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
+    const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
+
+    const upsertResult = upsertPeer(
+      {
+        nknPub: senderKey,
+        addr: senderAddr || senderKey,
+        originalPub: payload.pub || senderAddr || senderKey,
+        meta,
+        last: timestamp
+      },
+      { online: true, probing: false }
+    );
+    const peer = upsertResult.entry;
+    if (peer) {
+      peer.online = true;
+      peer.probing = false;
+      peer.last = timestamp;
+      peer.lastSeenAt = timestamp * 1000;
+      state.peers.set(senderKey, peer);
+    }
+
+    switch (type) {
+      case 'peer-ping': {
+        state.pendingPings.delete(senderKey);
+        sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
+        refreshStatus();
+        scheduleRender();
+        return true;
+      }
+      case 'peer-pong': {
+        state.pendingPings.delete(senderKey);
+        refreshStatus();
+        scheduleRender();
+        return true;
+      }
+      case 'peer-meta': {
+        refreshStatus();
+        scheduleRender();
+        return true;
+      }
+      case 'peer-poke': {
+        if (els.button) {
+          els.button.classList.add('poke-notice');
+          clearTimeout(state.pokeNoticeTimer);
+          state.pokeNoticeTimer = setTimeout(() => {
+            els.button?.classList?.remove('poke-notice');
+          }, 8000);
+        }
+        if (peer) {
+          peer.online = true;
+          state.peers.set(senderKey, peer);
+          refreshStatus();
+        }
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        setBadge?.(`Poke from ${label}`);
+        scheduleRender();
+        return true;
+      }
+      case 'chat-request': {
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
+        setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
+        setActiveChat(senderKey);
+        if (isMobileView()) setActivePane('chat');
+        setBadge?.(`Chat request from ${label}`);
+        showInlineChatDecision(senderKey);
+        renderChat();
+        scheduleRender();
+        return true;
+      }
+      case 'chat-response': {
+        const accepted = !!payload.accepted;
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
+        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+        setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
+        clearInlineChatDecision();
+        if (state.chat.activePeer === senderKey) renderChat();
+        scheduleRender();
+        return true;
+      }
+      case 'chat-typing': {
+        if (payload.isTyping) {
+          state.chat.typingPeers.set(senderKey, Date.now());
+          clearTimeout(state.chat.typingTimers.get(senderKey));
+          if (state.chat.activePeer === senderKey && els.chatTyping) {
+            els.chatTyping.classList.remove('hidden');
           }
-          if (peer) {
-            peer.online = true;
-            state.peers.set(senderKey, peer);
-            refreshStatus();
-          }
-          setBadge?.(`Poke from ${getDisplayName(peer || { addr: payload.pub || senderKey })}`);
-          scheduleRender();
-          break;
-        }
-        case 'chat-request': {
-          if (!senderKey) break;
-          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
-          state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
-          setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
-          setActiveChat(senderKey);
-          if (isMobileView()) setActivePane('chat');
-          setBadge?.(`Chat request from ${label}`);
-          showInlineChatDecision(senderKey);
-          renderChat();
-          scheduleRender();
-          break;
-        }
-        case 'chat-response': {
-          if (!senderKey) break;
-          const accepted = !!payload.accepted;
-          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
-          setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
-          if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-          setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
-          clearInlineChatDecision();
-          if (state.chat.activePeer === senderKey) renderChat();
-          scheduleRender();
-          break;
-        }
-        case 'chat-typing': {
-          if (!senderKey) break;
-          if (payload.isTyping) {
-            state.chat.typingPeers.set(senderKey, Date.now());
-            clearTimeout(state.chat.typingTimers.get(senderKey));
-            if (state.chat.activePeer === senderKey && els.chatTyping) {
-              els.chatTyping.classList.remove('hidden');
-            }
-            const timeout = setTimeout(() => {
-              state.chat.typingPeers.delete(senderKey);
-              if (state.chat.activePeer === senderKey && els.chatTyping) {
-                els.chatTyping.classList.add('hidden');
-              }
-              state.chat.typingTimers.delete(senderKey);
-            }, 1500);
-            state.chat.typingTimers.set(senderKey, timeout);
-          } else {
+          const timeout = setTimeout(() => {
             state.chat.typingPeers.delete(senderKey);
-            const existingTimer = state.chat.typingTimers.get(senderKey);
-            if (existingTimer) clearTimeout(existingTimer);
-            state.chat.typingTimers.delete(senderKey);
             if (state.chat.activePeer === senderKey && els.chatTyping) {
               els.chatTyping.classList.add('hidden');
             }
-          }
-          break;
-        }
-        case 'chat-message': {
-          if (!senderKey) break;
-          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
-          appendHistory(senderKey, {
-            id:
-              typeof payload.id === 'string'
-                ? payload.id
-                : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
-            dir: 'in',
-            text: typeof payload.text === 'string' ? payload.text : '',
-            ts: payload.ts || nowSeconds()
-          });
+            state.chat.typingTimers.delete(senderKey);
+          }, 1500);
+          state.chat.typingTimers.set(senderKey, timeout);
+        } else {
           state.chat.typingPeers.delete(senderKey);
-          const timer = state.chat.typingTimers.get(senderKey);
-          if (timer) clearTimeout(timer);
+          const existingTimer = state.chat.typingTimers.get(senderKey);
+          if (existingTimer) clearTimeout(existingTimer);
           state.chat.typingTimers.delete(senderKey);
-          setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
-          if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-          if (state.chat.activePeer === senderKey) {
-            renderChat();
-          } else {
-            setBadge?.(`New message from ${label}`);
+          if (state.chat.activePeer === senderKey && els.chatTyping) {
+            els.chatTyping.classList.add('hidden');
           }
-          scheduleRender();
-          break;
         }
-        case 'peer-directory': {
-          const sender = senderKey;
-          if (sender) {
-            state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
-            if (sender !== normalizeKey(state.meAddr)) {
-              upsertPeer(
-                {
-                  nknPub: sender,
-                  addr: payload.pub || payload.from || sender,
-                  last: payload.ts || nowSeconds(),
-                  meta: payload.meta || {}
-                },
-                {}
-              );
-            }
-          }
-          const list = Array.isArray(payload.peers) ? payload.peers : [];
-          let added = false;
-          list.forEach((entry) => {
-            const normalized = normalizePeerEntry(entry);
-            if (!normalized) return;
-            if (normalized.nknPub === normalizeKey(state.meAddr)) return;
-            const sourceLabel =
-              sanitizeUsername(payload.meta?.username || state.peers.get(sender)?.meta?.username || '') ||
-              payload.from ||
-              payload.pub ||
-              sender;
-            const sourceDescriptor = sender ? { key: sender, label: sourceLabel || sender } : null;
-            const result = upsertPeer(normalized, {
-              sharedFrom: sourceDescriptor,
-              sharedSources: normalized.sharedSources
-            });
-            if (result.added) added = true;
-          });
-          const entries = collectDirectoryEntries();
-          const localHash = hashDirectory(entries);
-          if (sender && localHash) {
-            const lastSent = state.sharedHashes.get(sender);
-            if (localHash !== lastSent) {
-              const peerInfo = state.peers.get(sender);
-              const targetAddr = peerInfo?.addr || peerInfo?.originalPub || payload.pub || payload.from;
-              if (targetAddr) {
-                shareDirectory(entries, targetAddr);
-                state.sharedHashes.set(sender, localHash);
-              }
-            }
-          }
-          if (added) scheduleDirectoryBroadcast();
-          scheduleRender();
-          return;
-        }
-        default:
-          break;
+        return true;
       }
+      case 'chat-message': {
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        appendHistory(senderKey, {
+          id:
+            typeof payload.id === 'string'
+              ? payload.id
+              : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
+          dir: 'in',
+          text: typeof payload.text === 'string' ? payload.text : '',
+          ts: payload.ts || nowSeconds()
+        });
+        state.chat.typingPeers.delete(senderKey);
+        const timer = state.chat.typingTimers.get(senderKey);
+        if (timer) clearTimeout(timer);
+        state.chat.typingTimers.delete(senderKey);
+        setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
+        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+        if (state.chat.activePeer === senderKey) {
+          renderChat();
+        } else {
+          setBadge?.(`New message from ${label}`);
+        }
+        scheduleRender();
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
     });
+    client.on('dm', (payload) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type === 'peer-directory') {
+        const sender = normalizeKey(payload.pub || payload.from);
+        if (sender) {
+          state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
+          if (sender !== normalizeKey(state.meAddr)) {
+            upsertPeer(
+              {
+                nknPub: sender,
+                addr: payload.pub || payload.from || sender,
+                last: payload.ts || nowSeconds(),
+                meta: payload.meta || {}
+              },
+              {}
+            );
+          }
+        }
+        const list = Array.isArray(payload.peers) ? payload.peers : [];
+        let added = false;
+        list.forEach((entry) => {
+          const normalized = normalizePeerEntry(entry);
+          if (!normalized) return;
+          if (normalized.nknPub === normalizeKey(state.meAddr)) return;
+          const sourceLabel =
+            sanitizeUsername(payload.meta?.username || state.peers.get(sender)?.meta?.username || '') ||
+            payload.from ||
+            payload.pub ||
+            sender;
+          const sourceDescriptor = sender ? { key: sender, label: sourceLabel || sender } : null;
+          const result = upsertPeer(normalized, {
+            sharedFrom: sourceDescriptor,
+            sharedSources: normalized.sharedSources
+          });
+          if (result.added) added = true;
+        });
+        const entries = collectDirectoryEntries();
+        const localHash = hashDirectory(entries);
+        if (sender && localHash) {
+          const lastSent = state.sharedHashes.get(sender);
+          if (localHash !== lastSent) {
+            const peerInfo = state.peers.get(sender);
+            const targetAddr = peerInfo?.addr || peerInfo?.originalPub || payload.pub || payload.from;
+            if (targetAddr) {
+              shareDirectory(entries, targetAddr);
+              state.sharedHashes.set(sender, localHash);
+            }
+          }
+        }
+        if (added) scheduleDirectoryBroadcast();
+        scheduleRender();
+        return;
+      }
+      const sourceAddr = payload.pub || payload.from || payload.addr || '';
+      if (handlePeerMessage(payload, { transport: 'nats', sourceAddr })) return;
+    });
+
   }
 
   async function waitForNknAddress(timeoutMs = 20000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      Net.ensureNkn();
+      try {
+        Net.ensureNkn();
+      } catch (_) {
+        // ignore ensure failures and retry
+      }
       const addr = Net.nkn?.addr;
-      if (addr) return addr;
+      if (addr) {
+        if (Net.nkn?.client) attachNknMessageHandler(Net.nkn.client);
+        return addr;
+      }
       await wait(250);
     }
     throw new Error('NKN address unavailable');
@@ -1888,21 +2087,21 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
 
     if (els.chatSend && !els.chatSend._peerBound) {
-      const sendMessage = () => {
+      const sendMessage = async () => {
         const key = state.chat.activePeer;
         if (!key) return;
         const value = (els.chatInput?.value || '').trim();
         if (!value) return;
         const addr = targetAddress(key);
-        if (!addr || !state.discovery) return;
+        if (!addr) return;
         const id =
           (typeof crypto !== 'undefined' && crypto.randomUUID?.()) ||
           `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        try {
-          state.discovery.dm(addr, { type: 'chat-message', id, text: value });
+        const ok = await sendPeerPayload(addr, { type: 'chat-message', id, text: value });
+        if (ok) {
           appendHistory(key, { id, dir: 'out', text: value, ts: nowSeconds() });
-        } catch (_) {
-          // ignore send failure
+        } else {
+          setBadge?.('Message failed to send', false);
         }
         if (els.chatInput) els.chatInput.value = '';
         renderChat();
@@ -1911,36 +2110,28 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       const typingState = { timer: null };
       const typingNotify = () => {
         const key = state.chat.activePeer;
-        if (!key || !state.discovery) return;
+        if (!key) return;
         const session = ensureChatSession(key);
         if (!session || session.status !== 'accepted') return;
         const addr = targetAddress(key);
         if (!addr) return;
-        try {
-          state.discovery.dm(addr, { type: 'chat-typing', isTyping: true });
-        } catch (_) {
-          // ignore typing errors
-        }
+        sendPeerPayload(addr, { type: 'chat-typing', isTyping: true }).catch(() => {});
         if (typingState.timer) clearTimeout(typingState.timer);
         typingState.timer = setTimeout(() => {
-          try {
-            state.discovery.dm(addr, { type: 'chat-typing', isTyping: false });
-          } catch (_) {
-            // ignore
-          }
+          sendPeerPayload(addr, { type: 'chat-typing', isTyping: false }).catch(() => {});
           typingState.timer = null;
         }, 1200);
       };
 
-      els.chatSend.addEventListener('click', (e) => {
+      els.chatSend.addEventListener('click', async (e) => {
         e.preventDefault();
-        sendMessage();
+        await sendMessage();
       });
       if (els.chatInput) {
-        els.chatInput.addEventListener('keydown', (e) => {
+        els.chatInput.addEventListener('keydown', async (e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
-            sendMessage();
+            await sendMessage();
           }
         });
         els.chatInput.addEventListener('input', typingNotify);
