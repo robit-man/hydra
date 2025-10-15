@@ -2535,6 +2535,8 @@ audio {
 
 .peer-left {
   flex: 1 1 45%;
+  display: flex;
+  gap:0.5rem;
   min-width: 280px;
 }
 
@@ -2652,7 +2654,6 @@ audio {
   flex-direction: column;
   gap: 8px;
   padding: 6px 0 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, .08);
 }
 
 .peer-identity label {
