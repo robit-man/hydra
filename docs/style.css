@@ -2538,6 +2538,14 @@ audio {
   border-radius: 12px;
 }
 
+.peer-entry.offline {
+  opacity: 0.45;
+}
+
+.peer-entry.probing {
+  opacity: 0.65;
+}
+
 .peer-actions {
   display: flex;
   flex-direction: column;
@@ -2568,6 +2576,90 @@ audio {
   color: var(--muted);
   text-align: center;
   padding: 20px 0;
+}
+
+.payment-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin-top: 12px;
+  background: var(--panel2);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 12px;
+}
+
+.payment-summary {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.payment-wallet {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.payment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.payment-actions button {
+  min-width: 120px;
+}
+
+.payment-invoices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.payment-invoice {
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(12, 15, 20, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.payment-invoice[data-status="paid"] {
+  border-color: rgba(94, 227, 166, .65);
+}
+
+.payment-invoice[data-status="failed"] {
+  border-color: rgba(255, 107, 107, .6);
+}
+
+.payment-invoice-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.payment-invoice-details {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.payment-invoice-status {
+  font-size: 11px;
+}
+
+.payment-invoice-actions {
+  margin-top: 4px;
+  display: flex;
+  gap: 6px;
+}
+
+.payment-invoice-empty {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  padding: 16px 0;
 }
 
 .face-viewer {

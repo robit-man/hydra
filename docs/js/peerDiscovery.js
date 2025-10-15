@@ -3,6 +3,8 @@ import { qs } from './utils.js';
 const NATS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/nats.ws/+esm';
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const DEFAULT_HEARTBEAT_SEC = 12;
+const OFFLINE_AFTER_SECONDS = 45;
+const PING_TIMEOUT_MS = 8000;
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -97,14 +99,16 @@ function sanitizeRoomName(value) {
 }
 
 class DiscoveryClient extends EventHub {
-  constructor({ servers, room, me, heartbeatSec }) {
+  constructor({ servers, room, me, heartbeatSec, store }) {
     super();
     this.servers = Array.isArray(servers) && servers.length ? servers : DEFAULT_SERVERS;
     this.room = sanitizeRoomName(room);
     this.me = { ...(me || {}) };
     this.heartbeatSec = typeof heartbeatSec === 'number' && heartbeatSec > 0 ? heartbeatSec : DEFAULT_HEARTBEAT_SEC;
 
-    this.store = new Store(this.room);
+    const providedStore =
+      store && typeof store.all === 'function' && typeof store.upsert === 'function' ? store : null;
+    this.store = providedStore || new Store(this.room);
     this.nc = null;
     this.sc = null;
     this._hbTimer = null;
@@ -157,6 +161,37 @@ class DiscoveryClient extends EventHub {
         for await (const msg of dmSub) {
           const payload = this._decode(msg);
           if (!payload?.type) continue;
+          if (payload.type === 'peer-ping') {
+            const peer = this.store.upsert({
+              nknPub: payload.pub,
+              addr: payload.addr || payload.pub,
+              meta: payload.meta || {},
+              last: payload.ts || nowSeconds()
+            });
+            this.emit('peer', peer);
+            try {
+              await this.dm(payload.pub, {
+                type: 'peer-pong',
+                pub: this.me?.nknPub,
+                addr: this.me?.addr || this.me?.nknPub,
+                meta: this.me?.meta || {},
+                ts: nowSeconds()
+              });
+            } catch (_) {
+              // ignore ping reply errors
+            }
+            continue;
+          }
+          if (payload.type === 'peer-pong') {
+            const peer = this.store.upsert({
+              nknPub: payload.pub,
+              addr: payload.addr || payload.pub,
+              meta: payload.meta || {},
+              last: payload.ts || nowSeconds()
+            });
+            this.emit('peer', peer);
+            continue;
+          }
           if (payload.type === 'peer-meta') {
             const peer = this.store.upsert({
               nknPub: payload.pub,
@@ -265,15 +300,33 @@ class DiscoveryClient extends EventHub {
 }
 
 function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
+  const derivedRoom = sanitizeRoomName(
+    `${window.location.host || 'local'}${(window.location.pathname || '').replace(/\//g, '-')}`
+  );
+  const sharedStore = new Store(derivedRoom);
   const state = {
     discovery: null,
     connecting: null,
     meAddr: '',
-    room: sanitizeRoomName(
-      `${window.location.host || 'local'}${(window.location.pathname || '').replace(/\//g, '-')}`
-    ),
-    peers: new Map()
+    room: derivedRoom,
+    peers: new Map(),
+    pendingPings: new Map(),
+    statusOverride: null,
+    renderScheduled: false,
+    statusInterval: null
   };
+  state.store = sharedStore;
+
+  sharedStore.all().forEach((peer) => {
+    if (!peer?.nknPub) return;
+    const lastMs = typeof peer.last === 'number' ? peer.last * 1000 : 0;
+    state.peers.set(peer.nknPub, {
+      ...peer,
+      online: false,
+      probing: false,
+      lastSeenAt: lastMs
+    });
+  });
 
   const els = {
     button: null,
@@ -311,11 +364,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!addr) return '(unknown)';
     const raw = String(addr).replace(/^graph\./i, '');
     if (raw.length <= 16) return raw;
-    return `${raw.slice(0, 8)}…${raw.slice(-6)}`;
+    return `${raw.slice(0, 8)}...${raw.slice(-6)}`;
   }
 
   function formatLast(last) {
-    if (!last) return 'just now';
+    if (!last) return 'unknown';
     const delta = Math.max(0, nowSeconds() - last);
     if (delta < 10) return 'just now';
     if (delta < 60) return `${delta}s ago`;
@@ -323,9 +376,125 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     return `${Math.floor(delta / 3600)}h ago`;
   }
 
-  function setStatus(text) {
+  function setStatus(text, sticky = false) {
+    if (sticky) state.statusOverride = text;
+    else state.statusOverride = null;
+    if (els.status) els.status.textContent = text;
+  }
+
+  function clearStatusOverride() {
+    if (state.statusOverride == null) return;
+    state.statusOverride = null;
+    refreshStatus();
+  }
+
+  function refreshStatus() {
     if (!els.status) return;
-    els.status.textContent = text;
+    if (state.statusOverride != null) {
+      els.status.textContent = state.statusOverride;
+      return;
+    }
+    const total = state.peers.size;
+    const online = Array.from(state.peers.values()).filter((peer) => peer?.online).length;
+    const message = state.discovery
+      ? `Peers: ${online}/${total} online`
+      : total
+        ? `Offline • ${total} known`
+        : 'Discovery offline';
+    els.status.textContent = message;
+  }
+
+  function scheduleRender() {
+    if (state.renderScheduled) return;
+    state.renderScheduled = true;
+    requestAnimationFrame(() => {
+      state.renderScheduled = false;
+      renderPeers();
+    });
+  }
+
+  function upsertPeer(peer, { online, probing } = {}) {
+    if (!peer?.nknPub) return;
+    const existing = state.peers.get(peer.nknPub) || {};
+    const lastSeconds = typeof peer.last === 'number' ? peer.last : existing.last || 0;
+    const lastSeenAt =
+      typeof peer.lastSeenAt === 'number'
+        ? peer.lastSeenAt
+        : lastSeconds
+          ? lastSeconds * 1000
+          : existing.lastSeenAt || 0;
+    const merged = {
+      ...existing,
+      ...peer,
+      last: lastSeconds,
+      lastSeenAt,
+      addr: peer.addr || existing.addr || peer.nknPub
+    };
+    if (online !== undefined) merged.online = online;
+    if (probing !== undefined) merged.probing = probing;
+    state.peers.set(peer.nknPub, merged);
+  }
+
+  function updatePeerStatuses() {
+    const now = Date.now();
+    let changed = false;
+    state.peers.forEach((peer, pub) => {
+      const lastMs = peer.lastSeenAt || (peer.last ? peer.last * 1000 : 0);
+      const online = lastMs && now - lastMs <= OFFLINE_AFTER_SECONDS * 1000;
+      if (peer.online !== online) {
+        peer.online = online;
+        if (!online) peer.probing = false;
+        state.peers.set(pub, peer);
+        changed = true;
+      }
+    });
+    if (changed) renderPeers();
+    else refreshStatus();
+  }
+
+  function pingPeer(pub) {
+    if (!pub || !state.discovery) return;
+    if (state.pendingPings.has(pub)) return;
+    try {
+      const payload = {
+        type: 'peer-ping',
+        addr: state.meAddr || Net.nkn?.addr || '',
+        meta: { graphId: CFG.graphId || '' },
+        ts: nowSeconds()
+      };
+      state.discovery.dm(pub, payload);
+      state.pendingPings.set(pub, Date.now());
+      const peer = state.peers.get(pub);
+      if (peer) {
+        peer.probing = true;
+        state.peers.set(pub, peer);
+      }
+      scheduleRender();
+      setTimeout(() => {
+        const started = state.pendingPings.get(pub);
+        if (!started) return;
+        if (Date.now() - started >= PING_TIMEOUT_MS) {
+          state.pendingPings.delete(pub);
+          const current = state.peers.get(pub);
+          if (current && !current.online) {
+            current.probing = false;
+            state.peers.set(pub, current);
+            scheduleRender();
+          }
+        }
+      }, PING_TIMEOUT_MS);
+    } catch (err) {
+      log?.(`[peers] ping failed: ${err?.message || err}`);
+    }
+  }
+
+  function pingAllPeers() {
+    if (!state.discovery) return;
+    state.peers.forEach((peer) => {
+      if (!peer?.nknPub) return;
+      if (peer.online) return;
+      pingPeer(peer.nknPub);
+    });
   }
 
   function updateSelf() {
@@ -343,19 +512,22 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!els.list) return;
     els.list.innerHTML = '';
     const peers = Array.from(state.peers.values())
-      .filter((peer) => peer?.nknPub && peer.nknPub !== state.meAddr)
+      .filter((peer) => peer?.nknPub)
       .sort((a, b) => (b.last || 0) - (a.last || 0));
     if (!peers.length) {
       const empty = document.createElement('div');
       empty.className = 'peer-empty';
       empty.textContent = state.discovery ? 'No peers discovered yet.' : 'Discovery offline.';
       els.list.appendChild(empty);
+      refreshStatus();
       return;
     }
     const frag = document.createDocumentFragment();
     peers.forEach((peer) => {
       const entry = document.createElement('div');
       entry.className = 'peer-entry';
+      entry.classList.toggle('offline', !peer.online);
+      entry.classList.toggle('probing', !!peer.probing);
 
       const meta = document.createElement('div');
       meta.className = 'peer-meta';
@@ -369,7 +541,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       infoEl.className = 'peer-info';
       const parts = [];
       if (peer.meta?.graphId) parts.push(`Graph ${String(peer.meta.graphId).slice(0, 8)}`);
-      parts.push(`Last seen ${formatLast(peer.last)}`);
+      const statusText = peer.online ? 'Online' : peer.probing ? 'Checking...' : 'Offline';
+      const lastSeconds = peer.last
+        ? peer.last
+        : peer.lastSeenAt
+          ? Math.floor(peer.lastSeenAt / 1000)
+          : 0;
+      parts.push(`${statusText}`);
+      parts.push(`Last seen ${formatLast(lastSeconds)}`);
       infoEl.textContent = parts.join(' • ');
       meta.appendChild(infoEl);
 
@@ -393,30 +572,52 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       frag.appendChild(entry);
     });
     els.list.appendChild(frag);
+    refreshStatus();
   }
 
   function rememberPeersFromDiscovery() {
     if (!state.discovery) return;
-    state.peers.clear();
+    const nowSec = nowSeconds();
     state.discovery.peers.forEach((peer) => {
-      state.peers.set(peer.nknPub, peer);
+      if (!peer?.nknPub) return;
+      const last = typeof peer.last === 'number' ? peer.last : 0;
+      const online = last ? nowSec - last <= OFFLINE_AFTER_SECONDS : false;
+      upsertPeer(
+        {
+          ...peer,
+          last,
+          lastSeenAt: last ? last * 1000 : peer.lastSeenAt
+        },
+        { online, probing: false }
+      );
     });
+    scheduleRender();
   }
 
   function attachDiscoveryEvents(client) {
     if (!client) return;
     client.on('peer', (peer) => {
       if (!peer?.nknPub) return;
-      state.peers.set(peer.nknPub, peer);
-      setStatus(`Online • ${state.peers.size} peer${state.peers.size === 1 ? '' : 's'}`);
-      renderPeers();
+      const last = typeof peer.last === 'number' ? peer.last : nowSeconds();
+      upsertPeer(
+        {
+          ...peer,
+          last,
+          lastSeenAt: last * 1000
+        },
+        { online: true, probing: false }
+      );
+      if (peer?.nknPub) state.pendingPings.delete(peer.nknPub);
+      clearStatusOverride();
+      scheduleRender();
     });
     client.on('status', (info) => {
       if (!info) return;
       if (info.type === 'disconnect') {
-        setStatus('Reconnecting to discovery…');
+        setStatus('Reconnecting to discovery...', true);
       } else if (info.type === 'reconnect') {
-        setStatus(`Online • ${state.peers.size} peer${state.peers.size === 1 ? '' : 's'}`);
+        clearStatusOverride();
+        refreshStatus();
       }
     });
   }
@@ -436,7 +637,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (state.discovery) return state.discovery;
     if (state.connecting) return state.connecting;
     const promise = (async () => {
-      setStatus('Waiting for NKN…');
+      setStatus('Waiting for NKN...', true);
       const addr = await waitForNknAddress();
       state.meAddr = addr;
       updateSelf();
@@ -450,7 +651,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         servers: DEFAULT_SERVERS,
         room: state.room,
         me: { nknPub: addr, addr, meta },
-        heartbeatSec: DEFAULT_HEARTBEAT_SEC
+        heartbeatSec: DEFAULT_HEARTBEAT_SEC,
+        store: sharedStore
       });
 
       attachDiscoveryEvents(client);
@@ -460,12 +662,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
       state.discovery = client;
       rememberPeersFromDiscovery();
-      setStatus(`Online • ${state.peers.size} peer${state.peers.size === 1 ? '' : 's'}`);
-      renderPeers();
+      pingAllPeers();
+      updatePeerStatuses();
+      clearStatusOverride();
+      scheduleRender();
       return client;
     })().catch((err) => {
       log?.(`[peers] discovery connect failed: ${err?.message || err}`);
-      setStatus('Discovery unavailable');
+      setStatus('Discovery unavailable', true);
       throw err;
     }).finally(() => {
       state.connecting = null;
@@ -480,8 +684,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       els.button.addEventListener('click', (e) => {
         e.preventDefault();
         showModal();
-        ensureDiscovery().catch(() => {});
-        renderPeers();
+        scheduleRender();
+        ensureDiscovery()
+          .then(() => {
+            pingAllPeers();
+            updatePeerStatuses();
+          })
+          .catch(() => {});
       });
       els.button._peerBound = true;
     }
@@ -501,8 +710,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     assignElements();
     bindUI();
     renderPeers();
+    refreshStatus();
+    if (!state.statusInterval) {
+      state.statusInterval = setInterval(updatePeerStatuses, 15000);
+    }
     try {
       await ensureDiscovery();
+      updatePeerStatuses();
     } catch (_) {
       // swallow: modal will retry on demand
     }

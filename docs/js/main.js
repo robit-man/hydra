@@ -23,6 +23,7 @@ import { createWebSerial } from './webSerial.js';
 import { createVision } from './vision.js';
 import { primeLocalNetworkRequest } from './localNetwork.js';
 import { createPeerDiscovery } from './peerDiscovery.js';
+import { createPayments } from './payments.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -127,6 +128,14 @@ const FileTransfer = createFileTransfer({
   setBadge
 });
 
+const Payments = createPayments({
+  Router,
+  NodeStore,
+  CFG,
+  setBadge,
+  log
+});
+
 const Meshtastic = createMeshtastic({
   getNode: (id) => graphAccess.getNode(id),
   NodeStore,
@@ -163,6 +172,7 @@ const Graph = createGraph({
   Orientation,
   Location: LocationNode,
   FileTransfer,
+  Payments,
   MCP,
   Meshtastic,
   WebSerial,

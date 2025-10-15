@@ -23,6 +23,7 @@ function createGraph({
   Orientation,
   Location,
   FileTransfer,
+  Payments,
   MCP,
   Meshtastic,
   WebSerial,
@@ -704,6 +705,19 @@ function refreshNodeResolution(force = false) {
     }
   }
 
+  function initPaymentsNode(node) {
+    if (!node?.el || node.type !== 'Payments') return;
+    const body = node.el.querySelector('.body');
+    if (!body) return;
+    if (body.querySelector('[data-payment-panel]')) return;
+    const panel = document.createElement('div');
+    panel.className = 'payment-panel';
+    panel.dataset.paymentPanel = 'true';
+    body.appendChild(panel);
+    Payments.mount?.(node.id, panel);
+    Payments.init?.(node.id);
+  }
+
   function scheduleModelPrefetch(nodeId, nodeType, delay = 200) {
     const run = MODEL_PREFETCHERS[nodeType];
     if (typeof run !== 'function') return;
@@ -875,6 +889,9 @@ function refreshNodeResolution(force = false) {
       if (portName === 'tool') return MCP.onTool(node.id, payload);
       if (portName === 'refresh') return MCP.onRefresh(node.id, payload);
       return;
+    }
+    if (node.type === 'Payments') {
+      return Payments.onInput?.(node.id, portName, payload);
     }
 
     if (node.type === 'MediaStream') {
@@ -2756,6 +2773,7 @@ function refreshNodeResolution(force = false) {
         if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
         if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
         if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
+        if (node.type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
       }
       for (const l of (data.links || [])) addLink(l.from.node, l.from.port, l.to.node, l.to.port);
       requestRedraw();
@@ -5826,6 +5844,9 @@ function refreshNodeResolution(force = false) {
     if (nodeType === 'LLM') {
       refreshLlmControls(nodeId);
     }
+    if (nodeType === 'Payments') {
+      Payments.refresh?.(nodeId);
+    }
     if (nodeType === 'FaceLandmarks') {
       Promise.resolve(Vision?.Face?.refresh?.(nodeId, config)).catch(() => {});
     }
@@ -6056,6 +6077,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (type === 'Orientation') requestAnimationFrame(() => Orientation.init(id));
     if (type === 'Location') requestAnimationFrame(() => Location.init(id));
     if (type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(id));
+    if (type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
     if (type === 'FaceLandmarks') requestAnimationFrame(() => Vision?.Face?.init?.(id));
     if (type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(id));
     if (opts.select) setSelectedNode(id, { focus: true });
@@ -6112,6 +6134,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'FileTransfer') {
       FileTransfer.dispose(nodeId);
     }
+    if (node.type === 'Payments') {
+      Payments.dispose?.(nodeId);
+    }
     if (node.type === 'Orientation') {
       Orientation.dispose(nodeId);
     }
@@ -6160,6 +6185,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'ImageInput', label: 'Image Input', x: 600, y: 220 },
       { type: 'NknDM', label: 'NKN DM', x: 720, y: 140 },
       { type: 'FileTransfer', label: 'File Transfer', x: 780, y: 200 },
+      { type: 'Payments', label: 'Payments', x: 820, y: 260 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },
       { type: 'MediaStream', label: 'Media Stream', x: 320, y: 260 },
       { type: 'FaceLandmarks', label: 'Face Viewer', x: 360, y: 300 },

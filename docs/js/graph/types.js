@@ -129,6 +129,21 @@ const GraphTypes = {
       { key: 'heartbeatInterval', label: 'Heartbeat (s)', type: 'number', def: 15 }
     ]
   },
+  Payments: {
+    title: 'Payments',
+    supportsNkn: false,
+    inputs: [{ name: 'input', label: 'Ingress' }, { name: 'control', label: 'Control' }],
+    outputs: [{ name: 'output', label: 'Egress' }, { name: 'events', label: 'Events' }],
+    schema: [
+      { key: 'mode', label: 'Mode', type: 'select', options: ['seller', 'buyer', 'both'], def: 'seller' },
+      { key: 'amount', label: 'Amount', type: 'text', placeholder: '1.0', def: '1.0' },
+      { key: 'asset', label: 'Asset (ERC-20)', type: 'text', placeholder: '0x8335...' },
+      { key: 'chainId', label: 'Chain ID', type: 'number', def: 8453 },
+      { key: 'receiver', label: 'Receiver Address', type: 'text', placeholder: '0x...' },
+      { key: 'memo', label: 'Memo', type: 'text', placeholder: 'Access description' },
+      { key: 'unlockTTL', label: 'Unlock TTL (s)', type: 'number', def: 900 }
+    ]
+  },
   MediaStream: {
     title: 'Media Stream',
     supportsNkn: true,

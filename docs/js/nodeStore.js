@@ -200,6 +200,15 @@ const NodeStore = {
       lastPortInfo: null,
       lastDeviceName: ''
     },
+    Payments: {
+      mode: 'seller',
+      amount: '1.0',
+      asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      chainId: 8453,
+      receiver: '',
+      memo: '',
+      unlockTTL: 900
+    },
     WebSerial: {
       autoConnect: false,
       autoReconnect: true,
