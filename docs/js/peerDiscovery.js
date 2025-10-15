@@ -1849,7 +1849,6 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         return false;
     }
   }
-    });
     client.on('dm', (payload) => {
       if (!payload || typeof payload !== 'object') return;
       if (payload.type === 'peer-directory') {
@@ -2159,6 +2158,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   return {
     init
   };
+
 }
+
 
 export { createPeerDiscovery };
