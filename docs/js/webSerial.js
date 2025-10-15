@@ -366,6 +366,49 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
     }
   }
 
+  function selectPreferredPort(cfg, ports) {
+    if (!ports || !ports.length) return { port: null, info: null };
+    const rememberDevice = booleanFromConfig(cfg, 'rememberDevice', true);
+    const nameKey = deviceNameKey(cfg.lastDeviceName || '');
+    let matchedByName = false;
+    if (rememberDevice && nameKey) {
+      for (const port of ports) {
+        try {
+          const info = port.getInfo?.() || {};
+          const friendly = friendlyDeviceName(info);
+          if (deviceNameKey(friendly) === nameKey) {
+            matchedByName = true;
+            return { port, info };
+          }
+        } catch (_) {
+          // ignore
+        }
+      }
+      if (!matchedByName && ports.length > 1) {
+        return { port: null, info: null };
+      }
+    }
+    const rememberPortFlag = booleanFromConfig(cfg, 'rememberPort', true);
+    if (rememberPortFlag && cfg.lastPortInfo) {
+      const match = ports.find((port) => {
+        try {
+          const info = port.getInfo?.() || {};
+          return (
+            (cfg.lastPortInfo.usbVendorId == null || cfg.lastPortInfo.usbVendorId === info.usbVendorId) &&
+            (cfg.lastPortInfo.usbProductId == null || cfg.lastPortInfo.usbProductId === info.usbProductId)
+          );
+        } catch (_) {
+          return false;
+        }
+      });
+      if (match) {
+        return { port: match, info: match.getInfo?.() || {} };
+      }
+    }
+    const fallback = ports[0] || null;
+    return { port: fallback, info: fallback?.getInfo?.() || {} };
+  }
+
   function updateButtons(state) {
     if (!state.ui) return;
     const connected = Boolean(state.writer);
@@ -414,25 +457,22 @@ function createWebSerial({ getNode, NodeStore, Router, log, setBadge }) {
       return;
     }
     if (!state.port) {
-      const ports = await navigator.serial.getPorts();
-      if (booleanFromConfig(cfg, 'rememberDevice', true) && cfg.lastDeviceName) {
-        const nameKey = deviceNameKey(cfg.lastDeviceName);
-        const matchByName = ports.find((port) => {
-          const info = port.getInfo?.() || {};
-          const candidate = friendlyDeviceName(info);
-          return nameKey && deviceNameKey(candidate) === nameKey;
-        });
-        if (matchByName) state.port = matchByName;
+      let ports = [];
+      try {
+        ports = await navigator.serial.getPorts();
+      } catch (_) {
+        ports = [];
       }
-      if (!state.port && cfg.lastPortInfo && booleanFromConfig(cfg, 'rememberPort', true)) {
-        const match = ports.find((port) => {
-          const info = port.getInfo?.() || {};
-          return (
-            (cfg.lastPortInfo.usbVendorId == null || cfg.lastPortInfo.usbVendorId === info.usbVendorId) &&
-            (cfg.lastPortInfo.usbProductId == null || cfg.lastPortInfo.usbProductId === info.usbProductId)
-          );
-        });
-        if (match) state.port = match;
+      if (ports.length) {
+        const preferred = selectPreferredPort(cfg, ports);
+        if (preferred.port) {
+          state.port = preferred.port;
+          state.allowed = true;
+        } else {
+          state.allowed = false;
+        }
+      } else {
+        state.allowed = false;
       }
       if (!state.port && navigator.serial?.requestPort) {
         try {

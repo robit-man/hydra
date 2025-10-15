@@ -712,6 +712,80 @@ function createMeshtastic({ getNode, NodeStore, Router, log, setBadge }) {
     return fallback;
   }
 
+  async function rememberSerialSelection(nodeId, port, info) {
+    if (!port) return;
+    const cfg = getConfig(nodeId);
+    const details = info || port.getInfo?.() || {};
+    const update = {};
+    if (toBoolean(cfg?.rememberPort, true)) {
+      update.lastPortInfo = details;
+    } else if (cfg?.lastPortInfo) {
+      update.lastPortInfo = null;
+    }
+    if (toBoolean(cfg?.rememberDevice, true)) {
+      const name = await readSerialFriendlyName(port, details);
+      if (name) update.lastDeviceName = name;
+    } else if (cfg?.lastDeviceName) {
+      update.lastDeviceName = '';
+    }
+    if (Object.keys(update).length) saveConfig(nodeId, update);
+  }
+
+  async function findPreferredSerialPort(nodeId, ports) {
+    if (!navigator.serial?.getPorts) return { port: null, info: null };
+    let list = ports;
+    if (!Array.isArray(list)) {
+      try {
+        list = await navigator.serial.getPorts();
+      } catch (_) {
+        return { port: null, info: null };
+      }
+    }
+    if (!list || !list.length) return { port: null, info: null };
+    const cfg = getConfig(nodeId);
+    const rememberDevice = toBoolean(cfg?.rememberDevice, true);
+    const lastName = (cfg?.lastDeviceName || '').trim();
+    const nameKey = deviceNameKey(lastName);
+    let matchedByName = false;
+    if (rememberDevice && nameKey) {
+      for (const port of list) {
+        try {
+          const info = port.getInfo?.() || {};
+          const friendly = await readSerialFriendlyName(port, info);
+          if (deviceNameKey(friendly) === nameKey) {
+            matchedByName = true;
+            return { port, info };
+          }
+        } catch (_) {
+          // continue trying other ports
+        }
+      }
+      if (!matchedByName && list.length > 1) {
+        return { port: null, info: null };
+      }
+    }
+    const rememberPort = toBoolean(cfg?.rememberPort, true);
+    const lastInfo = cfg?.lastPortInfo;
+    if (rememberPort && lastInfo) {
+      const match = list.find((port) => {
+        try {
+          const info = port.getInfo?.() || {};
+          return (
+            (lastInfo.usbVendorId == null || info.usbVendorId === lastInfo.usbVendorId) &&
+            (lastInfo.usbProductId == null || info.usbProductId === lastInfo.usbProductId)
+          );
+        } catch (_) {
+          return false;
+        }
+      });
+      if (match) {
+        return { port: match, info: match.getInfo?.() || {} };
+      }
+    }
+    const fallback = list[0] || null;
+    return { port: fallback, info: fallback?.getInfo?.() || {} };
+  }
+
   function escapeHtml(s) {
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c));
@@ -2037,20 +2111,7 @@ function updatePeerCards(state) {
         state.ui.connectButton.disabled = false;
         try {
           const info = port.getInfo?.() || {};
-          const cfg = getConfig(session.nodeId);
-          const next = {};
-          if (toBoolean(cfg?.rememberPort, true)) {
-            next.lastPortInfo = info;
-          } else if (cfg?.lastPortInfo) {
-            next.lastPortInfo = null;
-          }
-          if (toBoolean(cfg?.rememberDevice, true) && typeof port?.getInfo === 'function') {
-            const name = await readSerialFriendlyName(port, info);
-            if (name) next.lastDeviceName = name;
-          } else if (cfg?.lastDeviceName) {
-            next.lastDeviceName = '';
-          }
-          if (Object.keys(next).length) saveConfig(session.nodeId, next);
+          await rememberSerialSelection(session.nodeId, port, info);
         } catch (_) { }
       } catch (err) {
         if (err?.name !== 'NotFoundError') logLine(state, `requestPort: ${err.message}`, 'err');
@@ -2267,10 +2328,13 @@ Viewport: ${vp}`;
       try {
         state.userRequestedDisconnect = false;
         if (!state.port) {
-          const ports = await navigator.serial?.getPorts?.();
-          if (ports && ports.length) {
-            state.port = ports[0];
+          const { port: preferred, info } = await findPreferredSerialPort(state.nodeId);
+          if (preferred) {
+            state.port = preferred;
             state.allowed = true;
+            await rememberSerialSelection(state.nodeId, preferred, info);
+          } else {
+            state.allowed = false;
           }
         }
         if (!state.port) throw new Error('No serial port selected');
@@ -2567,7 +2631,6 @@ Viewport: ${vp}`;
   async function tryAutoConnect(session) {
     const state = session.state;
     if (!navigator.serial?.getPorts) return;
-    const cfg = getConfig(session.nodeId);
     const ports = await navigator.serial.getPorts();
     if (!ports || !ports.length) {
       state.allowed = false;
@@ -2575,33 +2638,15 @@ Viewport: ${vp}`;
       return;
     }
     state.allowed = true;
-    const last = cfg?.lastPortInfo;
-    const rememberDevice = toBoolean(cfg?.rememberDevice, true);
-    const lastName = (cfg?.lastDeviceName || '').trim();
-    const lastNameKey = deviceNameKey(lastName);
-    let chosen = null;
-    if (rememberDevice && lastName) {
-      for (const port of ports) {
-        const info = port.getInfo?.() || {};
-        const friendly = await readSerialFriendlyName(port, info);
-        if (deviceNameKey(friendly) === lastNameKey && lastNameKey) {
-          chosen = port;
-          break;
-        }
-      }
+    const { port: chosen, info } = await findPreferredSerialPort(session.nodeId, ports);
+    if (!chosen) {
+      state.allowed = false;
+      if (state.ui?.connectButton) state.ui.connectButton.disabled = true;
+      return;
     }
-    if (!chosen && last && (last.usbVendorId || last.usbProductId)) {
-      chosen = ports.find((port) => {
-        const info = port.getInfo?.() || {};
-        return (
-          (last.usbVendorId == null || info.usbVendorId === last.usbVendorId) &&
-          (last.usbProductId == null || info.usbProductId === last.usbProductId)
-        );
-      }) || null;
-    }
-    if (!chosen) chosen = ports[0];
-    if (!chosen) return;
     state.port = chosen;
+    await rememberSerialSelection(session.nodeId, chosen, info);
+    const cfg = getConfig(session.nodeId);
     if (state.ui?.connectButton) state.ui.connectButton.disabled = false;
     updateStatus(state, 'Port ready', 'warn');
     const autoConnect = toBoolean(cfg?.autoConnect, true);

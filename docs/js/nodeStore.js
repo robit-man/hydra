@@ -210,7 +210,7 @@ const NodeStore = {
       unlockTTL: 900
     },
     WebSerial: {
-      autoConnect: false,
+      autoConnect: true,
       autoReconnect: true,
       rememberPort: true,
       rememberDevice: true,

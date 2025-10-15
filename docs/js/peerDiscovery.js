@@ -9,6 +9,17 @@ const PING_TIMEOUT_MS = 8000;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
+const normalizeKey = (value) => {
+  if (value == null) return '';
+  let text = typeof value === 'string' ? value : String(value);
+  try {
+    text = text.normalize('NFKC');
+  } catch (_) {
+    // ignore
+  }
+  return text.trim();
+};
+
 class Store {
   constructor(room) {
     this.key = `hydra.peerstore.${room}`;
@@ -313,19 +324,17 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     pendingPings: new Map(),
     statusOverride: null,
     renderScheduled: false,
-    statusInterval: null
+    statusInterval: null,
+    directoryTimer: null,
+    sharedHashes: new Map(),
+    remoteHashes: new Map()
   };
   state.store = sharedStore;
 
   sharedStore.all().forEach((peer) => {
-    if (!peer?.nknPub) return;
-    const lastMs = typeof peer.last === 'number' ? peer.last * 1000 : 0;
-    state.peers.set(peer.nknPub, {
-      ...peer,
-      online: false,
-      probing: false,
-      lastSeenAt: lastMs
-    });
+    const normalized = normalizePeerEntry(peer);
+    if (!normalized) return;
+    upsertPeer({ ...normalized, lastSeenAt: normalized.last * 1000 }, { online: false, probing: false });
   });
 
   const els = {
@@ -413,9 +422,110 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
   }
 
+  function normalizePeerEntry(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    const rawPub = entry.nknPub || entry.addr || entry.pub;
+    const nknPub = normalizeKey(rawPub);
+    if (!nknPub) return null;
+    const addrValue = entry.addr || entry.address || rawPub || '';
+    const addrTrimmed = typeof addrValue === 'string' ? addrValue.trim() : String(addrValue || '').trim();
+    return {
+      nknPub,
+      addr: addrTrimmed || rawPub || nknPub,
+      originalPub: typeof rawPub === 'string' ? rawPub.trim() : String(rawPub || '').trim() || nknPub,
+      meta: entry.meta || {},
+      last: typeof entry.last === 'number' ? entry.last : nowSeconds()
+    };
+  }
+
+  function shareDirectory(list, targetPub) {
+    if (!state.discovery || !Array.isArray(list) || !list.length) return;
+    if (!targetPub) return;
+    if (normalizeKey(targetPub) === normalizeKey(state.meAddr)) return;
+    const payload = {
+      type: 'peer-directory',
+      pub: state.meAddr,
+      peers: list
+        .map(normalizePeerEntry)
+        .filter(Boolean)
+    };
+    if (!payload.peers.length) return;
+    try {
+      state.discovery.dm(targetPub, payload);
+    } catch (err) {
+      log?.(`[peers] share directory failed: ${err?.message || err}`);
+    }
+  }
+
+  function collectDirectoryEntries() {
+    const entries = [];
+    state.peers.forEach((peer) => {
+      if (!peer?.nknPub) return;
+      entries.push({
+        nknPub: peer.originalPub || peer.nknPub,
+        addr: peer.addr || peer.originalPub || peer.nknPub,
+        meta: peer.meta || {},
+        last: peer.last || nowSeconds()
+      });
+    });
+    if (state.meAddr) {
+      entries.push({
+        nknPub: state.meAddr,
+        addr: state.meAddr,
+        meta: { self: true },
+        last: nowSeconds()
+      });
+    }
+    return entries;
+  }
+
+  function hashDirectory(entries) {
+    try {
+      const sorted = entries
+        .map((entry) => ({
+          nknPub: entry.nknPub,
+          addr: entry.addr,
+          last: entry.last || 0
+        }))
+        .sort((a, b) => a.nknPub.localeCompare(b.nknPub));
+      return JSON.stringify(sorted);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function broadcastDirectory(targetPub = null) {
+    if (!state.discovery) return;
+    const entries = collectDirectoryEntries();
+    if (!entries.length) return;
+    const hash = hashDirectory(entries);
+    const targets = targetPub
+      ? [normalizeKey(targetPub)]
+      : Array.from(state.peers.keys());
+    targets.forEach((key) => {
+      if (!key || key === normalizeKey(state.meAddr)) return;
+      const peer = state.peers.get(key);
+      const address = peer?.addr || peer?.originalPub || key;
+      if (!address) return;
+      if (!targetPub && hash && state.sharedHashes.get(key) === hash) return;
+      shareDirectory(entries, address);
+      if (hash) state.sharedHashes.set(key, hash);
+    });
+  }
+
+  function scheduleDirectoryBroadcast(delay = 300) {
+    if (state.directoryTimer) return;
+    state.directoryTimer = setTimeout(() => {
+      state.directoryTimer = null;
+      broadcastDirectory();
+    }, delay);
+  }
+
   function upsertPeer(peer, { online, probing } = {}) {
-    if (!peer?.nknPub) return;
-    const existing = state.peers.get(peer.nknPub) || {};
+    const key = normalizeKey(peer?.nknPub || peer?.addr || '');
+    if (!key) return { added: false, entry: null };
+    const existing = state.peers.get(key) || {};
+    const added = !existing.nknPub;
     const lastSeconds = typeof peer.last === 'number' ? peer.last : existing.last || 0;
     const lastSeenAt =
       typeof peer.lastSeenAt === 'number'
@@ -426,13 +536,26 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     const merged = {
       ...existing,
       ...peer,
+      nknPub: key,
       last: lastSeconds,
       lastSeenAt,
-      addr: peer.addr || existing.addr || peer.nknPub
+      addr: peer.addr || existing.addr || peer.nknPub || key,
+      originalPub: peer.nknPub || existing.originalPub || key
     };
     if (online !== undefined) merged.online = online;
     if (probing !== undefined) merged.probing = probing;
-    state.peers.set(peer.nknPub, merged);
+    state.peers.set(key, merged);
+    try {
+      state.store.upsert({
+        nknPub: merged.originalPub || merged.nknPub,
+        addr: merged.addr,
+        meta: merged.meta || {},
+        last: merged.last || nowSeconds()
+      });
+    } catch (_) {
+      // ignore persistence errors
+    }
+    return { added, entry: merged };
   }
 
   function updatePeerStatuses() {
@@ -453,8 +576,12 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function pingPeer(pub) {
-    if (!pub || !state.discovery) return;
-    if (state.pendingPings.has(pub)) return;
+    const key = normalizeKey(pub);
+    if (!key || !state.discovery) return;
+    if (state.pendingPings.has(key)) return;
+    const peer = state.peers.get(key);
+    const target = peer?.addr || peer?.originalPub || pub;
+    if (!target) return;
     try {
       const payload = {
         type: 'peer-ping',
@@ -462,23 +589,22 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         meta: { graphId: CFG.graphId || '' },
         ts: nowSeconds()
       };
-      state.discovery.dm(pub, payload);
-      state.pendingPings.set(pub, Date.now());
-      const peer = state.peers.get(pub);
+      state.discovery.dm(target, payload);
+      state.pendingPings.set(key, Date.now());
       if (peer) {
         peer.probing = true;
-        state.peers.set(pub, peer);
+        state.peers.set(key, peer);
       }
       scheduleRender();
       setTimeout(() => {
-        const started = state.pendingPings.get(pub);
+        const started = state.pendingPings.get(key);
         if (!started) return;
         if (Date.now() - started >= PING_TIMEOUT_MS) {
-          state.pendingPings.delete(pub);
-          const current = state.peers.get(pub);
+          state.pendingPings.delete(key);
+          const current = state.peers.get(key);
           if (current && !current.online) {
             current.probing = false;
-            state.peers.set(pub, current);
+            state.peers.set(key, current);
             scheduleRender();
           }
         }
@@ -493,7 +619,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     state.peers.forEach((peer) => {
       if (!peer?.nknPub) return;
       if (peer.online) return;
-      pingPeer(peer.nknPub);
+      pingPeer(peer.originalPub || peer.addr || peer.nknPub);
     });
   }
 
@@ -582,7 +708,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       if (!peer?.nknPub) return;
       const last = typeof peer.last === 'number' ? peer.last : 0;
       const online = last ? nowSec - last <= OFFLINE_AFTER_SECONDS : false;
-      upsertPeer(
+      const result = upsertPeer(
         {
           ...peer,
           last,
@@ -590,6 +716,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         },
         { online, probing: false }
       );
+      if (result.added) scheduleDirectoryBroadcast();
     });
     scheduleRender();
   }
@@ -599,7 +726,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     client.on('peer', (peer) => {
       if (!peer?.nknPub) return;
       const last = typeof peer.last === 'number' ? peer.last : nowSeconds();
-      upsertPeer(
+      const result = upsertPeer(
         {
           ...peer,
           last,
@@ -607,9 +734,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         },
         { online: true, probing: false }
       );
-      if (peer?.nknPub) state.pendingPings.delete(peer.nknPub);
+      if (peer?.nknPub) state.pendingPings.delete(normalizeKey(peer.nknPub));
       clearStatusOverride();
       scheduleRender();
+      if (result.added) {
+        broadcastDirectory(peer.nknPub);
+        scheduleDirectoryBroadcast();
+      }
     });
     client.on('status', (info) => {
       if (!info) return;
@@ -618,6 +749,51 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       } else if (info.type === 'reconnect') {
         clearStatusOverride();
         refreshStatus();
+      }
+    });
+    client.on('dm', (payload) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type === 'peer-directory') {
+        const sender = normalizeKey(payload.pub || payload.from);
+        if (sender) {
+          state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
+          if (!state.peers.has(sender) && sender !== normalizeKey(state.meAddr)) {
+            upsertPeer(
+              {
+                nknPub: sender,
+                addr: payload.pub || payload.from || sender,
+                last: nowSeconds(),
+                meta: payload.meta || {}
+              },
+              {}
+            );
+          }
+        }
+        const list = Array.isArray(payload.peers) ? payload.peers : [];
+        let added = false;
+        list.forEach((entry) => {
+          const normalized = normalizePeerEntry(entry);
+          if (!normalized) return;
+          if (normalized.nknPub === normalizeKey(state.meAddr)) return;
+          const result = upsertPeer(normalized, {});
+          if (result.added) added = true;
+        });
+        const entries = collectDirectoryEntries();
+        const localHash = hashDirectory(entries);
+        if (sender && localHash) {
+          const lastSent = state.sharedHashes.get(sender);
+          if (localHash !== lastSent) {
+            const peerInfo = state.peers.get(sender);
+            const targetAddr = peerInfo?.addr || peerInfo?.originalPub || payload.pub || payload.from;
+            if (targetAddr) {
+              shareDirectory(entries, targetAddr);
+              state.sharedHashes.set(sender, localHash);
+            }
+          }
+        }
+        if (added) scheduleDirectoryBroadcast();
+        scheduleRender();
+        return;
       }
     });
   }
@@ -666,6 +842,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       updatePeerStatuses();
       clearStatusOverride();
       scheduleRender();
+      scheduleDirectoryBroadcast(150);
       return client;
     })().catch((err) => {
       log?.(`[peers] discovery connect failed: ${err?.message || err}`);
