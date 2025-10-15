@@ -345,6 +345,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       const rect = img.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       e.preventDefault();
+      e.stopPropagation();
       const naturalW = img.naturalWidth || state.lastFrameMeta?.width || rect.width;
       const naturalH = img.naturalHeight || state.lastFrameMeta?.height || rect.height;
       const x = e.clientX - rect.left;
@@ -383,6 +384,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       const wheelHandler = (e) => {
         if (!state.lastFrameMeta) return;
         e.preventDefault();
+        e.stopPropagation();
         const img = elements.frame;
         const rect = img.getBoundingClientRect();
         if (!rect.width || !rect.height) return;
@@ -419,7 +421,38 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (elements.preview) {
       elements.preview.style.touchAction = 'none';
       elements.preview.style.userSelect = 'none';
+      const previewWheel = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      elements.preview.addEventListener('wheel', previewWheel, { passive: false });
+      cleanup.push(() => {
+        try { elements.preview.removeEventListener('wheel', previewWheel, { passive: false }); } catch (_) {
+          try { elements.preview.removeEventListener('wheel', previewWheel); } catch (_) { /* ignore */ }
+        }
+      });
     }
+  }
+
+  function dispose(nodeId) {
+    const state = stateMap.get(nodeId);
+    if (!state) return;
+    stopEvents(state);
+    if (state.captureTimer) {
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+    }
+    state.capturePending = false;
+    if (state.previewUrl && typeof state.previewUrl === 'string' && state.previewUrl.startsWith('blob:')) {
+      try { URL.revokeObjectURL(state.previewUrl); } catch (_) { /* ignore */ }
+    }
+    if (Array.isArray(state.cleanup)) {
+      for (const fn of state.cleanup) {
+        try { fn(); } catch (_) { /* ignore */ }
+      }
+    }
+    state.cleanup = [];
+    stateMap.delete(nodeId);
   }
 
   function updateSessionLabel(state) {
