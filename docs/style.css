@@ -653,7 +653,7 @@ header {
   border: 1px solid rgba(255, 255, 255, .25);
   background: transparent;
   color: var(--text);
-  font-weight: 600;
+  font-weight: 800;
   cursor: pointer;
   z-index: 1001;
   transition: background .2s ease, color .2s ease, border .2s ease, box-shadow .2s ease;
@@ -2491,9 +2491,15 @@ button.danger {
   margin-bottom: 10px
 }
 
+.modal-head > button{
+  height: 30px;
+  width: 30px;
+}
+
 .modal-title {
   font-weight: 800;
-  font-size: 15px
+  font-size: 15px;
+  align-self: normal;
 }
 
 .form-grid {
@@ -2570,6 +2576,7 @@ audio {
 .peer-entry {
   display: flex;
   align-items: flex-start;
+  flex-flow:column;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
@@ -2586,24 +2593,43 @@ audio {
   opacity: 0.65;
 }
 
+.peer-entry.peer-highlight {
+  box-shadow: 0 0 0 2px rgba(94, 227, 166, .6);
+}
+
 .peer-entry .peer-shared {
   font-size: 10px;
   color: var(--muted);
   margin-top: 2px;
+  display: flex;
+  flex-flow:column;
+  gap:0.5rem;
 }
 
 .peer-entry .peer-shared button {
-  background: transparent;
+  background: var(--accent);
+  padding:8px ;
   border: none;
-  color: var(--accent);
+  color:black;
+  display: block;
   cursor: pointer;
   font: inherit;
-  padding: 0;
-  text-decoration: underline;
+  font-weight: 800;
+  text-decoration: unset;
+  max-width: 200px;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 
 .peer-entry .peer-shared button:hover {
   opacity: 0.8;
+}
+
+.peer-address {
+  font-size: 10px;
+  color: var(--muted);
+  word-break: break-all;
+  margin-top: 2px;
 }
 
 .peer-actions {
@@ -2618,13 +2644,6 @@ audio {
   pointer-events: none;
   user-select: none;
 }
-.peer-meta > .peer-address {
-  font-size: 8px;
-  color: var(--muted);
-  word-break: break-all;
-  margin-top: 4px;
-}
-
 .peer-name {
   font-size: 13px;
   font-weight: 600;
@@ -2731,19 +2750,26 @@ audio {
 }
 
 .peer-badge {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   margin-left: 8px;
-  min-width: 18px;
-  height: 18px;
+  min-width: 16px;
+  height: 16px;
   padding: 0 5px;
   border-radius: 2px;
   background: var(--text);
   color: #000;
-  font-weight: bold;
-  font-size: 11px;
-  font-weight: 600;
+  font-weight: bold;;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+#peerListButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .face-viewer {
