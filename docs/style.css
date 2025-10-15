@@ -3047,6 +3047,7 @@ button.ghost.danger:disabled {
   border-radius: 6px;
   min-height: 160px;
   overflow: hidden;
+  touch-action: none;
 }
 
 .wscraper-preview img {
@@ -3054,6 +3055,9 @@ button.ghost.danger:disabled {
   width: 100%;
   height: auto;
   cursor: crosshair;
+  user-select: none;
+  -webkit-user-drag: none;
+  touch-action: none;
 }
 
 .wscraper-preview img.active {
@@ -3077,4 +3081,3 @@ button.ghost.danger:disabled {
   overflow: auto;
   white-space: pre-wrap;
 }
-

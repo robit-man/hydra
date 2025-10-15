@@ -95,7 +95,8 @@ const NodeStore = {
       lastFrame: '',
       lastDom: '',
       autoCapture: 'false',
-      frameRate: 1
+      frameRate: 1,
+      frameOutputMode: 'wrapped'
     },
     ImageInput: {
       image: '',

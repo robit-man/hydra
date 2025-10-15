@@ -82,7 +82,8 @@ const GraphTypes = {
       { name: 'status' },
       { name: 'frame' },
       { name: 'dom' },
-      { name: 'log' }
+      { name: 'log' },
+      { name: 'rawFrame', label: 'Raw Frame' }
     ],
     schema: [
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:8130' },
@@ -93,6 +94,7 @@ const GraphTypes = {
       { key: 'autoScreenshot', label: 'Auto Screenshot After Actions', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'autoCapture', label: 'Continuous Capture', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'frameRate', label: 'Capture FPS', type: 'number', def: 1 },
+      { key: 'frameOutputMode', label: 'Frame Output Mode', type: 'select', options: ['wrapped', 'raw'], def: 'wrapped' },
       { key: 'sid', label: 'Session Override', type: 'text', placeholder: '(external SID)' }
     ]
   },

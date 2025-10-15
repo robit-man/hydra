@@ -27,6 +27,9 @@ const ACTION_ALIASES = {
   scrolldown: 'scroll_down',
   'scroll-down': 'scroll_down',
   down: 'scroll_down',
+  'scroll.point': 'scroll_point',
+  scroll_point: 'scroll_point',
+  scrollpoint: 'scroll_point',
   drag: 'drag',
   screenshot: 'screenshot',
   shot: 'screenshot',
@@ -39,6 +42,26 @@ const ACTION_ALIASES = {
 const MAX_LOG_LINES = 80;
 
 const noop = () => {};
+
+const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+  const blobCtor = typeof Blob === 'undefined' ? null : Blob;
+  if (!blobCtor || !(blob instanceof blobCtor)) {
+    resolve('');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const result = typeof reader.result === 'string' ? reader.result : '';
+    const commaIdx = result.indexOf(',');
+    resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+  };
+  reader.onerror = (err) => reject(err);
+  try {
+    reader.readAsDataURL(blob);
+  } catch (err) {
+    reject(err);
+  }
+});
 
 function boolFromConfig(raw, def = false) {
   if (raw === undefined || raw === null) return def;
@@ -135,6 +158,8 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       autoCapture: false,
       captureTimer: null,
       capturePending: false,
+      frameOutputMode: 'wrapped',
+      lastWheelTs: 0,
       busyCount: 0,
       logLines: [],
       eventGen: 0,
@@ -262,6 +287,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       if (!img) return;
       const rect = img.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
+      e.preventDefault();
       const naturalW = img.naturalWidth || state.lastFrameMeta?.width || rect.width;
       const naturalH = img.naturalHeight || state.lastFrameMeta?.height || rect.height;
       const x = e.clientX - rect.left;
@@ -285,6 +311,58 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     bind(elements.frame, 'pointerleave', (e) => {
       if (state.dragInfo) finishPointer(e, true);
     });
+
+    if (elements.frame) {
+      elements.frame.draggable = false;
+      elements.frame.setAttribute('draggable', 'false');
+      elements.frame.style.userSelect = 'none';
+      elements.frame.style.webkitUserSelect = 'none';
+      elements.frame.style.pointerEvents = 'auto';
+      const dragBlock = (ev) => ev.preventDefault();
+      elements.frame.addEventListener('dragstart', dragBlock);
+      cleanup.push(() => {
+        try { elements.frame.removeEventListener('dragstart', dragBlock); } catch (_) { /* ignore */ }
+      });
+      const wheelHandler = (e) => {
+        if (!state.lastFrameMeta) return;
+        e.preventDefault();
+        const img = elements.frame;
+        const rect = img.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const naturalW = state.lastFrameMeta?.width || img.naturalWidth || rect.width;
+        const naturalH = state.lastFrameMeta?.height || img.naturalHeight || rect.height;
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const mode = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 240 : 1;
+        const deltaX = (e.deltaX || 0) * mode;
+        const deltaY = (e.deltaY || 0) * mode;
+        if (!deltaX && !deltaY) return;
+        const now = performance.now();
+        if (now - state.lastWheelTs < 12) return;
+        state.lastWheelTs = now;
+        performScrollPoint(nodeId, {
+          x: Math.max(0, Math.round(x)),
+          y: Math.max(0, Math.round(y)),
+          deltaX,
+          deltaY,
+          viewportW: Math.round(rect.width),
+          viewportH: Math.round(rect.height),
+          naturalW,
+          naturalH
+        });
+      };
+      elements.frame.addEventListener('wheel', wheelHandler, { passive: false });
+      cleanup.push(() => {
+        try { elements.frame.removeEventListener('wheel', wheelHandler, { passive: false }); } catch (_) {
+          try { elements.frame.removeEventListener('wheel', wheelHandler); } catch (_) { /* ignore */ }
+        }
+      });
+    }
+
+    if (elements.preview) {
+      elements.preview.style.touchAction = 'none';
+      elements.preview.style.userSelect = 'none';
+    }
 
     stateMap.set(nodeId, state);
     return state;
@@ -419,7 +497,10 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     state.autoCapture = boolFromConfig(cfg.autoCapture, false);
     const fpsRaw = Number(cfg.frameRate || 0);
     const fps = Number.isFinite(fpsRaw) ? Math.max(0, fpsRaw) : 0;
-    if (!state.autoCapture || fps <= 0) return;
+    if (!state.autoCapture || fps <= 0) {
+      state.capturePending = false;
+      return;
+    }
     const intervalMs = Math.max(1000 / fps, 100);
     state.captureTimer = setInterval(() => {
       if (state.capturePending) return;
@@ -725,6 +806,31 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     }
   }
 
+  async function performScrollPoint(nodeId, payload) {
+    const state = ensureState(nodeId);
+    if (!state) return;
+    const sid = getActiveSid(state);
+    if (!sid) return;
+    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const body = {
+      sid,
+      x: payload.x,
+      y: payload.y,
+      deltaX: payload.deltaX,
+      deltaY: payload.deltaY,
+      viewportW: payload.viewportW,
+      viewportH: payload.viewportH,
+      naturalW: payload.naturalW,
+      naturalH: payload.naturalH
+    };
+    try {
+      await Net.postJSON(base, '/scroll/point', body, api, viaNkn, relay, 20000);
+    } catch (err) {
+      const message = err?.message || String(err);
+      appendLog(nodeId, `scroll point failed: ${message}`, 'warn');
+    }
+  }
+
   async function performType(nodeId, selectorOverride, textOverride) {
     const state = ensureState(nodeId);
     if (!state) return;
@@ -889,9 +995,12 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
   async function loadFrame(nodeId, file, meta = {}, inlineB64 = '') {
     const state = ensureState(nodeId);
     if (!state) return;
+    const prevMeta = state.lastFrameMeta;
     const { base, relay, api, viaNkn } = requestEnv(nodeId);
     let imageUrl = '';
     const mime = meta?.mime || 'image/png';
+    let rawData = inlineB64;
+    let blob = null;
     if (inlineB64) {
       imageUrl = `data:${mime};base64,${inlineB64}`;
       if (state.previewUrl && state.previewUrl.startsWith('blob:')) {
@@ -907,7 +1016,6 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
           // ignore
         }
       }
-      let blob;
       try {
         blob = await Net.fetchBlob(url, viaNkn, relay, api);
       } catch (err) {
@@ -919,6 +1027,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         try { URL.revokeObjectURL(state.previewUrl); } catch (_) { /* ignore */ }
       }
       imageUrl = URL.createObjectURL(blob);
+      try {
+        rawData = await blobToBase64(blob);
+      } catch (err) {
+        rawData = '';
+      }
     }
     state.previewUrl = imageUrl;
     if (state.elements.frame) {
@@ -928,19 +1041,30 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (state.elements.placeholder) {
       state.elements.placeholder.classList.add('hidden');
     }
+    const activeSid = getActiveSid(state);
     const payload = {
       nodeId,
-      sid: getActiveSid(state),
+      sid: activeSid,
       file,
-      width: meta.width || 0,
-      height: meta.height || 0,
+      width: meta.width || (prevMeta?.width ?? 0),
+      height: meta.height || (prevMeta?.height ?? 0),
       blobUrl: imageUrl,
       mime,
-      b64: inlineB64,
+      b64: rawData,
       ts: Date.now()
     };
     state.lastFrameMeta = payload;
-    Router.sendFrom(nodeId, 'frame', payload);
+    const cfg = NodeStore.ensure(nodeId, 'WebScraper').config || {};
+    const frameMode = (cfg.frameOutputMode || state.frameOutputMode || 'wrapped').toLowerCase() === 'raw' ? 'raw' : 'wrapped';
+    if (frameMode === 'raw') {
+      if (rawData) Router.sendFrom(nodeId, 'frame', rawData);
+      else Router.sendFrom(nodeId, 'frame', payload);
+    } else {
+      Router.sendFrom(nodeId, 'frame', payload);
+    }
+    if (rawData) {
+      Router.sendFrom(nodeId, 'rawFrame', rawData);
+    }
     updateConfig(nodeId, { lastFrame: file });
   }
 
@@ -1108,6 +1232,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     state.inputs.sid = cfg.sid || '';
     state.autoScreenshot = boolFromConfig(cfg.autoScreenshot, false);
     state.autoCapture = boolFromConfig(cfg.autoCapture, false);
+    state.frameOutputMode = (cfg.frameOutputMode || 'wrapped').toLowerCase() === 'raw' ? 'raw' : 'wrapped';
 
     if (state.elements.url && state.inputs.url) state.elements.url.value = state.inputs.url;
     if (state.elements.selector && state.inputs.selector) state.elements.selector.value = state.inputs.selector;
@@ -1137,6 +1262,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const cfg = config(nodeId);
     state.autoScreenshot = boolFromConfig(cfg.autoScreenshot, false);
     state.autoCapture = boolFromConfig(cfg.autoCapture, false);
+    state.frameOutputMode = (cfg.frameOutputMode || 'wrapped').toLowerCase() === 'raw' ? 'raw' : 'wrapped';
     const overrideSid = (cfg.sid || '').trim();
     if (overrideSid !== state.manualSid) {
       state.manualSid = overrideSid;
