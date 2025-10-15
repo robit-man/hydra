@@ -193,7 +193,7 @@ const NodeStore = {
       autoConnect: true,
       channel: 0,
       publicPortName: 'public',
-      defaultJson: true,
+      defaultJson: false,
       peers: {},
       rememberPort: true,
       rememberDevice: true,

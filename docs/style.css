@@ -1267,6 +1267,10 @@ input.relay-disabled {
   display: none
 }
 
+#syncShareModal{
+  z-index: 2;
+}
+
 .qr-body {
   display: flex;
   flex-direction: column;
