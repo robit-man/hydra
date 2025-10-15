@@ -356,9 +356,113 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     statusInterval: null,
     directoryTimer: null,
     sharedHashes: new Map(),
-    remoteHashes: new Map()
+    remoteHashes: new Map(),
+    chat: {
+      activePeer: null,
+      sessions: new Map(),
+      typingPeers: new Map(),
+      typingTimers: new Map(),
+      favorites: new Set(),
+      promptMessage: null
+    },
+    pokeNoticeTimer: null
   };
   state.store = sharedStore;
+
+  const FAVORITES_KEY = `hydra.favorites.${state.room}`;
+  const historyKey = (peerKey) => {
+    const normalized = normalizeKey(peerKey);
+    return normalized ? `hydra.chat.history.${state.room}.${normalized}` : '';
+  };
+  const sessionKey = (peerKey) => {
+    const normalized = normalizeKey(peerKey);
+    return normalized ? `hydra.chat.session.${state.room}.${normalized}` : '';
+  };
+
+  const loadFavorites = () => {
+    if (typeof localStorage === 'undefined') return new Set();
+    try {
+      const raw = localStorage.getItem(FAVORITES_KEY);
+      if (!raw) return new Set();
+      const list = JSON.parse(raw);
+      return new Set(Array.isArray(list) ? list.map((value) => normalizeKey(value)).filter(Boolean) : []);
+    } catch (_) {
+      return new Set();
+    }
+  };
+
+  const saveFavorites = () => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(FAVORITES_KEY, JSON.stringify([...state.chat.favorites]));
+    } catch (_) {
+      // ignore quota issues
+    }
+  };
+
+  const loadHistory = (peerKey) => {
+    if (typeof localStorage === 'undefined') return [];
+    const key = historyKey(peerKey);
+    if (!key) return [];
+    try {
+      const raw = localStorage.getItem(key);
+      const arr = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(arr)) return [];
+      return arr
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const dir = item.dir === 'out' ? 'out' : 'in';
+          const id = typeof item.id === 'string' ? item.id : '';
+          const ts = typeof item.ts === 'number' ? item.ts : nowSeconds();
+          const text = typeof item.text === 'string' ? item.text : '';
+          return { id, dir, ts, text };
+        })
+        .filter(Boolean);
+    } catch (_) {
+      return [];
+    }
+  };
+
+  const saveHistory = (peerKey, messages) => {
+    if (typeof localStorage === 'undefined') return;
+    const key = historyKey(peerKey);
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(messages));
+    } catch (_) {
+      // ignore quota issues
+    }
+  };
+
+  const loadSession = (peerKey) => {
+    if (typeof localStorage === 'undefined') return null;
+    const key = sessionKey(peerKey);
+    if (!key) return null;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const status = typeof parsed?.status === 'string' ? parsed.status : 'idle';
+      const allowed = ['idle', 'pending', 'accepted', 'declined'];
+      const normalizedStatus = allowed.includes(status) ? status : 'idle';
+      const record = { status: normalizedStatus };
+      if (typeof parsed?.lastTs === 'number') record.lastTs = parsed.lastTs;
+      return record;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const saveSession = (peerKey, session) => {
+    if (typeof localStorage === 'undefined') return;
+    const key = sessionKey(peerKey);
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(session));
+    } catch (_) {
+      // ignore quota issues
+    }
+  };
 
   try {
     const storedName = LS.get(USERNAME_KEY, '');
@@ -367,6 +471,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     // ignore storage load issues
   }
   state.username = sanitizeUsername(state.username || '');
+  state.chat.favorites = loadFavorites();
 
   function getPresenceMeta() {
     return {
@@ -389,7 +494,15 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     close: null,
     list: null,
     status: null,
-    self: null
+    self: null,
+    chatWrap: null,
+    chatName: null,
+    chatStatus: null,
+    chatMsgs: null,
+    chatTyping: null,
+    chatInput: null,
+    chatSend: null,
+    chatFav: null
   };
 
   function assignElements() {
@@ -404,9 +517,18 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     els.nameApply = qs('#peerUsernameApply');
     els.nameBadge = qs('#peerSelfName');
     els.badgeCount = qs('#peerOnlineBadge');
+    els.chatWrap = qs('#chatWrap');
+    els.chatName = qs('#chatPeerName');
+    els.chatStatus = qs('#chatStatus');
+    els.chatMsgs = qs('#chatMessages');
+    els.chatTyping = qs('#chatTyping');
+    els.chatInput = qs('#chatInput');
+    els.chatSend = qs('#chatSend');
+    els.chatFav = qs('#chatFavoriteBtn');
     if (els.nameInput) els.nameInput.value = state.username || '';
     updateSelf();
     updateBadge();
+    renderChat();
   }
 
   function showModal() {
@@ -905,6 +1027,226 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     }
   }
 
+  function normalizePeerKey(peer) {
+    if (!peer) return '';
+    if (typeof peer === 'string') return normalizeKey(peer);
+    return normalizeKey(peer.addr || peer.originalPub || peer.nknPub);
+  }
+
+  function peerByKey(key) {
+    const normalized = normalizeKey(key);
+    if (!normalized) return null;
+    return state.peers.get(normalized) || null;
+  }
+
+  function targetAddress(keyOrPeer) {
+    if (!keyOrPeer) return '';
+    if (typeof keyOrPeer === 'string') {
+      const peer = peerByKey(keyOrPeer);
+      if (!peer) return '';
+      return peer.addr || peer.originalPub || peer.nknPub || '';
+    }
+    return keyOrPeer.addr || keyOrPeer.originalPub || keyOrPeer.nknPub || '';
+  }
+
+  function ensureChatSession(peerKey) {
+    const normalized = normalizeKey(peerKey);
+    if (!normalized) return null;
+    const existing = state.chat.sessions.get(normalized);
+    if (existing) return existing;
+    const stored = loadSession(normalized);
+    const session = stored ? { ...stored } : { status: 'idle' };
+    state.chat.sessions.set(normalized, session);
+    return session;
+  }
+
+  function setSession(peerKey, nextSession) {
+    const normalized = normalizeKey(peerKey);
+    if (!normalized) return null;
+    const base = ensureChatSession(normalized) || { status: 'idle' };
+    const allowed = ['idle', 'pending', 'accepted', 'declined'];
+    const statusCandidate = typeof nextSession?.status === 'string' ? nextSession.status : base.status;
+    const status = allowed.includes(statusCandidate) ? statusCandidate : 'idle';
+    const record = { status };
+    if (typeof nextSession?.lastTs === 'number') record.lastTs = nextSession.lastTs;
+    else if (typeof base.lastTs === 'number') record.lastTs = base.lastTs;
+    state.chat.sessions.set(normalized, record);
+    saveSession(normalized, record);
+    return record;
+  }
+
+  function setActiveChat(key) {
+    const normalized = normalizeKey(key);
+    state.chat.activePeer = normalized || null;
+    if (normalized) ensureChatSession(normalized);
+    renderChat();
+  }
+
+  function appendHistory(peerKey, message) {
+    const normalized = normalizeKey(peerKey);
+    if (!normalized || !message) return [];
+    const history = loadHistory(normalized);
+    if (message.id && history.some((item) => item.id === message.id)) return history;
+    const record = {
+      id: typeof message.id === 'string' ? message.id : String(Date.now()),
+      dir: message.dir === 'out' ? 'out' : 'in',
+      text: typeof message.text === 'string' ? message.text : '',
+      ts: typeof message.ts === 'number' ? message.ts : nowSeconds()
+    };
+    history.push(record);
+    saveHistory(normalized, history);
+    return history;
+  }
+
+  function clearInlineChatDecision() {
+    const row = els.chatWrap?.querySelector('.chat-decision-row');
+    if (row) row.remove();
+  }
+
+  function respondToChat(peerKey, accept) {
+    const normalized = normalizeKey(peerKey);
+    if (!normalized) return;
+    if (state.chat.promptMessage?.key === normalized) state.chat.promptMessage = null;
+    const addr = targetAddress(normalized);
+    if (addr && state.discovery) {
+      try {
+        state.discovery.dm(addr, { type: 'chat-response', accepted: !!accept });
+      } catch (_) {
+        // ignore send failure
+      }
+    }
+    const session = setSession(normalized, { status: accept ? 'accepted' : 'declined', lastTs: nowSeconds() });
+    if (accept) {
+      setBadge?.(`Chat accepted with ${getDisplayName(peerByKey(normalized) || { addr: addr || normalized })}`);
+    } else {
+      setBadge?.(`Chat declined for ${getDisplayName(peerByKey(normalized) || { addr: addr || normalized })}`, false);
+    }
+    if (state.chat.activePeer === normalized) {
+      clearInlineChatDecision();
+      renderChat();
+    }
+  }
+
+  function showInlineChatDecision(fromKey) {
+    if (!els.chatWrap) return;
+    let row = els.chatWrap.querySelector('.chat-decision-row');
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'row chat-decision-row';
+      row.style.marginTop = '8px';
+      const accept = document.createElement('button');
+      accept.className = 'secondary';
+      accept.textContent = 'Accept';
+      accept.addEventListener('click', () => respondToChat(fromKey, true));
+      const decline = document.createElement('button');
+      decline.className = 'ghost';
+      decline.textContent = 'Decline';
+      decline.addEventListener('click', () => respondToChat(fromKey, false));
+      row.appendChild(accept);
+      row.appendChild(decline);
+      els.chatStatus?.insertAdjacentElement('afterend', row);
+    }
+  }
+
+  function renderChat() {
+    if (!els.chatWrap) return;
+    const key = state.chat.activePeer;
+    const discoveryReady = !!state.discovery;
+    if (!key) {
+      if (els.chatName) els.chatName.textContent = 'Select a peer…';
+      if (els.chatStatus) {
+        els.chatStatus.textContent = discoveryReady ? 'Pick a peer to start chatting' : 'Discovery unavailable';
+      }
+      if (els.chatMsgs) els.chatMsgs.innerHTML = '';
+      if (els.chatInput) {
+        els.chatInput.value = '';
+        els.chatInput.disabled = true;
+      }
+      if (els.chatSend) els.chatSend.disabled = true;
+      if (els.chatFav) els.chatFav.classList.remove('active');
+      if (els.chatTyping) els.chatTyping.classList.add('hidden');
+      clearInlineChatDecision();
+      return;
+    }
+
+    const peer = peerByKey(key);
+    if (els.chatName) els.chatName.textContent = peer ? getDisplayName(peer) : key;
+    if (els.chatFav) els.chatFav.classList.toggle('active', state.chat.favorites.has(key));
+
+    const history = loadHistory(key);
+    if (els.chatMsgs) {
+      els.chatMsgs.innerHTML = '';
+      history.forEach((msg) => {
+        const row = document.createElement('div');
+        row.className = `chat-message ${msg.dir === 'out' ? 'out' : 'in'}`;
+        row.textContent = msg.text || '';
+        const time = document.createElement('span');
+        time.className = 'time';
+        time.textContent = new Date((msg.ts || nowSeconds()) * 1000).toLocaleTimeString();
+        row.appendChild(time);
+        els.chatMsgs.appendChild(row);
+      });
+      els.chatMsgs.scrollTop = els.chatMsgs.scrollHeight;
+    }
+
+    const session = ensureChatSession(key);
+    const prompt = state.chat.promptMessage;
+    if (prompt?.key === key && session?.status !== 'pending') state.chat.promptMessage = null;
+    if (session?.status !== 'pending') clearInlineChatDecision();
+
+    let statusText = 'No chat yet';
+    if (state.chat.promptMessage?.key === key) statusText = state.chat.promptMessage.text;
+    else if (!discoveryReady) statusText = 'Discovery unavailable';
+    else if (session?.status === 'accepted') statusText = 'Connected';
+    else if (session?.status === 'pending') statusText = 'Awaiting peer…';
+    else if (session?.status === 'declined') statusText = 'Declined';
+    if (els.chatStatus) els.chatStatus.textContent = statusText;
+
+    const canSend = discoveryReady && session?.status === 'accepted';
+    if (els.chatInput) els.chatInput.disabled = !canSend;
+    if (els.chatSend) els.chatSend.disabled = !canSend;
+
+    if (els.chatTyping && state.chat.typingPeers.has(key)) {
+      const last = state.chat.typingPeers.get(key) || 0;
+      const recently = Date.now() - last < 1500;
+      els.chatTyping.classList.toggle('hidden', !recently);
+      if (!recently) state.chat.typingPeers.delete(key);
+    } else if (els.chatTyping) {
+      els.chatTyping.classList.add('hidden');
+    }
+  }
+
+  function openChatWithPeer(peer) {
+    const key = normalizePeerKey(peer);
+    if (!key) return;
+    setActiveChat(key);
+    const proceed = state.discovery ? Promise.resolve(state.discovery) : ensureDiscovery();
+    proceed
+      .then(() => {
+        const session = ensureChatSession(key);
+        if (session?.status === 'accepted' || session?.status === 'pending') {
+          renderChat();
+          return;
+        }
+        const addr = targetAddress(peer) || targetAddress(key);
+        if (!addr || !state.discovery) {
+          renderChat();
+          return;
+        }
+        const fromName = sanitizeUsername(state.username || '');
+        try {
+          state.discovery.dm(addr, { type: 'chat-request', fromName });
+          setSession(key, { status: 'pending', lastTs: nowSeconds() });
+        } catch (_) {
+          // ignore send failure
+        }
+        renderChat();
+      })
+      .catch(() => {
+        renderChat();
+      });
+  }
+
   function getDisplayName(peer) {
     const name = peer.meta?.username && sanitizeUsername(peer.meta.username);
     if (name) return name;
@@ -973,7 +1315,9 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
       const nameEl = document.createElement('div');
       nameEl.className = 'peer-name';
-      nameEl.textContent = getDisplayName(peer);
+      const displayName = getDisplayName(peer);
+      const isFavorite = state.chat.favorites.has(normalizePeerKey(peer));
+      nameEl.textContent = `${isFavorite ? '★ ' : ''}${displayName}`;
       meta.appendChild(nameEl);
 
       const address = peer.addr || peer.originalPub || peer.nknPub;
@@ -1037,12 +1381,41 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         hideModal();
       });
       actions.appendChild(syncBtn);
+
+      const pokeBtn = document.createElement('button');
+      pokeBtn.className = 'ghost';
+      pokeBtn.textContent = 'Poke';
+      pokeBtn.title = 'Send a notification ping';
+      pokeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const target = targetAddress(peer);
+        if (!target || !state.discovery) return;
+        try {
+          state.discovery.dm(target, { type: 'peer-poke', note: '👋' });
+          setBadge?.('Poke sent');
+        } catch (_) {
+          // ignore send failure
+        }
+      });
+      actions.appendChild(pokeBtn);
+
+      const chatBtn = document.createElement('button');
+      chatBtn.className = 'ghost';
+      chatBtn.textContent = 'Chat';
+      chatBtn.title = 'Request to chat';
+      chatBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        openChatWithPeer(peer);
+      });
+      actions.appendChild(chatBtn);
+
       entry.appendChild(actions);
 
       frag.appendChild(entry);
     });
     els.list.appendChild(frag);
     refreshStatus();
+    renderChat();
   }
 
   function rememberPeersFromDiscovery() {
@@ -1097,57 +1470,175 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
     client.on('dm', (payload) => {
       if (!payload || typeof payload !== 'object') return;
-      if (payload.type === 'peer-directory') {
-        const sender = normalizeKey(payload.pub || payload.from);
-        if (sender) {
-          state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
-          if (sender !== normalizeKey(state.meAddr)) {
-            upsertPeer(
-              {
-                nknPub: sender,
-                addr: payload.pub || payload.from || sender,
-                last: payload.ts || nowSeconds(),
-                meta: payload.meta || {}
-              },
-              {}
-            );
+      const senderKey = normalizeKey(payload.pub || payload.from);
+      let peer = senderKey ? state.peers.get(senderKey) : null;
+      if (!peer && senderKey) {
+        const result = upsertPeer(
+          {
+            nknPub: senderKey,
+            addr: payload.pub || payload.from || senderKey,
+            last: payload.ts || nowSeconds(),
+            meta: payload.meta || {}
+          },
+          {}
+        );
+        peer = result.entry;
+        if (result.added) scheduleRender();
+      } else if (peer && payload.ts) {
+        peer.last = payload.ts;
+        peer.lastSeenAt = payload.ts * 1000;
+        peer.online = true;
+        state.peers.set(senderKey, peer);
+      }
+
+      switch (payload.type) {
+        case 'peer-poke': {
+          if (els.button) {
+            els.button.classList.add('poke-notice');
+            clearTimeout(state.pokeNoticeTimer);
+            state.pokeNoticeTimer = setTimeout(() => {
+              els.button?.classList?.remove('poke-notice');
+            }, 8000);
           }
+          if (peer) {
+            peer.online = true;
+            state.peers.set(senderKey, peer);
+            refreshStatus();
+          }
+          setBadge?.(`Poke from ${getDisplayName(peer || { addr: payload.pub || senderKey })}`);
+          scheduleRender();
+          break;
         }
-        const list = Array.isArray(payload.peers) ? payload.peers : [];
-        let added = false;
-        list.forEach((entry) => {
-          const normalized = normalizePeerEntry(entry);
-          if (!normalized) return;
-          if (normalized.nknPub === normalizeKey(state.meAddr)) return;
-          const sourceLabel = sanitizeUsername(payload.meta?.username || state.peers.get(sender)?.meta?.username || '')
-            || payload.from
-            || payload.pub
-            || sender;
-          const sourceDescriptor = sender
-            ? { key: sender, label: sourceLabel || sender }
-            : null;
-          const result = upsertPeer(normalized, {
-            sharedFrom: sourceDescriptor,
-            sharedSources: normalized.sharedSources
-          });
-          if (result.added) added = true;
-        });
-        const entries = collectDirectoryEntries();
-        const localHash = hashDirectory(entries);
-        if (sender && localHash) {
-          const lastSent = state.sharedHashes.get(sender);
-          if (localHash !== lastSent) {
-            const peerInfo = state.peers.get(sender);
-            const targetAddr = peerInfo?.addr || peerInfo?.originalPub || payload.pub || payload.from;
-            if (targetAddr) {
-              shareDirectory(entries, targetAddr);
-              state.sharedHashes.set(sender, localHash);
+        case 'chat-request': {
+          if (!senderKey) break;
+          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
+          state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
+          setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
+          setActiveChat(senderKey);
+          setBadge?.(`Chat request from ${label}`);
+          showInlineChatDecision(senderKey);
+          renderChat();
+          scheduleRender();
+          break;
+        }
+        case 'chat-response': {
+          if (!senderKey) break;
+          const accepted = !!payload.accepted;
+          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
+          setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
+          if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+          setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
+          clearInlineChatDecision();
+          if (state.chat.activePeer === senderKey) renderChat();
+          scheduleRender();
+          break;
+        }
+        case 'chat-typing': {
+          if (!senderKey) break;
+          if (payload.isTyping) {
+            state.chat.typingPeers.set(senderKey, Date.now());
+            clearTimeout(state.chat.typingTimers.get(senderKey));
+            if (state.chat.activePeer === senderKey && els.chatTyping) {
+              els.chatTyping.classList.remove('hidden');
+            }
+            const timeout = setTimeout(() => {
+              state.chat.typingPeers.delete(senderKey);
+              if (state.chat.activePeer === senderKey && els.chatTyping) {
+                els.chatTyping.classList.add('hidden');
+              }
+              state.chat.typingTimers.delete(senderKey);
+            }, 1500);
+            state.chat.typingTimers.set(senderKey, timeout);
+          } else {
+            state.chat.typingPeers.delete(senderKey);
+            const existingTimer = state.chat.typingTimers.get(senderKey);
+            if (existingTimer) clearTimeout(existingTimer);
+            state.chat.typingTimers.delete(senderKey);
+            if (state.chat.activePeer === senderKey && els.chatTyping) {
+              els.chatTyping.classList.add('hidden');
             }
           }
+          break;
         }
-        if (added) scheduleDirectoryBroadcast();
-        scheduleRender();
-        return;
+        case 'chat-message': {
+          if (!senderKey) break;
+          const label = getDisplayName(peer || { addr: payload.pub || senderKey });
+          appendHistory(senderKey, {
+            id:
+              typeof payload.id === 'string'
+                ? payload.id
+                : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
+            dir: 'in',
+            text: typeof payload.text === 'string' ? payload.text : '',
+            ts: payload.ts || nowSeconds()
+          });
+          state.chat.typingPeers.delete(senderKey);
+          const timer = state.chat.typingTimers.get(senderKey);
+          if (timer) clearTimeout(timer);
+          state.chat.typingTimers.delete(senderKey);
+          setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
+          if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+          if (state.chat.activePeer === senderKey) {
+            renderChat();
+          } else {
+            setBadge?.(`New message from ${label}`);
+          }
+          scheduleRender();
+          break;
+        }
+        case 'peer-directory': {
+          const sender = senderKey;
+          if (sender) {
+            state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
+            if (sender !== normalizeKey(state.meAddr)) {
+              upsertPeer(
+                {
+                  nknPub: sender,
+                  addr: payload.pub || payload.from || sender,
+                  last: payload.ts || nowSeconds(),
+                  meta: payload.meta || {}
+                },
+                {}
+              );
+            }
+          }
+          const list = Array.isArray(payload.peers) ? payload.peers : [];
+          let added = false;
+          list.forEach((entry) => {
+            const normalized = normalizePeerEntry(entry);
+            if (!normalized) return;
+            if (normalized.nknPub === normalizeKey(state.meAddr)) return;
+            const sourceLabel =
+              sanitizeUsername(payload.meta?.username || state.peers.get(sender)?.meta?.username || '') ||
+              payload.from ||
+              payload.pub ||
+              sender;
+            const sourceDescriptor = sender ? { key: sender, label: sourceLabel || sender } : null;
+            const result = upsertPeer(normalized, {
+              sharedFrom: sourceDescriptor,
+              sharedSources: normalized.sharedSources
+            });
+            if (result.added) added = true;
+          });
+          const entries = collectDirectoryEntries();
+          const localHash = hashDirectory(entries);
+          if (sender && localHash) {
+            const lastSent = state.sharedHashes.get(sender);
+            if (localHash !== lastSent) {
+              const peerInfo = state.peers.get(sender);
+              const targetAddr = peerInfo?.addr || peerInfo?.originalPub || payload.pub || payload.from;
+              if (targetAddr) {
+                shareDirectory(entries, targetAddr);
+                state.sharedHashes.set(sender, localHash);
+              }
+            }
+          }
+          if (added) scheduleDirectoryBroadcast();
+          scheduleRender();
+          return;
+        }
+        default:
+          break;
       }
     });
   }
@@ -1229,6 +1720,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (els.button && !els.button._peerBound) {
       els.button.addEventListener('click', (e) => {
         e.preventDefault();
+        els.button.classList.remove('poke-notice');
         showModal();
         updateSelf();
         scheduleRender();
@@ -1275,6 +1767,80 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         el._peerBound = true;
       }
     });
+
+    if (els.chatFav && !els.chatFav._peerBound) {
+      els.chatFav.addEventListener('click', () => {
+        const key = state.chat.activePeer;
+        if (!key) return;
+        if (state.chat.favorites.has(key)) state.chat.favorites.delete(key);
+        else state.chat.favorites.add(key);
+        saveFavorites();
+        renderPeers();
+        renderChat();
+      });
+      els.chatFav._peerBound = true;
+    }
+
+    if (els.chatSend && !els.chatSend._peerBound) {
+      const sendMessage = () => {
+        const key = state.chat.activePeer;
+        if (!key) return;
+        const value = (els.chatInput?.value || '').trim();
+        if (!value) return;
+        const addr = targetAddress(key);
+        if (!addr || !state.discovery) return;
+        const id =
+          (typeof crypto !== 'undefined' && crypto.randomUUID?.()) ||
+          `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+          state.discovery.dm(addr, { type: 'chat-message', id, text: value });
+          appendHistory(key, { id, dir: 'out', text: value, ts: nowSeconds() });
+        } catch (_) {
+          // ignore send failure
+        }
+        if (els.chatInput) els.chatInput.value = '';
+        renderChat();
+      };
+
+      const typingState = { timer: null };
+      const typingNotify = () => {
+        const key = state.chat.activePeer;
+        if (!key || !state.discovery) return;
+        const session = ensureChatSession(key);
+        if (!session || session.status !== 'accepted') return;
+        const addr = targetAddress(key);
+        if (!addr) return;
+        try {
+          state.discovery.dm(addr, { type: 'chat-typing', isTyping: true });
+        } catch (_) {
+          // ignore typing errors
+        }
+        if (typingState.timer) clearTimeout(typingState.timer);
+        typingState.timer = setTimeout(() => {
+          try {
+            state.discovery.dm(addr, { type: 'chat-typing', isTyping: false });
+          } catch (_) {
+            // ignore
+          }
+          typingState.timer = null;
+        }, 1200);
+      };
+
+      els.chatSend.addEventListener('click', (e) => {
+        e.preventDefault();
+        sendMessage();
+      });
+      if (els.chatInput) {
+        els.chatInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+        els.chatInput.addEventListener('input', typingNotify);
+      }
+      els.chatSend._peerBound = true;
+    }
   }
 
   async function init() {

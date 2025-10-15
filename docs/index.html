@@ -207,24 +207,40 @@
 
     <div id="peerModal" class="modal hidden" aria-hidden="true">
         <div class="modal-backdrop" id="peerBackdrop"></div>
-        <div class="modal-panel" style="max-width:420px;">
+        <div class="modal-panel" style="max-width:720px;">
             <div class="modal-head">
                 <div class="modal-title">Discovered Peers</div>
                 <button class="ghost" id="peerClose">✕</button>
             </div>
-            <div class="modal-body peer-modal-body">
-                <div class="help" id="peerStatus">Initializing discovery...</div>
-                <div class="peer-identity">
-                    <label for="peerUsernameInput">Display Name</label>
-                    <div class="peer-identity-row">
-                        <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48"
-                            autocomplete="off" spellcheck="false">
-                        <button type="button" class="secondary" id="peerUsernameApply">Save</button>
+            <div class="modal-body peer-modal-body two-col">
+                <div class="peer-left">
+                    <div class="help" id="peerStatus">Initializing discovery...</div>
+                    <div class="peer-identity">
+                        <label for="peerUsernameInput">Display Name</label>
+                        <div class="peer-identity-row">
+                            <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48"
+                                autocomplete="off" spellcheck="false">
+                            <button type="button" class="secondary" id="peerUsernameApply">Save</button>
+                        </div>
+                        <div class="peer-self muted" id="peerSelf"></div>
+                        <div class="peer-self-name muted" id="peerSelfName"></div>
                     </div>
-                    <div class="peer-self muted" id="peerSelf"></div>
-                    <div class="peer-self-name muted" id="peerSelfName"></div>
+                    <div class="peer-list" id="peerList"></div>
                 </div>
-                <div class="peer-list" id="peerList"></div>
+
+                <div class="peer-right" id="chatWrap">
+                    <div class="chat-header">
+                        <div id="chatPeerName">Select a peer…</div>
+                        <button type="button" class="ghost" id="chatFavoriteBtn" title="Toggle favorite">☆</button>
+                    </div>
+                    <div class="chat-status muted" id="chatStatus">—</div>
+                    <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+                    <div class="chat-typing muted hidden" id="chatTyping">typing…</div>
+                    <div class="chat-input">
+                        <input id="chatInput" type="text" placeholder="Type a message" autocomplete="off" disabled>
+                        <button id="chatSend" class="secondary" disabled>Send</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

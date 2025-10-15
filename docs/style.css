@@ -2,8 +2,10 @@
 
 :root {
   --bg: #000000;
+  --bg-tp: #00000033;
   --panel: rgba(255, 255, 255, .07);
   --panel2: rgba(255, 255, 255, .05);
+  --border: rgba(255, 255, 255, .12);
   --accent: #5ee3a6;
   --accent2: #a8ff60;
   --text: #e8f1f8;
@@ -13,7 +15,7 @@
   --err: #ff6b6b;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --r: 16px;
-  --shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 1px rgba(255, 255, 255, .12)
+  --shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 1px var(--border)
 }
 
 * {
@@ -327,7 +329,7 @@ header {
   width: 100%;
   min-height: 120px;
   background: rgba(0, 0, 0, .35);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 4px;
   object-fit: cover;
 }
@@ -850,7 +852,7 @@ h2 {
   padding: 10px;
   border-radius: 12px;
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   box-shadow: 0 12px 28px rgba(0, 0, 0, .45);
   z-index: 40;
 }
@@ -1266,7 +1268,7 @@ input.relay-disabled {
   display: none
 }
 
-#syncShareModal{
+#syncShareModal {
   z-index: 2;
 }
 
@@ -1285,7 +1287,8 @@ button {
   display: flex;
   padding: 8px 8px;
   font-weight: 700;
-  cursor: pointer
+  cursor: pointer;
+  align-items: center;
 }
 
 .toggle-boolean-wrap {
@@ -1346,7 +1349,7 @@ button.danger {
   font-family: var(--mono);
   font-size: 12px;
   background: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px;
   white-space: pre-wrap;
@@ -1358,7 +1361,7 @@ button.danger {
   background: rgba(0, 0, 0, .25);
   max-height: 360px;
   overflow: auto;
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   padding: 6px;
   min-height: 32px;
   border-radius: 4px
@@ -2334,7 +2337,7 @@ button.danger {
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-start;
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   background: rgba(255, 255, 255, .04);
   border-radius: 8px;
   padding: 8px 10px;
@@ -2491,7 +2494,7 @@ button.danger {
   margin-bottom: 10px
 }
 
-.modal-head > button{
+.modal-head>button {
   height: 30px;
   width: 30px;
 }
@@ -2522,6 +2525,85 @@ audio {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.peer-modal-body.two-col {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+}
+
+.peer-left {
+  flex: 1 1 45%;
+  min-width: 280px;
+}
+
+.peer-right {
+  flex: 1 1 55%;
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#chatFavoriteBtn.active {
+  color: var(--accent, #2ecc71);
+}
+
+.chat-status {
+  margin: 6px 0;
+  min-height: 20px;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--panel2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-input {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-message {
+  margin: 6px 0;
+  max-width: 80%;
+  padding: 6px 8px;
+  border-radius: 10px;
+}
+
+.chat-message.in {
+  background: var(--bg-tp);
+  align-self: flex-start;
+}
+
+.chat-message.out {
+  background: var(--bg-tp);
+  align-self: flex-end;
+}
+
+.chat-message .time {
+  opacity: .6;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.chat-typing {
+  margin-top: 6px;
 }
 
 .peer-self {
@@ -2561,7 +2643,7 @@ audio {
 .peer-identity-row input {
   flex: 1;
   background: rgba(255, 255, 255, .07);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
   font: inherit;
@@ -2576,12 +2658,12 @@ audio {
 .peer-entry {
   display: flex;
   align-items: flex-start;
-  flex-flow:column;
+  flex-flow: column;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
   background: var(--panel2);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 12px;
 }
 
@@ -2602,15 +2684,15 @@ audio {
   color: var(--muted);
   margin-top: 2px;
   display: flex;
-  flex-flow:column;
-  gap:0.5rem;
+  flex-flow: column;
+  gap: 0.5rem;
 }
 
 .peer-entry .peer-shared button {
   background: var(--accent);
-  padding:8px ;
+  padding: 8px;
   border: none;
-  color:black;
+  color: black;
   display: block;
   cursor: pointer;
   font: inherit;
@@ -2634,7 +2716,7 @@ audio {
 
 .peer-actions {
   display: flex;
-  flex-direction: column;
+  flex-flow: row;
   gap: 6px;
 }
 
@@ -2644,6 +2726,7 @@ audio {
   pointer-events: none;
   user-select: none;
 }
+
 .peer-name {
   font-size: 13px;
   font-weight: 600;
@@ -2672,7 +2755,7 @@ audio {
   padding: 12px;
   margin-top: 12px;
   background: var(--panel2);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 12px;
 }
 
@@ -2704,7 +2787,7 @@ audio {
 }
 
 .payment-invoice {
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
   background: rgba(12, 15, 20, 0.6);
@@ -2760,7 +2843,8 @@ audio {
   border-radius: 2px;
   background: var(--text);
   color: #000;
-  font-weight: bold;;
+  font-weight: bold;
+  ;
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
@@ -2770,6 +2854,17 @@ audio {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  position: relative;
+}
+
+#peerListButton.poke-notice::after {
+  content: '🔔';
+  position: absolute;
+  right: -4px;
+  top: -4px;
+  font-size: 16px;
+  line-height: 1;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .25));
 }
 
 .face-viewer {
@@ -2815,7 +2910,7 @@ audio {
 
 .llm-memory-details {
   background: var(--panel2);
-  border: 1px solid rgba(255, 255, 255, .12);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0 12px 12px;
 }
@@ -2974,7 +3069,7 @@ button.ghost.danger {
 }
 
 button.ghost.danger:disabled {
-  border-color: rgba(255, 255, 255, .12);
+  border-color: var(--border);
   color: rgba(255, 255, 255, .3);
 }
 
