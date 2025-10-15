@@ -2615,6 +2615,12 @@ audio {
   flex: 1;
   min-width: 0;
 }
+.peer-meta > .peer-address {
+  font-size: 8px;
+  color: var(--muted);
+  word-break: break-all;
+  margin-top: 4px;
+}
 
 .peer-name {
   font-size: 13px;
