@@ -116,9 +116,9 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
   const stateMap = new Map();
 
   function ensureState(nodeId) {
-    if (stateMap.has(nodeId)) return stateMap.get(nodeId);
+    let state = stateMap.get(nodeId);
     const node = getNode(nodeId);
-    if (!node || !node.el) return null;
+    if (!node || !node.el) return state || null;
     const el = node.el;
     const elements = {
       root: el.querySelector('[data-webscraper-root]'),
@@ -145,36 +145,92 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       frame: el.querySelector('[data-ws-frame]'),
       placeholder: el.querySelector('[data-ws-preview-placeholder]')
     };
-    const cleanup = [];
 
-    const state = {
-      nodeId,
-      elements,
-      cleanup,
-      sessionId: '',
-      manualSid: '',
-      previewUrl: '',
-      autoScreenshot: false,
-      autoCapture: false,
-      captureTimer: null,
-      capturePending: false,
-      frameOutputMode: 'wrapped',
-      lastWheelTs: 0,
-      busyCount: 0,
-      logLines: [],
-      eventGen: 0,
-      eventsCancel: null,
-      inputs: {
-        url: '',
-        selector: '',
-        text: '',
-        amount: 600,
-        sid: '',
-        xy: null
-      },
-      lastFrameMeta: null,
-      dragInfo: null
-    };
+    const keysToCheck = [
+      'root',
+      'connect',
+      'close',
+      'nav',
+      'back',
+      'forward',
+      'click',
+      'type',
+      'scroll',
+      'scrollUp',
+      'scrollDown',
+      'screenshot',
+      'dom',
+      'url',
+      'selector',
+      'text',
+      'amount',
+      'status',
+      'log',
+      'sid',
+      'preview',
+      'frame',
+      'placeholder'
+    ];
+
+    if (!state) {
+      state = {
+        nodeId,
+        elements,
+        cleanup: [],
+        sessionId: '',
+        manualSid: '',
+        previewUrl: '',
+        autoScreenshot: false,
+        autoCapture: false,
+        captureTimer: null,
+        capturePending: false,
+        frameOutputMode: 'wrapped',
+        lastWheelTs: 0,
+        busyCount: 0,
+        logLines: [],
+        eventGen: 0,
+        eventsCancel: null,
+        inputs: {
+          url: '',
+          selector: '',
+          text: '',
+          amount: 600,
+          sid: '',
+          xy: null
+        },
+        lastFrameMeta: null,
+        dragInfo: null,
+        _bound: false
+      };
+      stateMap.set(nodeId, state);
+    } else {
+      const prevElements = state.elements || {};
+      const elementsChanged = keysToCheck.some((key) => prevElements[key] !== elements[key]);
+      if (elementsChanged) {
+        if (Array.isArray(state.cleanup)) {
+          for (const fn of state.cleanup) {
+            try { fn(); } catch (_) { /* ignore */ }
+          }
+        }
+        state.cleanup = [];
+        state._bound = false;
+      }
+    }
+
+    state.elements = elements;
+
+    if (!state._bound && elements.root) {
+      bindStateHandlers(state);
+      state._bound = true;
+    }
+
+    return state;
+  }
+
+  function bindStateHandlers(state) {
+    const nodeId = state.nodeId;
+    const elements = state.elements || {};
+    const cleanup = state.cleanup = Array.isArray(state.cleanup) ? state.cleanup : [];
 
     const bind = (elm, evt, handler) => {
       if (!elm || typeof elm.addEventListener !== 'function') return;
@@ -244,9 +300,10 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     bind(elements.amount, 'change', (e) => {
       state.inputs.amount = asNumber(e.target?.value, 600);
     });
+
     const finishPointer = (event, canceled = false) => {
       const info = state.dragInfo;
-      const img = elements.frame;
+      const img = state.elements?.frame;
       state.dragInfo = null;
       if (img) {
         try { img.releasePointerCapture?.(event.pointerId); } catch (_) { /* ignore */ }
@@ -283,7 +340,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
 
     bind(elements.frame, 'pointerdown', (e) => {
       if (!state.lastFrameMeta) return;
-      const img = elements.frame;
+      const img = state.elements?.frame;
       if (!img) return;
       const rect = img.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
@@ -363,68 +420,6 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       elements.preview.style.touchAction = 'none';
       elements.preview.style.userSelect = 'none';
     }
-
-    stateMap.set(nodeId, state);
-    return state;
-  }
-
-  function dispose(nodeId) {
-    const state = stateMap.get(nodeId);
-    if (!state) return;
-    stopEvents(state);
-    if (state.captureTimer) {
-      clearInterval(state.captureTimer);
-      state.captureTimer = null;
-    }
-    state.capturePending = false;
-    if (state.previewUrl && state.previewUrl.startsWith('blob:')) {
-      try { URL.revokeObjectURL(state.previewUrl); } catch (_) { /* ignore */ }
-    }
-    state.cleanup.forEach((fn) => {
-      try { fn(); } catch (_) { /* ignore */ }
-    });
-    stateMap.delete(nodeId);
-  }
-
-  function config(nodeId) {
-    const entry = NodeStore.ensure(nodeId, 'WebScraper');
-    return entry?.config || {};
-  }
-
-  function updateConfig(nodeId, patch) {
-    NodeStore.update(nodeId, { type: 'WebScraper', ...patch });
-  }
-
-  function setBusy(state, busy) {
-    state.busyCount += busy ? 1 : -1;
-    if (state.busyCount < 0) state.busyCount = 0;
-    const node = getNode(state.nodeId);
-    if (!node || !node.el) return;
-    const className = state.busyCount > 0 ? 'busy' : '';
-    if (className) node.el.dataset.busy = className;
-    else delete node.el.dataset.busy;
-  }
-
-  function setStatus(nodeId, message, tone = 'info') {
-    const state = ensureState(nodeId);
-    if (!state) return;
-    const el = state.elements.status;
-    if (el) {
-      el.textContent = message || '';
-      el.dataset.tone = tone;
-    }
-    Router.sendFrom(nodeId, 'status', { nodeId, status: tone, message, ts: Date.now(), sid: getActiveSid(state) });
-  }
-
-  function appendLog(nodeId, message, level = 'info') {
-    const state = ensureState(nodeId);
-    if (!state) return;
-    const ts = new Date().toISOString();
-    const entry = `[${ts}] ${message}`;
-    state.logLines.push(entry);
-    if (state.logLines.length > MAX_LOG_LINES) state.logLines.shift();
-    if (state.elements.log) state.elements.log.textContent = state.logLines.join('\n');
-    Router.sendFrom(nodeId, 'log', { nodeId, level, message, ts: Date.now() });
   }
 
   function updateSessionLabel(state) {
