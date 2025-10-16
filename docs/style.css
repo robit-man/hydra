@@ -3042,7 +3042,7 @@ audio {
 #settingsForm {
   height: auto;
   overflow: auto;
-  border-radius:0.5rem;
+  border-radius:0.25rem;
 }
 
 #peerListButton.poke-notice::after {
