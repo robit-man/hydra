@@ -2605,6 +2605,7 @@ audio {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: 558px;
 }
 
 .chat-input {
@@ -2653,6 +2654,7 @@ audio {
   height: auto;
   overflow-y: auto;
   border-radius: 0.5rem;
+  max-height: 508px;
 }
 
 .peer-identity {
@@ -2691,7 +2693,7 @@ audio {
   margin-bottom: 8px;
 }
 
-#syncReceiveModal{
+#syncReceiveModal {
   z-index: 5;
 }
 
@@ -2707,7 +2709,7 @@ audio {
 
 #peerModal>.modal-panel {
   height: 800px;
-    max-height: calc(100vh - 7rem);
+  max-height: calc(100vh - 7rem);
 }
 
 #peerSearchInput::placeholder {
