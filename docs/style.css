@@ -2961,26 +2961,87 @@ audio {
 }
 
 @keyframes ring {
-  0%{transform:translateY(0) rotate(0deg)scale(0);}
-  10%{transform:translateY(2px) rotate(0deg)scale(1);}
-  15%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  20%{transform:translateY(2px) rotate(-10deg)scale(1.2);}
-  25%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  30%{transform:translateY(2px) rotate(-10deg)scale(1);}
-  35%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  40%{transform:translateY(2px) rotate(-10deg)scale(1.2);}
-  45%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  50%{transform:translateY(2px) rotate(-10deg)scale(1);}
-  55%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  60%{transform:translateY(2px) rotate(-10deg)scale(1.2);}
-  65%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  70%{transform:translateY(2px) rotate(-10deg)scale(1);}
-  75%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  80%{transform:translateY(2px) rotate(-10deg)scale(1.2);}
-  85%{transform:translateY(2px) rotate(10deg)scale(1.1);}
-  90%{transform:translateY(2px) rotate(0deg)scale(1);}
-  100%{transform:translateY(0) rotate(0deg)scale(0);}
-  
+  0% {
+    transform: translateY(0) rotate(0deg)scale(0);
+  }
+
+  10% {
+    transform: translateY(2px) rotate(0deg)scale(1);
+  }
+
+  15% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  20% {
+    transform: translateY(2px) rotate(-10deg)scale(1.2);
+  }
+
+  25% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  30% {
+    transform: translateY(2px) rotate(-10deg)scale(1);
+  }
+
+  35% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  40% {
+    transform: translateY(2px) rotate(-10deg)scale(1.2);
+  }
+
+  45% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  50% {
+    transform: translateY(2px) rotate(-10deg)scale(1);
+  }
+
+  55% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  60% {
+    transform: translateY(2px) rotate(-10deg)scale(1.2);
+  }
+
+  65% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  70% {
+    transform: translateY(2px) rotate(-10deg)scale(1);
+  }
+
+  75% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  80% {
+    transform: translateY(2px) rotate(-10deg)scale(1.2);
+  }
+
+  85% {
+    transform: translateY(2px) rotate(10deg)scale(1.1);
+  }
+
+  90% {
+    transform: translateY(2px) rotate(0deg)scale(1);
+  }
+
+  100% {
+    transform: translateY(0) rotate(0deg)scale(0);
+  }
+
+}
+
+#settingsForm {
+  height: auto;
+  overflow: auto;
 }
 
 #peerListButton.poke-notice::after {
@@ -2990,7 +3051,7 @@ audio {
   top: -4px;
   font-size: 16px;
   line-height: 1;
-  transform:translateY(0) rotate(0deg)scale(0);
+  transform: translateY(0) rotate(0deg)scale(0);
   filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .25));
   animation: ring 8s ease 1;
 
