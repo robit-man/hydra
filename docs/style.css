@@ -2650,6 +2650,7 @@ audio {
   gap: 8px;
   max-height: 360px;
   overflow-y: auto;
+  border-radius:0.5rem;
 }
 
 .peer-identity {

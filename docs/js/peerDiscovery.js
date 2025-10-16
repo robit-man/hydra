@@ -21,6 +21,13 @@ const normalizeKey = (value) => {
   return text.trim().toLowerCase();
 };
 
+const stripGraphPrefix = (value) => {
+  if (!value) return '';
+  return String(value).replace(/^graph\./i, '');
+};
+
+const normalizePubKey = (value) => normalizeKey(stripGraphPrefix(value));
+
 const sanitizeUsername = (value) => {
   if (typeof value !== 'string') return '';
   let text = value.normalize?.('NFKC') ?? value;
@@ -57,13 +64,16 @@ class Store {
 
   upsert(peer) {
     if (!peer?.nknPub) return null;
-    const prev = this.memo.get(peer.nknPub) || {};
+    const key = normalizePubKey(peer.nknPub);
+    if (!key) return null;
+    const prev = this.memo.get(key) || {};
     const merged = {
       ...prev,
       ...peer,
+      nknPub: key,
       last: typeof peer.last === 'number' ? peer.last : nowSeconds()
     };
-    this.memo.set(merged.nknPub, merged);
+    this.memo.set(key, merged);
     this.flush();
     return merged;
   }
@@ -79,13 +89,13 @@ class Store {
 
   remove(pub) {
     if (!pub || !this.memo.size) return;
-    const targetKey = normalizeKey(pub);
+    const targetKey = normalizePubKey(pub);
     if (!targetKey) return;
     const toDelete = [];
     this.memo.forEach((value, key) => {
-      const keyNorm = normalizeKey(key);
-      const pubNorm = normalizeKey(value?.nknPub);
-      const addrNorm = normalizeKey(value?.addr);
+      const keyNorm = normalizePubKey(key);
+      const pubNorm = normalizePubKey(value?.nknPub);
+      const addrNorm = normalizePubKey(value?.addr);
       if (keyNorm === targetKey || pubNorm === targetKey || addrNorm === targetKey) {
         toDelete.push(key);
       }
@@ -347,6 +357,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     discovery: null,
     connecting: null,
     meAddr: '',
+    mePub: '',
     username: '',
     room: derivedRoom,
     peers: new Map(),
@@ -383,11 +394,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
   const FAVORITES_KEY = `hydra.favorites.${state.room}`;
   const historyKey = (peerKey) => {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     return normalized ? `hydra.chat.history.${state.room}.${normalized}` : '';
   };
   const sessionKey = (peerKey) => {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     return normalized ? `hydra.chat.session.${state.room}.${normalized}` : '';
   };
 
@@ -397,7 +408,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       const raw = localStorage.getItem(FAVORITES_KEY);
       if (!raw) return new Set();
       const list = JSON.parse(raw);
-      return new Set(Array.isArray(list) ? list.map((value) => normalizeKey(value)).filter(Boolean) : []);
+      return new Set(Array.isArray(list) ? list.map((value) => normalizePubKey(value)).filter(Boolean) : []);
     } catch (_) {
       return new Set();
     }
@@ -487,7 +498,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function ensurePeerOrder(key) {
-    const normalized = normalizeKey(key);
+    const normalized = normalizePubKey(key);
     if (!normalized) return;
     if (state.peerOrder.has(normalized)) return;
     state.peerSeq += 1;
@@ -507,6 +518,159 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       return null;
     }
   }
+
+  // --- ADD (top-level inside createPeerDiscovery, not nested) ---
+function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const type = payload.type;
+  if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
+
+  const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
+  const senderKey = normalizePubKey(payload.pub || payload.from || senderAddr);
+  if (!senderKey) return false;
+  try {
+    console.debug('[peers] recv', { type, from: senderAddr, via: transport, normalizedKey: senderKey });
+  } catch (_) {
+    // ignore logging issues
+  }
+
+  const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
+  const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
+
+  const upsertResult = upsertPeer(
+    {
+      nknPub: senderKey,
+      addr: senderAddr || senderKey,
+      originalPub: payload.pub || senderAddr || senderKey,
+      meta,
+      last: timestamp
+    },
+    { online: true, probing: false }
+  );
+  const peer = upsertResult.entry;
+  if (peer) {
+    peer.online = true;
+    peer.probing = false;
+    peer.last = timestamp;
+    peer.lastSeenAt = timestamp * 1000;
+    state.peers.set(senderKey, peer);
+  }
+
+  switch (type) {
+    case 'peer-ping': {
+      state.pendingPings.delete(senderKey);
+      sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-pong': {
+      state.pendingPings.delete(senderKey);
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-meta': {
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-poke': {
+      if (els.button) {
+        els.button.classList.add('poke-notice');
+        clearTimeout(state.pokeNoticeTimer);
+        state.pokeNoticeTimer = setTimeout(() => {
+          els.button?.classList?.remove('poke-notice');
+        }, 8000);
+      }
+      if (peer) {
+        peer.online = true;
+        state.peers.set(senderKey, peer);
+        refreshStatus();
+      }
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      setBadge?.(`Poke from ${label}`);
+      scheduleRender();
+      return true;
+    }
+    case 'chat-request': {
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
+      setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
+      setActiveChat(senderKey);
+      if (isMobileView()) setActivePane('chat');
+      setBadge?.(`Chat request from ${label}`);
+      showInlineChatDecision(senderKey);
+      renderChat();
+      scheduleRender();
+      return true;
+    }
+    case 'chat-response': {
+      const accepted = !!payload.accepted;
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
+      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+      setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
+      clearInlineChatDecision();
+      if (state.chat.activePeer === senderKey) renderChat();
+      scheduleRender();
+      return true;
+    }
+    case 'chat-typing': {
+      if (payload.isTyping) {
+        state.chat.typingPeers.set(senderKey, Date.now());
+        clearTimeout(state.chat.typingTimers.get(senderKey));
+        if (state.chat.activePeer === senderKey && els.chatTyping) {
+          els.chatTyping.classList.remove('hidden');
+        }
+        const timeout = setTimeout(() => {
+          state.chat.typingPeers.delete(senderKey);
+          if (state.chat.activePeer === senderKey && els.chatTyping) {
+            els.chatTyping.classList.add('hidden');
+          }
+          state.chat.typingTimers.delete(senderKey);
+        }, 1500);
+        state.chat.typingTimers.set(senderKey, timeout);
+      } else {
+        state.chat.typingPeers.delete(senderKey);
+        const existingTimer = state.chat.typingTimers.get(senderKey);
+        if (existingTimer) clearTimeout(existingTimer);
+        state.chat.typingTimers.delete(senderKey);
+        if (state.chat.activePeer === senderKey && els.chatTyping) {
+          els.chatTyping.classList.add('hidden');
+        }
+      }
+      return true;
+    }
+    case 'chat-message': {
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      appendHistory(senderKey, {
+        id:
+          typeof payload.id === 'string'
+            ? payload.id
+            : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
+        dir: 'in',
+        text: typeof payload.text === 'string' ? payload.text : '',
+        ts: payload.ts || nowSeconds()
+      });
+      state.chat.typingPeers.delete(senderKey);
+      const timer = state.chat.typingTimers.get(senderKey);
+      if (timer) clearTimeout(timer);
+      state.chat.typingTimers.delete(senderKey);
+      setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
+      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+      if (state.chat.activePeer === senderKey) {
+        renderChat();
+      } else {
+        setBadge?.(`New message from ${label}`);
+      }
+      scheduleRender();
+      return true;
+    }
+    default:
+      return false;
+  }
+}
 
   function attachNknMessageHandler(client) {
     if (!client) return;
@@ -569,10 +733,17 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
   }
 
-  async function sendPeerPayload(targetAddr, payload, { fallback = false, attachMeta = false, timeout = 20000 } = {}) {
+  async function sendPeerPayload(targetAddr, payload, { fallback = true, attachMeta = false, timeout = 20000 } = {}) {
     const destination = normalizeAddressForSend(targetAddr);
     if (!destination) return false;
     const message = { ...(payload || {}) };
+    if (!state.discovery && !state.connecting) {
+      try {
+        await ensureDiscovery();
+      } catch (_) {
+        // discovery may still be unavailable; proceed with best effort
+      }
+    }
     if (!message.ts) message.ts = nowSeconds();
     let fromAddr = state.meAddr || Net.nkn?.addr || '';
     if (!fromAddr) {
@@ -585,7 +756,20 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       } catch (err) {
         if (fallback && state.discovery) {
           try {
-            state.discovery.dm(destination, message);
+            const natsTarget = normalizePubKey(destination);
+            if (!natsTarget) throw new Error('invalid nats target');
+            message.transport = 'nats';
+            state.discovery.dm(natsTarget, message);
+            try {
+              console.debug('[peers] send', {
+                dest: destination,
+                via: 'nats',
+                normalizedNatsKey: natsTarget,
+                payload: message.type
+              });
+            } catch (_) {
+              // ignore console issues
+            }
             return true;
           } catch (_) {
             // ignore fallback failure
@@ -604,11 +788,34 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     try {
       const client = await waitForNknClient(timeout);
       await client.send(destination, JSON.stringify(message), { noReply: true, maxHoldingSeconds: 120 });
+      try {
+        console.debug('[peers] send', {
+          dest: destination,
+          via: 'nkn',
+          normalizedNatsKey: normalizePubKey(destination),
+          payload: message.type
+        });
+      } catch (_) {
+        // ignore console issues
+      }
       return true;
     } catch (err) {
       if (fallback && state.discovery) {
         try {
-          state.discovery.dm(destination, message);
+          const natsTarget = normalizePubKey(destination);
+          if (!natsTarget) throw new Error('invalid nats target');
+          message.transport = 'nats';
+          state.discovery.dm(natsTarget, message);
+          try {
+            console.debug('[peers] send', {
+              dest: destination,
+              via: 'nats',
+              normalizedNatsKey: natsTarget,
+              payload: message.type
+            });
+          } catch (_) {
+            // ignore console issues
+          }
           return true;
         } catch (_) {
           // ignore fallback failure
@@ -638,6 +845,157 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     'chat-typing',
     'chat-message'
   ]);
+
+  // === HOISTED: shared peer-message dispatcher (used by both NKN and Discovery/NATS) ===
+function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
+  if (!payload || typeof payload !== 'object') return false;
+  const type = payload.type;
+  if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
+
+  const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
+  const senderKey = normalizePubKey(payload.pub || payload.from || senderAddr);
+  if (!senderKey) return false;
+  try {
+    console.debug('[peers] recv', { type, from: senderAddr, via: transport, normalizedKey: senderKey });
+  } catch (_) {}
+
+  const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
+  const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
+
+  const upsertResult = upsertPeer(
+    {
+      nknPub: senderKey,
+      addr: senderAddr || senderKey,
+      originalPub: payload.pub || senderAddr || senderKey,
+      meta,
+      last: timestamp
+    },
+    { online: true, probing: false }
+  );
+  const peer = upsertResult.entry;
+  if (peer) {
+    peer.online = true;
+    peer.probing = false;
+    peer.last = timestamp;
+    peer.lastSeenAt = timestamp * 1000;
+    state.peers.set(senderKey, peer);
+  }
+
+  switch (type) {
+    case 'peer-ping': {
+      state.pendingPings.delete(senderKey);
+      sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-pong': {
+      state.pendingPings.delete(senderKey);
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-meta': {
+      refreshStatus();
+      scheduleRender();
+      return true;
+    }
+    case 'peer-poke': {
+      if (els.button) {
+        els.button.classList.add('poke-notice');
+        clearTimeout(state.pokeNoticeTimer);
+        state.pokeNoticeTimer = setTimeout(() => {
+          els.button?.classList?.remove('poke-notice');
+        }, 8000);
+      }
+      if (peer) {
+        peer.online = true;
+        state.peers.set(senderKey, peer);
+        refreshStatus();
+      }
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      setBadge?.(`Poke from ${label}`);
+      scheduleRender();
+      return true;
+    }
+    case 'chat-request': {
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
+      setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
+      setActiveChat(senderKey);
+      if (isMobileView()) setActivePane('chat');
+      setBadge?.(`Chat request from ${label}`);
+      showInlineChatDecision(senderKey);
+      renderChat();
+      scheduleRender();
+      return true;
+    }
+    case 'chat-response': {
+      const accepted = !!payload.accepted;
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
+      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+      setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
+      clearInlineChatDecision();
+      if (state.chat.activePeer === senderKey) renderChat();
+      scheduleRender();
+      return true;
+    }
+    case 'chat-typing': {
+      if (payload.isTyping) {
+        state.chat.typingPeers.set(senderKey, Date.now());
+        clearTimeout(state.chat.typingTimers.get(senderKey));
+        if (state.chat.activePeer === senderKey && els.chatTyping) {
+          els.chatTyping.classList.remove('hidden');
+        }
+        const timeout = setTimeout(() => {
+          state.chat.typingPeers.delete(senderKey);
+          if (state.chat.activePeer === senderKey && els.chatTyping) {
+            els.chatTyping.classList.add('hidden');
+          }
+          state.chat.typingTimers.delete(senderKey);
+        }, 1500);
+        state.chat.typingTimers.set(senderKey, timeout);
+      } else {
+        state.chat.typingPeers.delete(senderKey);
+        const existingTimer = state.chat.typingTimers.get(senderKey);
+        if (existingTimer) clearTimeout(existingTimer);
+        state.chat.typingTimers.delete(senderKey);
+        if (state.chat.activePeer === senderKey && els.chatTyping) {
+          els.chatTyping.classList.add('hidden');
+        }
+      }
+      return true;
+    }
+    case 'chat-message': {
+      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+      appendHistory(senderKey, {
+        id: typeof payload.id === 'string'
+          ? payload.id
+          : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
+        dir: 'in',
+        text: typeof payload.text === 'string' ? payload.text : '',
+        ts: payload.ts || nowSeconds()
+      });
+      state.chat.typingPeers.delete(senderKey);
+      const timer = state.chat.typingTimers.get(senderKey);
+      if (timer) clearTimeout(timer);
+      state.chat.typingTimers.delete(senderKey);
+      setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
+      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+      if (state.chat.activePeer === senderKey) {
+        renderChat();
+      } else {
+        setBadge?.(`New message from ${label}`);
+      }
+      scheduleRender();
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 
   function getPresenceMeta() {
     return {
@@ -781,23 +1139,23 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function pruneSelfEntries() {
-    const selfKey = normalizeKey(state.meAddr);
+    const selfKey = normalizePubKey(state.mePub || state.meAddr);
     if (!selfKey) return false;
     const toDelete = [];
     state.peers.forEach((peer, key) => {
-      const keyNorm = normalizeKey(key);
-      const peerKey = normalizeKey(peer?.nknPub);
-      const addrKey = normalizeKey(peer?.addr);
-      const originalKey = normalizeKey(peer?.originalPub);
+      const keyNorm = normalizePubKey(key);
+      const peerKey = normalizePubKey(peer?.nknPub);
+      const addrKey = normalizePubKey(peer?.addr);
+      const originalKey = normalizePubKey(peer?.originalPub);
       if (keyNorm === selfKey || peerKey === selfKey || addrKey === selfKey || originalKey === selfKey) {
         toDelete.push(key);
       }
     });
-    if (state.store?.remove) state.store.remove(state.meAddr);
+    if (state.store?.remove) state.store.remove(state.mePub || state.meAddr);
     if (!toDelete.length) return false;
     toDelete.forEach((key) => {
       state.peers.delete(key);
-      state.peerOrder.delete(normalizeKey(key));
+      state.peerOrder.delete(normalizePubKey(key));
     });
     return true;
   }
@@ -806,6 +1164,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!state.discovery) return;
     const meta = getPresenceMeta();
     state.discovery.me = state.discovery.me || {};
+    state.discovery.me.nknPub = normalizePubKey(state.mePub || state.meAddr);
+    state.discovery.me.addr = state.meAddr || '';
     state.discovery.me.meta = meta;
   }
 
@@ -824,7 +1184,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       if (state.meAddr) {
         try {
           state.store.upsert({
-            nknPub: state.meAddr,
+            nknPub: state.mePub || normalizePubKey(state.meAddr),
             addr: state.meAddr,
             meta: { username: sanitized },
             last: nowSeconds()
@@ -834,7 +1194,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         }
         const removedSelf = pruneSelfEntries();
         if (removedSelf) updateBadge();
-        const selfKey = normalizeKey(state.meAddr);
+        const selfKey = normalizePubKey(state.mePub || state.meAddr);
         state.peers.forEach((peer, key) => {
           if (!Array.isArray(peer.sharedSources) || !peer.sharedSources.length) return;
           let changed = false;
@@ -888,7 +1248,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   function normalizePeerEntry(entry) {
     if (!entry || typeof entry !== 'object') return null;
     const rawPub = entry.nknPub || entry.addr || entry.pub;
-    const nknPub = normalizeKey(rawPub);
+    const nknPub = normalizePubKey(rawPub);
     if (!nknPub) return null;
     const addrValue = entry.addr || entry.address || rawPub || '';
     const addrTrimmed = typeof addrValue === 'string' ? addrValue.trim() : String(addrValue || '').trim();
@@ -905,13 +1265,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       let sourceKey = '';
       if (typeof value === 'object') {
         label = value.label || value.username || value.addr || value.from || value.key || value.id || '';
-        sourceKey = normalizeKey(value.key || value.addr || value.from || label);
+        sourceKey = normalizePubKey(value.key || value.addr || value.from || label);
       } else {
         label = String(value || '').trim();
-        sourceKey = normalizeKey(label);
+        sourceKey = normalizePubKey(label);
       }
       label = label ? label.trim() : '';
-      if (!sourceKey) sourceKey = normalizeKey(label);
+      if (!sourceKey) sourceKey = normalizePubKey(label);
       if (!sourceKey || sourceKey === nknPub) return;
       sharedSources.push({ key: sourceKey, label: label || sourceKey });
     });
@@ -927,16 +1287,16 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
   function shareDirectory(list, targetPub) {
     if (!state.discovery || !Array.isArray(list) || !list.length) return;
-    if (!targetPub) return;
-    const targetKey = normalizeKey(targetPub);
-    if (targetKey === normalizeKey(state.meAddr)) return;
+    const targetKey = normalizePubKey(targetPub);
+    if (!targetKey) return;
+    if (targetKey === normalizePubKey(state.mePub || state.meAddr)) return;
     const peers = list
       .map(normalizePeerEntry)
       .filter(
         (entry) =>
           entry &&
           entry.nknPub !== targetKey &&
-          (entry.originalPub ? normalizeKey(entry.originalPub) !== targetKey : true)
+          (entry.originalPub ? normalizePubKey(entry.originalPub) !== targetKey : true)
       );
     if (!peers.length) return;
     const payload = {
@@ -946,7 +1306,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       peers
     };
     try {
-      state.discovery.dm(targetPub, payload);
+      state.discovery.dm(targetKey, payload);
     } catch (err) {
       log?.(`[peers] share directory failed: ${err?.message || err}`);
     }
@@ -973,7 +1333,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     });
     if (state.meAddr) {
       entries.push({
-        nknPub: state.meAddr,
+        nknPub: state.mePub || state.meAddr,
         addr: state.meAddr,
         meta: { self: true, username: sanitizeUsername(state.username || '') },
         last: nowSeconds(),
@@ -1010,15 +1370,16 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     if (!entries.length) return;
     const hash = hashDirectory(entries);
     const targets = targetPub
-      ? [normalizeKey(targetPub)]
+      ? [normalizePubKey(targetPub)]
       : Array.from(state.peers.keys());
     targets.forEach((key) => {
-      if (!key || key === normalizeKey(state.meAddr)) return;
+      if (!key || key === normalizePubKey(state.mePub || state.meAddr)) return;
       const peer = state.peers.get(key);
       const address = peer?.addr || peer?.originalPub || key;
-      if (!address) return;
+      const normalizedTarget = normalizePubKey(address) || normalizePubKey(key);
+      if (!normalizedTarget) return;
       if (!targetPub && hash && state.sharedHashes.get(key) === hash) return;
-      shareDirectory(entries, address);
+      shareDirectory(entries, normalizedTarget);
       if (hash) state.sharedHashes.set(key, hash);
     });
   }
@@ -1032,14 +1393,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function upsertPeer(peer, { online, probing, sharedFrom, sharedSources } = {}) {
-    const key = normalizeKey(peer?.nknPub || peer?.addr || '');
+    const key = normalizePubKey(peer?.nknPub || peer?.addr || '');
     if (!key) return { added: false, entry: null };
-    const selfKey = normalizeKey(state.meAddr);
-    const peerAddrKey = normalizeKey(peer?.addr);
-    const originalKey = normalizeKey(peer?.originalPub);
+    const selfKey = normalizePubKey(state.mePub || state.meAddr);
+    const peerAddrKey = normalizePubKey(peer?.addr);
+    const originalKey = normalizePubKey(peer?.originalPub);
     if (selfKey && (key === selfKey || peerAddrKey === selfKey || originalKey === selfKey)) {
       state.peers.delete(key);
-      if (state.store?.remove) state.store.remove(state.meAddr);
+      if (state.store?.remove) state.store.remove(state.mePub || state.meAddr);
       return { added: false, entry: null };
     }
     const existing = state.peers.get(key) || {};
@@ -1082,13 +1443,13 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       let sourceKey = '';
       if (typeof value === 'object') {
         label = value.label || value.username || value.addr || value.from || value.key || value.id || '';
-        sourceKey = normalizeKey(value.key || value.addr || value.from || label);
+        sourceKey = normalizePubKey(value.key || value.addr || value.from || label);
       } else {
         label = String(value || '').trim();
-        sourceKey = normalizeKey(label);
+        sourceKey = normalizePubKey(label);
       }
       label = label ? label.trim() : '';
-      if (!sourceKey) sourceKey = normalizeKey(label);
+      if (!sourceKey) sourceKey = normalizePubKey(label);
       if (!sourceKey || sourceKey === merged.nknPub) return;
       if (!label) label = sourceKey;
       const known = state.peers.get(sourceKey);
@@ -1113,7 +1474,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
     state.peers.set(key, merged);
     try {
       state.store.upsert({
-        nknPub: merged.originalPub || merged.nknPub,
+        nknPub: merged.nknPub,
         addr: merged.addr,
         meta: merged.meta || {},
         last: merged.last || nowSeconds(),
@@ -1144,7 +1505,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function pingPeer(pub) {
-    const key = normalizeKey(pub);
+    const key = normalizePubKey(pub);
     if (!key) return;
     if (state.pendingPings.has(key)) return;
     const peer = state.peers.get(key);
@@ -1210,12 +1571,12 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
 
   function normalizePeerKey(peer) {
     if (!peer) return '';
-    if (typeof peer === 'string') return normalizeKey(peer);
-    return normalizeKey(peer.addr || peer.originalPub || peer.nknPub);
+    if (typeof peer === 'string') return normalizePubKey(peer);
+    return normalizePubKey(peer.addr || peer.originalPub || peer.nknPub);
   }
 
   function peerByKey(key) {
-    const normalized = normalizeKey(key);
+    const normalized = normalizePubKey(key);
     if (!normalized) return null;
     return state.peers.get(normalized) || null;
   }
@@ -1231,7 +1592,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function ensureChatSession(peerKey) {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     if (!normalized) return null;
     const existing = state.chat.sessions.get(normalized);
     if (existing) return existing;
@@ -1242,7 +1603,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function setSession(peerKey, nextSession) {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     if (!normalized) return null;
     const base = ensureChatSession(normalized) || { status: 'idle' };
     const allowed = ['idle', 'pending', 'accepted', 'declined'];
@@ -1257,14 +1618,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function setActiveChat(key) {
-    const normalized = normalizeKey(key);
+    const normalized = normalizePubKey(key);
     state.chat.activePeer = normalized || null;
     if (normalized) ensureChatSession(normalized);
     renderChat();
   }
 
   function appendHistory(peerKey, message) {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     if (!normalized || !message) return [];
     const history = loadHistory(normalized);
     if (message.id && history.some((item) => item.id === message.id)) return history;
@@ -1309,7 +1670,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   async function respondToChat(peerKey, accept) {
-    const normalized = normalizeKey(peerKey);
+    const normalized = normalizePubKey(peerKey);
     if (!normalized) return;
     if (state.chat.promptMessage?.key === normalized) state.chat.promptMessage = null;
     const addr = targetAddress(normalized);
@@ -1469,7 +1830,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   function scrollToPeer(peerKey) {
-    const key = normalizeKey(peerKey);
+    const key = normalizePubKey(peerKey);
     if (!key || !els.list) return;
     const selectorKey = typeof CSS !== 'undefined' && CSS.escape
       ? CSS.escape(key)
@@ -1512,8 +1873,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       const onlineA = a.online ? 1 : 0;
       const onlineB = b.online ? 1 : 0;
       if (onlineA !== onlineB) return onlineB - onlineA;
-      const orderA = state.peerOrder.get(normalizeKey(a.nknPub || a.addr)) || Number.MAX_SAFE_INTEGER;
-      const orderB = state.peerOrder.get(normalizeKey(b.nknPub || b.addr)) || Number.MAX_SAFE_INTEGER;
+      const orderA = state.peerOrder.get(normalizePubKey(a.nknPub || a.addr)) || Number.MAX_SAFE_INTEGER;
+      const orderB = state.peerOrder.get(normalizePubKey(b.nknPub || b.addr)) || Number.MAX_SAFE_INTEGER;
       if (orderA !== orderB) return orderA - orderB;
       const lastA = a.last || now;
       const lastB = b.last || now;
@@ -1587,7 +1948,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         sharedRow.className = 'peer-shared';
         sharedRow.append('Shared from ');
         const first = peer.sharedSources[0];
-        const targetKey = first?.key || normalizeKey(first?.label) || '';
+        const targetKey = first?.key || normalizePubKey(first?.label) || '';
         if (!targetKey) {
           return;
         }
@@ -1685,7 +2046,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         },
         { online: true, probing: false }
       );
-      if (peer?.nknPub) state.pendingPings.delete(normalizeKey(peer.nknPub));
+      if (peer?.nknPub) state.pendingPings.delete(normalizePubKey(peer.nknPub));
       clearStatusOverride();
       scheduleRender();
       if (result.added) {
@@ -1703,159 +2064,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       }
     });
 
-  function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
-    if (!payload || typeof payload !== 'object') return false;
-    const type = payload.type;
-    if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
 
-    const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
-    const senderKey = normalizeKey(payload.pub || payload.from || senderAddr);
-    if (!senderKey) return false;
-
-    const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
-    const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
-
-    const upsertResult = upsertPeer(
-      {
-        nknPub: senderKey,
-        addr: senderAddr || senderKey,
-        originalPub: payload.pub || senderAddr || senderKey,
-        meta,
-        last: timestamp
-      },
-      { online: true, probing: false }
-    );
-    const peer = upsertResult.entry;
-    if (peer) {
-      peer.online = true;
-      peer.probing = false;
-      peer.last = timestamp;
-      peer.lastSeenAt = timestamp * 1000;
-      state.peers.set(senderKey, peer);
-    }
-
-    switch (type) {
-      case 'peer-ping': {
-        state.pendingPings.delete(senderKey);
-        sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
-        refreshStatus();
-        scheduleRender();
-        return true;
-      }
-      case 'peer-pong': {
-        state.pendingPings.delete(senderKey);
-        refreshStatus();
-        scheduleRender();
-        return true;
-      }
-      case 'peer-meta': {
-        refreshStatus();
-        scheduleRender();
-        return true;
-      }
-      case 'peer-poke': {
-        if (els.button) {
-          els.button.classList.add('poke-notice');
-          clearTimeout(state.pokeNoticeTimer);
-          state.pokeNoticeTimer = setTimeout(() => {
-            els.button?.classList?.remove('poke-notice');
-          }, 8000);
-        }
-        if (peer) {
-          peer.online = true;
-          state.peers.set(senderKey, peer);
-          refreshStatus();
-        }
-        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-        setBadge?.(`Poke from ${label}`);
-        scheduleRender();
-        return true;
-      }
-      case 'chat-request': {
-        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-        state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
-        setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
-        setActiveChat(senderKey);
-        if (isMobileView()) setActivePane('chat');
-        setBadge?.(`Chat request from ${label}`);
-        showInlineChatDecision(senderKey);
-        renderChat();
-        scheduleRender();
-        return true;
-      }
-      case 'chat-response': {
-        const accepted = !!payload.accepted;
-        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-        setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
-        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-        setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
-        clearInlineChatDecision();
-        if (state.chat.activePeer === senderKey) renderChat();
-        scheduleRender();
-        return true;
-      }
-      case 'chat-typing': {
-        if (payload.isTyping) {
-          state.chat.typingPeers.set(senderKey, Date.now());
-          clearTimeout(state.chat.typingTimers.get(senderKey));
-          if (state.chat.activePeer === senderKey && els.chatTyping) {
-            els.chatTyping.classList.remove('hidden');
-          }
-          const timeout = setTimeout(() => {
-            state.chat.typingPeers.delete(senderKey);
-            if (state.chat.activePeer === senderKey && els.chatTyping) {
-              els.chatTyping.classList.add('hidden');
-            }
-            state.chat.typingTimers.delete(senderKey);
-          }, 1500);
-          state.chat.typingTimers.set(senderKey, timeout);
-        } else {
-          state.chat.typingPeers.delete(senderKey);
-          const existingTimer = state.chat.typingTimers.get(senderKey);
-          if (existingTimer) clearTimeout(existingTimer);
-          state.chat.typingTimers.delete(senderKey);
-          if (state.chat.activePeer === senderKey && els.chatTyping) {
-            els.chatTyping.classList.add('hidden');
-          }
-        }
-        return true;
-      }
-      case 'chat-message': {
-        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-        appendHistory(senderKey, {
-          id:
-            typeof payload.id === 'string'
-              ? payload.id
-              : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
-          dir: 'in',
-          text: typeof payload.text === 'string' ? payload.text : '',
-          ts: payload.ts || nowSeconds()
-        });
-        state.chat.typingPeers.delete(senderKey);
-        const timer = state.chat.typingTimers.get(senderKey);
-        if (timer) clearTimeout(timer);
-        state.chat.typingTimers.delete(senderKey);
-        setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
-        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-        if (state.chat.activePeer === senderKey) {
-          renderChat();
-        } else {
-          setBadge?.(`New message from ${label}`);
-        }
-        scheduleRender();
-        return true;
-      }
-      default:
-        return false;
-    }
-  }
     client.on('dm', (payload) => {
       if (!payload || typeof payload !== 'object') return;
       if (payload.type === 'peer-directory') {
-        const sender = normalizeKey(payload.pub || payload.from);
+        const sender = normalizePubKey(payload.pub || payload.from);
         if (sender) {
           state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
-          if (sender !== normalizeKey(state.meAddr)) {
+          if (sender !== normalizePubKey(state.mePub || state.meAddr)) {
             upsertPeer(
               {
                 nknPub: sender,
@@ -1872,7 +2088,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
         list.forEach((entry) => {
           const normalized = normalizePeerEntry(entry);
           if (!normalized) return;
-          if (normalized.nknPub === normalizeKey(state.meAddr)) return;
+          if (normalized.nknPub === normalizePubKey(state.mePub || state.meAddr)) return;
           const sourceLabel =
             sanitizeUsername(payload.meta?.username || state.peers.get(sender)?.meta?.username || '') ||
             payload.from ||
@@ -1927,17 +2143,26 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   }
 
   async function ensureDiscovery() {
-    if (state.discovery) return state.discovery;
-    if (state.connecting) return state.connecting;
+    const ensureNknFirst = waitForNknClient().catch(() => null);
+    if (state.discovery) {
+      await ensureNknFirst;
+      return state.discovery;
+    }
+    if (state.connecting) {
+      await ensureNknFirst;
+      return state.connecting;
+    }
     const promise = (async () => {
       setStatus('Waiting for NKN...', true);
       const addr = await waitForNknAddress();
+      const pub = normalizePubKey(addr);
       state.meAddr = addr;
+      state.mePub = pub;
       updateSelf();
       if (state.username) {
         try {
           state.store.upsert({
-            nknPub: addr,
+            nknPub: pub,
             addr,
             meta: { username: state.username },
             last: nowSeconds()
@@ -1957,7 +2182,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       const client = new DiscoveryClient({
         servers: DEFAULT_SERVERS,
         room: state.room,
-        me: { nknPub: addr, addr, meta },
+        me: { nknPub: pub, addr, meta },
         heartbeatSec: DEFAULT_HEARTBEAT_SEC,
         store: sharedStore
       });
@@ -1968,6 +2193,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       await client.startHeartbeat(meta);
 
       state.discovery = client;
+      await ensureNknFirst;
+      await waitForNknClient().catch(() => null);
       updateDiscoveryMeta();
       rememberPeersFromDiscovery();
       pingAllPeers();
