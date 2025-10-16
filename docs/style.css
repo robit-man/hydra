@@ -2707,7 +2707,7 @@ audio {
 
 #peerModal>.modal-panel {
   height: 800px;
-    max-height: max-content;
+    max-height: calc(100vh - 7rem);
 }
 
 #peerSearchInput::placeholder {
