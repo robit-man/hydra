@@ -3,7 +3,7 @@
 :root {
   --bg: #000000;
   --bg-tp: #00000033;
-  --panel: rgba(255, 255, 255, .07);
+  --panel: #000000aa;
   --panel2: rgba(255, 255, 255, .05);
   --border: rgba(255, 255, 255, .12);
   --accent: #5ee3a6;
