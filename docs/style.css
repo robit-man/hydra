@@ -2484,7 +2484,8 @@ button.danger {
   border-radius: 16px;
   padding: 14px;
   max-height: calc(100vh - 10rem);
-  overflow: auto
+  display: flex;
+  flex-flow: column;
 }
 
 .modal-head {
@@ -2531,6 +2532,7 @@ audio {
   display: flex;
   flex-direction: row;
   gap: 16px;
+  overflow: auto;
 }
 
 .peer-left {
@@ -2597,7 +2599,7 @@ audio {
   flex: 1;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 4px;
   padding: 8px;
   background: var(--panel2);
   display: flex;
@@ -2648,9 +2650,9 @@ audio {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 360px;
+  height: auto;
   overflow-y: auto;
-  border-radius:0.5rem;
+  border-radius: 0.5rem;
 }
 
 .peer-identity {
@@ -2689,6 +2691,10 @@ audio {
   margin-bottom: 8px;
 }
 
+#syncReceiveModal{
+  z-index: 5;
+}
+
 #peerSearchInput {
   flex: 1;
   background: rgba(255, 255, 255, .07);
@@ -2697,6 +2703,11 @@ audio {
   color: var(--text);
   font: inherit;
   padding: 6px 8px;
+}
+
+#peerModal>.modal-panel {
+  height: 800px;
+    max-height: max-content;
 }
 
 #peerSearchInput::placeholder {
@@ -2715,14 +2726,16 @@ audio {
 @media (max-width: 768px) {
   .peer-modal-body.two-col {
     flex-direction: column;
+    height: 600px;
   }
 
   .peer-tabs {
-    display: flex;
+    display: flex !important;
   }
 
   .peer-modal-body.two-col .peer-left,
   .peer-modal-body.two-col .peer-right {
+    height: 500px;
     min-width: 0;
   }
 
@@ -2752,7 +2765,7 @@ audio {
   padding: 10px 12px;
   background: var(--panel2);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .peer-entry.offline {
@@ -2777,12 +2790,13 @@ audio {
 }
 
 .peer-entry .peer-shared button {
-  background: var(--accent);
-  padding: 8px;
+  background: var(--bg-tp);
+  padding: 4px;
   border: none;
-  color: black;
+  color: var(--muted);
   display: block;
   cursor: pointer;
+  border-radius: 4px;
   font: inherit;
   font-weight: 800;
   text-decoration: unset;
