@@ -2623,8 +2623,7 @@ audio {
 }
 
 .chat-message.in {
-  background: var(--mute);
-  color: var(--bg-tp);
+  background: var(--bg-tp);
   align-self: flex-start;
 }
 
