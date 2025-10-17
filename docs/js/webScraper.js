@@ -4,9 +4,12 @@ const TRUE_LIKE = new Set(['1', 'true', 'yes', 'on']);
 const ACTION_ALIASES = {
   open: 'open',
   connect: 'open',
+  launch: 'open',
   start: 'open',
   close: 'close',
   stop: 'close',
+  disconnect: 'close',
+  quit: 'close',
   nav: 'nav',
   navigate: 'nav',
   go: 'nav',
@@ -18,6 +21,7 @@ const ACTION_ALIASES = {
   tap: 'click',
   type: 'type',
   input: 'type',
+  text: 'type',
   scroll: 'scroll',
   scroll_up: 'scroll_up',
   scrollup: 'scroll_up',
@@ -34,10 +38,12 @@ const ACTION_ALIASES = {
   screenshot: 'screenshot',
   shot: 'screenshot',
   capture: 'screenshot',
+  snapshot: 'screenshot',
   dom: 'dom',
   html: 'dom',
   events: 'events',
   subscribe: 'events',
+  listen: 'events',
   enter: 'enter',
   submit: 'enter',
   return: 'enter'
@@ -110,7 +116,12 @@ function asAction(payload) {
   if (payload === null || payload === undefined) return '';
   if (typeof payload === 'string') return ACTION_ALIASES[payload.trim().toLowerCase()] || payload.trim().toLowerCase();
   if (typeof payload === 'object') {
-    const key = payload.action || payload.type || payload.kind || payload.mode;
+    // Prefer explicit 'action', and avoid treating Text Input's message shape as an action
+    if (payload.action) return asAction(String(payload.action));
+    if (payload.command) return asAction(String(payload.command));
+    if (payload.intent) return asAction(String(payload.intent));
+    if (payload.type === 'text' && 'text' in payload) return 'type';
+    const key = payload.type || payload.kind || payload.mode;
     if (key) return asAction(String(key));
   }
   return '';
@@ -1787,7 +1798,15 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         closeSession(nodeId);
         break;
       case 'nav':
-        performNavigate(nodeId, payload?.url || payload?.target);
+        {
+          let target;
+          if (payload && typeof payload === 'object') {
+            target = payload.url ?? payload.target ?? payload.href ?? payload.text ?? payload.value;
+          } else if (typeof payload === 'string') {
+            target = payload;
+          }
+          performNavigate(nodeId, target != null ? asString(target) : undefined);
+        }
         break;
       case 'back':
         performBack(nodeId);
@@ -1796,22 +1815,62 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         performForward(nodeId);
         break;
       case 'click':
-        performClick(nodeId, payload?.selector);
+        {
+          let selector;
+          if (payload && typeof payload === 'object') {
+            selector = payload.selector ?? payload.target ?? payload.text ?? payload.value;
+          } else if (typeof payload === 'string') {
+            selector = payload;
+          }
+          performClick(nodeId, selector != null ? asString(selector) : undefined);
+        }
         break;
       case 'type':
-        performType(nodeId, payload?.selector, payload?.text);
+        {
+          let selector = null;
+          let textValue = null;
+          if (payload && typeof payload === 'object') {
+            selector = payload.selector ?? payload.target ?? null;
+            textValue = payload.text ?? payload.value ?? null;
+          } else if (typeof payload === 'string') {
+            textValue = payload;
+          }
+          performType(
+            nodeId,
+            selector != null ? asString(selector) : undefined,
+            textValue != null ? asString(textValue) : undefined
+          );
+        }
         break;
       case 'enter':
         performEnter(nodeId);
         break;
       case 'scroll':
-        performScroll(nodeId, payload?.amount);
+        {
+          const rawAmount = payload && typeof payload === 'object'
+            ? (payload.amount ?? payload.value ?? payload.text)
+            : payload;
+          const amount = asNumber(rawAmount, Number.NaN);
+          performScroll(nodeId, Number.isNaN(amount) ? undefined : amount);
+        }
         break;
       case 'scroll_up':
-        performScrollUp(nodeId, payload?.amount);
+        {
+          const rawUp = payload && typeof payload === 'object'
+            ? (payload.amount ?? payload.value ?? payload.text)
+            : payload;
+          const amountUp = asNumber(rawUp, Number.NaN);
+          performScrollUp(nodeId, Number.isNaN(amountUp) ? undefined : amountUp);
+        }
         break;
       case 'scroll_down':
-        performScrollDown(nodeId, payload?.amount);
+        {
+          const rawDown = payload && typeof payload === 'object'
+            ? (payload.amount ?? payload.value ?? payload.text)
+            : payload;
+          const amountDown = asNumber(rawDown, Number.NaN);
+          performScrollDown(nodeId, Number.isNaN(amountDown) ? undefined : amountDown);
+        }
         break;
       case 'drag':
         if (payload && typeof payload === 'object') {

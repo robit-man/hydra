@@ -55,6 +55,110 @@ function createGraph({
     lastPointer: null
   };
 
+  const Tooltip = (() => {
+    let root = null;
+    let current = null;
+    const margin = 10;
+
+    const reposition = () => position();
+    const dismiss = () => hide();
+
+    function ensureRoot() {
+      if (root) return root;
+      root = document.createElement('div');
+      root.className = 'graph-tooltip';
+      root.dataset.visible = 'false';
+      root.style.visibility = 'hidden';
+      document.body.appendChild(root);
+      window.addEventListener('scroll', reposition, true);
+      window.addEventListener('resize', reposition);
+      window.addEventListener('blur', dismiss);
+      document.addEventListener('pointerdown', dismiss, true);
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') dismiss();
+      });
+      return root;
+    }
+
+    function hide(target) {
+      if (target && target !== current) return;
+      if (!root) {
+        current = null;
+        return;
+      }
+      root.dataset.visible = 'false';
+      root.style.visibility = 'hidden';
+      root.style.transform = 'translate3d(-9999px,-9999px,0)';
+      root.dataset.position = '';
+      root.textContent = '';
+      current = null;
+    }
+
+    function position() {
+      if (!current) return;
+      const tooltip = ensureRoot();
+      const text = current.dataset?.tooltip;
+      if (!text) {
+        hide();
+        return;
+      }
+      const rect = current.getBoundingClientRect();
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        hide();
+        return;
+      }
+      const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+      const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+      if (rect.bottom < 0 || rect.top > viewportH || rect.right < 0 || rect.left > viewportW) {
+        hide();
+        return;
+      }
+      tooltip.style.visibility = 'hidden';
+      tooltip.dataset.visible = 'true';
+      tooltip.style.transform = 'translate3d(-9999px,-9999px,0)';
+      const tooltipRect = tooltip.getBoundingClientRect();
+      let top = rect.bottom + margin;
+      let position = 'bottom';
+      if (top + tooltipRect.height > viewportH - 8) {
+        const candidate = rect.top - tooltipRect.height - margin;
+        if (candidate >= 8) {
+          top = candidate;
+          position = 'top';
+        } else {
+          top = Math.max(8, rect.bottom + margin);
+        }
+      }
+      let left = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+      left = Math.max(8, Math.min(left, viewportW - tooltipRect.width - 8));
+      tooltip.dataset.position = position;
+      tooltip.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
+      tooltip.style.visibility = 'visible';
+    }
+
+    function show(el) {
+      const text = el?.dataset?.tooltip;
+      if (!text) {
+        hide();
+        return;
+      }
+      const tooltip = ensureRoot();
+      current = el;
+      tooltip.textContent = text;
+      tooltip.dataset.visible = 'true';
+      tooltip.style.visibility = 'hidden';
+      requestAnimationFrame(() => {
+        if (current !== el) return;
+        position();
+      });
+    }
+
+    function refresh(el) {
+      if (current === el) show(el);
+    }
+
+    return { show, hide, refresh, position };
+  })();
+
   const LOG_COLLAPSED_KEY = 'graph.logCollapsed';
   const History = createHistory({ LS });
   const audio = createAudioHelpers();
@@ -907,6 +1011,9 @@ function refreshNodeResolution(force = false) {
       if (portName === 'text') return handleTextDisplayInput(node.id, payload);
       return;
     }
+    if (node.type === 'TextInput') {
+      return handleTextInputIngress(node.id, portName, payload);
+    }
     if (node.type === 'Template') {
       if (portName === 'trigger') return handleTemplateTrigger(node.id, payload);
       return;
@@ -924,18 +1031,67 @@ function refreshNodeResolution(force = false) {
     if (typeGuess) Router.ports.delete(`${typeGuess}:${node.id}:${portName}`);
   }
 
-  function createInputPort(node, container, portName, label = portName) {
+  const PORT_DISCONNECT_HINT = 'Alt-click to disconnect';
+
+  function formatPortTitle(label, tooltip) {
+    const hint = PORT_DISCONNECT_HINT;
+    const tip = typeof tooltip === 'string' ? tooltip.trim() : '';
+    if (tip) return `${tip}\n\n${hint}`;
+    return `${label} (${hint})`;
+  }
+
+  function applyPortTooltip(el, label, tooltip) {
+    if (!el) return;
+    const labelText = formatPortTitle(label, tooltip);
+    if (labelText) {
+      el.setAttribute('aria-label', labelText);
+      el.setAttribute('title', labelText);
+    } else {
+      el.removeAttribute('aria-label');
+      el.removeAttribute('title');
+    }
+    const baseTip = typeof tooltip === 'string' ? tooltip.trim() : '';
+    const includeDefault = tooltip !== null && tooltip !== false;
+    const tip = baseTip ? `${baseTip}\n\n${PORT_DISCONNECT_HINT}` : (includeDefault ? PORT_DISCONNECT_HINT : '');
+    if (tip) {
+      el.dataset.tooltip = tip;
+      if (!el._tooltipBound) {
+        const show = () => Tooltip.show(el);
+        const hide = () => Tooltip.hide(el);
+        el.addEventListener('mouseenter', show);
+        el.addEventListener('pointerenter', show);
+        el.addEventListener('mouseleave', hide);
+        el.addEventListener('pointerleave', hide);
+        el.addEventListener('focus', show);
+        el.addEventListener('blur', hide);
+        el.addEventListener('pointerdown', hide);
+        el._tooltipHandlers = { show, hide };
+        el._tooltipBound = true;
+      }
+      Tooltip.refresh(el);
+    } else {
+      delete el.dataset.tooltip;
+      Tooltip.hide(el);
+    }
+  }
+
+  function createInputPort(node, container, portName, label = portName, tooltip = '') {
     if (!node || !container) return null;
     node.portEls = node.portEls || {};
-    const existing = node.portEls[`in:${portName}`];
-    if (existing && existing.isConnected) return existing;
+    const key = `in:${portName}`;
+    const existing = node.portEls[key];
+    if (existing && existing.isConnected) {
+      const labelEl = existing.querySelector('span:last-child');
+      if (labelEl) labelEl.textContent = label;
+      applyPortTooltip(existing, label, tooltip);
+      return existing;
+    }
     const portEl = document.createElement('div');
     portEl.className = 'wp-port in';
     portEl.dataset.port = portName;
-    const title = `${label} (Alt-click to disconnect)`;
-    portEl.title = title;
+    applyPortTooltip(portEl, label, tooltip);
     portEl.innerHTML = `<span class="dot"></span><span>${label}</span>`;
-    node.portEls[`in:${portName}`] = portEl;
+    node.portEls[key] = portEl;
 
     portEl.addEventListener('click', (ev) => {
       if (ev.altKey || ev.metaKey || ev.ctrlKey) {
@@ -1022,7 +1178,7 @@ function refreshNodeResolution(force = false) {
     return portEl;
   }
 
-  function createOutputPort(node, container, portName, label = portName) {
+  function createOutputPort(node, container, portName, label = portName, tooltip = '') {
     if (!node || !container) return null;
     node.portEls = node.portEls || {};
     const key = `out:${portName}`;
@@ -1030,13 +1186,13 @@ function refreshNodeResolution(force = false) {
     if (existing && existing.isConnected) {
       const labelEl = existing.querySelector('span:first-child');
       if (labelEl) labelEl.textContent = label;
-      existing.title = `${label} (Alt-click to disconnect)`;
+      applyPortTooltip(existing, label, tooltip);
       return existing;
     }
     const portEl = document.createElement('div');
     portEl.className = 'wp-port out';
     portEl.dataset.port = portName;
-    portEl.title = `${label} (Alt-click to disconnect)`;
+    applyPortTooltip(portEl, label, tooltip);
     portEl.innerHTML = `<span>${label}</span><span class="dot"></span>`;
     node.portEls[key] = portEl;
 
@@ -1786,6 +1942,13 @@ function refreshNodeResolution(force = false) {
               <button type="button" class="secondary" data-textinput-send>Send</button>
             </div>
           </div>
+          <div class="text-input-preview" data-textinput-preview-wrap>
+            <div class="text-input-preview-header">
+              <span data-textinput-preview-label>Draft preview</span>
+              <button type="button" class="ghost tiny" data-textinput-preview-copy disabled>Copy</button>
+            </div>
+            <pre class="text-input-preview-body" data-textinput-preview-body>(empty)</pre>
+          </div>
         ` : ''}
         ${node.type === 'TextDisplay' ? `
           <div class="muted" style="pointer-events:auto;">Latest Text</div>
@@ -2105,97 +2268,11 @@ function refreshNodeResolution(force = false) {
     }
 
     for (const p of (t.inputs || [])) {
-      createInputPort(node, left, p.name, p.label || p.name);
+      createInputPort(node, left, p.name, p.label || p.name, p.tooltip);
     }
 
     for (const p of (t.outputs || [])) {
-      const portEl = document.createElement('div');
-      portEl.className = 'wp-port out';
-      portEl.dataset.port = p.name;
-      portEl.title = `${p.name} (Alt-click to disconnect)`;
-      portEl.innerHTML = `<span>${p.name}</span><span class="dot"></span>`;
-      node.portEls[`out:${p.name}`] = portEl;
-      portEl.addEventListener('click', (ev) => {
-        if (ev.altKey || ev.metaKey || ev.ctrlKey) {
-          removeWiresAt(node.id, 'out', p.name);
-          return;
-        }
-        onPortClick(node.id, 'out', p.name, portEl);
-      });
-
-      portEl.addEventListener('pointerdown', (ev) => {
-        if (ev.pointerType === 'touch') ev.preventDefault();
-        const wires = connectedWires(node.id, 'out', p.name);
-        if (wires.length) {
-          const w = wires[wires.length - 1];
-          w.path?.setAttribute('stroke-dasharray', '6 4');
-          const move = (e) => {
-            if (e.pointerType === 'touch') e.preventDefault();
-            if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
-            const pt = clientToWorkspace(e.clientX, e.clientY);
-            drawRetarget(w, 'from', pt.x, pt.y);
-            if (WS.drag) updateDropHover(WS.drag.expected);
-          };
-          const up = (e) => {
-            setDropHover(null);
-            finishAnyDrag(e.clientX, e.clientY);
-          };
-          WS.drag = {
-            kind: 'retarget',
-            wireId: w.id,
-            grabSide: 'from',
-            path: w.path,
-            pointerId: ev.pointerId,
-            expected: 'in',
-            lastClient: { x: ev.clientX, y: ev.clientY },
-            _cleanup: () => window.removeEventListener('pointermove', move)
-          };
-          window.addEventListener('pointermove', move, { passive: false });
-          window.addEventListener('pointerup', up, { once: true, passive: false });
-          updateDropHover('in');
-          return;
-        }
-
-        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', 'rgba(255,255,255,.6)');
-        path.setAttribute('stroke-width', '2');
-        path.setAttribute('stroke-linecap', 'round');
-        path.setAttribute('opacity', '0.9');
-        path.setAttribute('stroke-dasharray', '6 4');
-        path.setAttribute('vector-effect', 'non-scaling-stroke');
-        path.setAttribute('pointer-events', 'none');
-        WS.svgLayer.appendChild(path);
-
-        const move = (e) => {
-          if (e.pointerType === 'touch') e.preventDefault();
-          if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
-          const pt = clientToWorkspace(e.clientX, e.clientY);
-          drawTempFromPort({ nodeId: node.id, side: 'out', portName: p.name }, pt.x, pt.y);
-          updateDropHover(WS.drag?.expected);
-        };
-        const up = (e) => {
-          setDropHover(null);
-          finishAnyDrag(e.clientX, e.clientY);
-        };
-        WS.drag = {
-          kind: 'new',
-          fromNodeId: node.id,
-          fromPort: p.name,
-          path,
-          pointerId: ev.pointerId,
-          expected: 'in',
-          lastClient: { x: ev.clientX, y: ev.clientY },
-          _cleanup: () => window.removeEventListener('pointermove', move)
-        };
-        window.addEventListener('pointermove', move, { passive: false });
-        window.addEventListener('pointerup', up, { once: true, passive: false });
-        const pt = clientToWorkspace(ev.clientX, ev.clientY);
-        drawTempFromPort({ nodeId: node.id, side: 'out', portName: p.name }, pt.x, pt.y);
-        updateDropHover('in');
-      });
-
-      right.appendChild(portEl);
+      createOutputPort(node, right, p.name, p.label || p.name, p.tooltip);
     }
 
     if (node.type === 'Meshtastic') {
@@ -2421,6 +2498,7 @@ function refreshNodeResolution(force = false) {
     path.setAttribute('vector-effect', 'non-scaling-stroke');
     path.dataset.id = w.id;
     path.classList.add('wire');
+    path.style.cursor = 'grab';
     const kill = (e) => {
       removeWireById(w.id);
       e.stopPropagation();
@@ -2429,6 +2507,49 @@ function refreshNodeResolution(force = false) {
       if (e.altKey || e.metaKey || e.ctrlKey) kill(e);
     });
     path.addEventListener('dblclick', kill);
+    path.addEventListener('pointerdown', (ev) => {
+      if (ev.button && ev.button !== 0) return;
+      if (ev.altKey || ev.metaKey || ev.ctrlKey) return;
+      const wire = WS.wires.find((wireItem) => wireItem.id === w.id);
+      if (!wire) return;
+      if (ev.pointerType === 'touch') ev.preventDefault();
+      const pointer = clientToWorkspace(ev.clientX, ev.clientY);
+      const fromCenter = portCenter(wire.from.node, 'out', wire.from.port);
+      const toCenter = portCenter(wire.to.node, 'in', wire.to.port);
+      const distFrom = Math.hypot(pointer.x - fromCenter.x, pointer.y - fromCenter.y);
+      const distTo = Math.hypot(pointer.x - toCenter.x, pointer.y - toCenter.y);
+      const grabSide = distTo < distFrom ? 'to' : 'from';
+      const expected = grabSide === 'from' ? 'in' : 'out';
+      if (wire.path) {
+        wire.path.setAttribute('stroke-dasharray', '6 4');
+        wire.path.dataset.prevCursor = wire.path.style.cursor || '';
+        wire.path.style.cursor = 'grabbing';
+      }
+      const move = (e) => {
+        if (e.pointerType === 'touch') e.preventDefault();
+        const pt = clientToWorkspace(e.clientX, e.clientY);
+        drawRetarget(wire, grabSide, pt.x, pt.y);
+        if (WS.drag) WS.drag.lastClient = { x: e.clientX, y: e.clientY };
+      };
+      const up = (e) => {
+        setDropHover(null);
+        finishAnyDrag(e.clientX, e.clientY);
+      };
+      WS.drag = {
+        kind: 'retarget',
+        wireId: wire.id,
+        grabSide,
+        path: wire.path,
+        pointerId: ev.pointerId,
+        expected,
+        lastClient: { x: ev.clientX, y: ev.clientY },
+        _cleanup: () => window.removeEventListener('pointermove', move)
+      };
+      drawRetarget(wire, grabSide, pointer.x, pointer.y);
+      window.addEventListener('pointermove', move, { passive: false });
+      window.addEventListener('pointerup', up, { once: true, passive: false });
+      updateDropHover(expected);
+    });
     WS.svgLayer.appendChild(path);
     w.path = path;
 
@@ -2476,7 +2597,12 @@ function refreshNodeResolution(force = false) {
 
   function clearTempLink() {
     if (WS.drag?.kind && WS.drag.path) {
-      if (WS.drag.kind === 'retarget') WS.drag.path.setAttribute('stroke-dasharray', '');
+      if (WS.drag.kind === 'retarget') {
+        WS.drag.path.setAttribute('stroke-dasharray', '');
+        const prev = WS.drag.path.dataset.prevCursor;
+        if (prev !== undefined) WS.drag.path.style.cursor = prev || 'grab';
+        delete WS.drag.path.dataset.prevCursor;
+      }
       else WS.drag.path.remove();
     }
   }
@@ -3099,7 +3225,7 @@ function refreshNodeResolution(force = false) {
     portEl.className = 'wp-port in';
     portEl.dataset.port = varName;
     portEl.dataset.templateVar = varName;
-    portEl.title = `${varName} (Alt-click to disconnect)`;
+    applyPortTooltip(portEl, varName, '');
     portEl.innerHTML = `<span class="dot"></span><span>${varName}</span>`;
 
     portEl.addEventListener('click', (ev) => {
@@ -3278,13 +3404,13 @@ function refreshNodeResolution(force = false) {
     if (publicIn) {
       const span = publicIn.querySelector('span:last-child');
       if (span) span.textContent = pubLabel;
-      publicIn.title = `${pubLabel} (Alt-click to disconnect)`;
+      applyPortTooltip(publicIn, pubLabel, '');
     }
     const publicOut = node.portEls?.['out:public'];
     if (publicOut) {
       const span = publicOut.querySelector('span:first-child');
       if (span) span.textContent = pubLabel;
-      publicOut.title = `${pubLabel} (Alt-click to disconnect)`;
+      applyPortTooltip(publicOut, pubLabel, '');
     }
 
     const desired = new Map();
@@ -3315,13 +3441,13 @@ function refreshNodeResolution(force = false) {
       if (inEl) {
         const span = inEl.querySelector('span:last-child');
         if (span) span.textContent = inLabel;
-        inEl.title = `${inLabel} (Alt-click to disconnect)`;
+        applyPortTooltip(inEl, inLabel, '');
       }
       const outEl = createOutputPort(node, right, portName, outLabel);
       if (outEl) {
         const span = outEl.querySelector('span:first-child');
         if (span) span.textContent = outLabel;
-        outEl.title = `${outLabel} (Alt-click to disconnect)`;
+        applyPortTooltip(outEl, outLabel, '');
       }
       active.add(portName);
       keep.add(portName);
@@ -3334,13 +3460,13 @@ function refreshNodeResolution(force = false) {
     if (autoIn) {
       const span = autoIn.querySelector('span:last-child');
       if (span) span.textContent = autoInLabel;
-      autoIn.title = `${autoInLabel} (Alt-click to disconnect)`;
+      applyPortTooltip(autoIn, autoInLabel, '');
     }
     const autoOut = createOutputPort(node, right, 'auto', autoLabel);
     if (autoOut) {
       const span = autoOut.querySelector('span:first-child');
       if (span) span.textContent = autoLabel;
-      autoOut.title = `${autoLabel} (Alt-click to disconnect)`;
+      applyPortTooltip(autoOut, autoLabel, '');
     }
     active.add('auto');
     keep.add('auto');
@@ -3731,7 +3857,7 @@ function refreshNodeResolution(force = false) {
     portEl.className = 'wp-port out';
     portEl.dataset.port = portName;
     portEl.dataset.logicVariant = variant;
-    portEl.title = `${portName} (Alt-click to disconnect)`;
+    applyPortTooltip(portEl, portName, '');
     portEl.innerHTML = `<span>${portName}</span><span class="dot"></span>`;
 
     portEl.addEventListener('click', (ev) => {
@@ -3856,7 +3982,7 @@ function refreshNodeResolution(force = false) {
           portEl.dataset.logicRuleId = rule.id;
           const labelEl = portEl.querySelector('span:last-child');
           if (labelEl) labelEl.textContent = label;
-          portEl.title = `${label} (Alt-click to disconnect)`;
+          applyPortTooltip(portEl, label, '');
         }
         entry.ruleId = rule.id;
       }
@@ -4152,6 +4278,234 @@ function refreshNodeResolution(force = false) {
     return wrap;
   }
 
+  function createFieldMapEditor(field, cfg) {
+    const wrap = document.createElement('div');
+    wrap.className = 'field-map-editor';
+
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = field.key;
+    wrap.appendChild(hidden);
+
+    const list = document.createElement('div');
+    list.className = 'field-map-list';
+    wrap.appendChild(list);
+
+    const controlsRow = document.createElement('div');
+    controlsRow.className = 'field-map-controls';
+    wrap.appendChild(controlsRow);
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'ghost field-map-add';
+    addBtn.textContent = 'Add Field';
+    controlsRow.appendChild(addBtn);
+
+    if (field.note) {
+      const note = document.createElement('div');
+      note.className = 'field-map-note tiny muted';
+      note.textContent = field.note;
+      wrap.appendChild(note);
+    }
+
+    const MODE_CONFIG = [
+      { value: 'literal', label: 'Literal value', requiresValue: true, control: 'input', placeholder: 'value' },
+      { value: 'text', label: 'Current text', requiresValue: false },
+      { value: 'incoming', label: 'Incoming text', requiresValue: false },
+      { value: 'raw', label: 'Incoming payload', requiresValue: false },
+      { value: 'action', label: 'Action value', requiresValue: false },
+      { value: 'json', label: 'JSON object', requiresValue: true, control: 'textarea', placeholder: '{"key":"value"}' },
+      { value: 'number', label: 'Number', requiresValue: true, control: 'input', inputType: 'number', placeholder: '0' },
+      { value: 'boolean', label: 'Boolean', requiresValue: true, control: 'select', options: ['true', 'false'] },
+      { value: 'nodeId', label: 'Node ID', requiresValue: false },
+      { value: 'timestamp', label: 'Timestamp', requiresValue: true, control: 'select', options: ['iso', 'ms'] },
+      { value: 'template', label: 'Template', requiresValue: true, control: 'textarea', placeholder: 'Hello {{text}}' },
+      { value: 'type', label: 'Type value', requiresValue: false }
+    ];
+
+    const modeMap = new Map(MODE_CONFIG.map((m) => [m.value, m]));
+
+    const normalizeEntries = (entries) => {
+      if (!Array.isArray(entries)) return [];
+      return entries.map((entry) => {
+        const normalized = entry && typeof entry === 'object' ? entry : {};
+        const mode = modeMap.has(normalized.mode) ? normalized.mode : 'literal';
+        return {
+          key: typeof normalized.key === 'string' ? normalized.key : '',
+          mode,
+          value: normalized.value !== undefined && normalized.value !== null ? String(normalized.value) : ''
+        };
+      });
+    };
+
+    let rows = normalizeEntries(cfg?.[field.key] ?? field.def ?? []);
+
+    const updateHidden = () => {
+      hidden.value = JSON.stringify(rows);
+    };
+
+    const moveEntry = (index, delta) => {
+      const nextIndex = index + delta;
+      if (nextIndex < 0 || nextIndex >= rows.length) return;
+      const [entry] = rows.splice(index, 1);
+      rows.splice(nextIndex, 0, entry);
+      render();
+    };
+
+    const removeEntry = (index) => {
+      rows.splice(index, 1);
+      render();
+    };
+
+    const renderEmpty = () => {
+      const empty = document.createElement('div');
+      empty.className = 'field-map-empty tiny muted';
+      empty.textContent = 'No additional fields configured.';
+      list.appendChild(empty);
+    };
+
+    const renderRow = (entry, index) => {
+      const row = document.createElement('div');
+      row.className = 'field-map-row';
+
+      const keyInput = document.createElement('input');
+      keyInput.type = 'text';
+      keyInput.placeholder = 'key';
+      keyInput.value = entry.key;
+      keyInput.addEventListener('input', () => {
+        rows[index].key = keyInput.value;
+        updateHidden();
+      });
+      row.appendChild(keyInput);
+
+      const modeSelect = document.createElement('select');
+      modeSelect.className = 'field-map-mode';
+      MODE_CONFIG.forEach((mode) => {
+        const opt = document.createElement('option');
+        opt.value = mode.value;
+        opt.textContent = mode.label;
+        modeSelect.appendChild(opt);
+      });
+      modeSelect.value = entry.mode;
+      modeSelect.addEventListener('change', () => {
+        rows[index].mode = modeSelect.value;
+        const info = modeMap.get(modeSelect.value);
+        if (info && !info.requiresValue) rows[index].value = '';
+        render();
+      });
+      row.appendChild(modeSelect);
+
+      const renderValueControl = () => {
+        const info = modeMap.get(rows[index].mode) || modeMap.get('literal');
+        const container = document.createElement('div');
+        container.className = 'field-map-value';
+        if (!info.requiresValue) {
+          const placeholder = document.createElement('div');
+          placeholder.className = 'field-map-value-placeholder tiny muted';
+          placeholder.textContent = 'auto';
+          container.appendChild(placeholder);
+          return container;
+        }
+
+        if (info.control === 'textarea') {
+          const area = document.createElement('textarea');
+          area.placeholder = info.placeholder || '';
+          area.value = rows[index].value ?? '';
+          area.rows = rows[index].mode === 'json' ? 3 : 2;
+          area.addEventListener('input', () => {
+            rows[index].value = area.value;
+            updateHidden();
+          });
+          container.appendChild(area);
+          return container;
+        }
+
+        if (info.control === 'select') {
+          const sel = document.createElement('select');
+          (info.options || []).forEach((optVal) => {
+            const opt = document.createElement('option');
+            opt.value = String(optVal);
+            opt.textContent = String(optVal).toUpperCase();
+            sel.appendChild(opt);
+          });
+          const current = rows[index].value && info.options.includes(rows[index].value)
+            ? rows[index].value
+            : info.options[0];
+          sel.value = current;
+          rows[index].value = current;
+          sel.addEventListener('change', () => {
+            rows[index].value = sel.value;
+            updateHidden();
+          });
+          container.appendChild(sel);
+          return container;
+        }
+
+        const input = document.createElement('input');
+        input.type = info.inputType || 'text';
+        input.placeholder = info.placeholder || '';
+        input.value = rows[index].value ?? '';
+        input.addEventListener('input', () => {
+          rows[index].value = input.value;
+          updateHidden();
+        });
+        container.appendChild(input);
+        return container;
+      };
+
+      const valueContainer = renderValueControl();
+      row.appendChild(valueContainer);
+
+      const actions = document.createElement('div');
+      actions.className = 'field-map-actions';
+
+      const upBtn = document.createElement('button');
+      upBtn.type = 'button';
+      upBtn.className = 'ghost tiny';
+      upBtn.textContent = '↑';
+      upBtn.disabled = index === 0;
+      upBtn.addEventListener('click', () => moveEntry(index, -1));
+      actions.appendChild(upBtn);
+
+      const downBtn = document.createElement('button');
+      downBtn.type = 'button';
+      downBtn.className = 'ghost tiny';
+      downBtn.textContent = '↓';
+      downBtn.disabled = index === rows.length - 1;
+      downBtn.addEventListener('click', () => moveEntry(index, 1));
+      actions.appendChild(downBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'ghost tiny field-map-remove';
+      removeBtn.textContent = '✕';
+      removeBtn.addEventListener('click', () => removeEntry(index));
+      actions.appendChild(removeBtn);
+
+      row.appendChild(actions);
+      list.appendChild(row);
+    };
+
+    const render = () => {
+      list.innerHTML = '';
+      if (!rows.length) {
+        renderEmpty();
+      } else {
+        rows.forEach((entry, idx) => renderRow(entry, idx));
+      }
+      updateHidden();
+    };
+
+    addBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      rows.push({ key: '', mode: 'literal', value: '' });
+      render();
+    });
+
+    render();
+    return wrap;
+  }
+
   function createFilterListEditor(field, cfg) {
     const wrap = document.createElement('div');
     wrap.className = 'filter-token-editor';
@@ -4278,27 +4632,416 @@ function refreshNodeResolution(force = false) {
     return wrap;
   }
 
+  function getTextInputState(node) {
+    if (!node) return null;
+    if (!node._textInputState) {
+      node._textInputState = {
+        lastIncomingPayload: null,
+        lastIncomingText: '',
+        previewText: '',
+        previewStatus: 'draft',
+        previewOrigin: 'manual',
+        previewCopyValue: ''
+      };
+    }
+    return node._textInputState;
+  }
+
+  function textInputBool(value, def = false) {
+    if (value === undefined || value === null) return def;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+      if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    }
+    return def;
+  }
+
+  function sanitizeTextInputFields(entries) {
+    if (!Array.isArray(entries)) return [];
+    return entries.map((entry) => {
+      const normalized = entry && typeof entry === 'object' ? entry : {};
+      return {
+        key: typeof normalized.key === 'string' ? normalized.key : '',
+        mode: typeof normalized.mode === 'string' ? normalized.mode : 'literal',
+        value: normalized.value !== undefined && normalized.value !== null ? String(normalized.value) : ''
+      };
+    });
+  }
+
+  function normalizeTextInputConfig(rawCfg = {}) {
+    const defaults = NodeStore.defaultsByType?.TextInput || {};
+    const base = deepClone(defaults);
+    const merged = { ...base, ...deepClone(rawCfg) };
+    merged.includeNodeId = textInputBool(merged.includeNodeId, true);
+    merged.includeText = textInputBool(merged.includeText, true);
+    merged.autoSendIncoming = textInputBool(merged.autoSendIncoming, true);
+    merged.customFields = sanitizeTextInputFields(merged.customFields);
+    merged.emitActionKey = typeof merged.emitActionKey === 'string' ? merged.emitActionKey : '(none)';
+    merged.actionValue = typeof merged.actionValue === 'string' ? merged.actionValue : 'type';
+    merged.outputMode = typeof merged.outputMode === 'string' ? merged.outputMode : 'object';
+    merged.previewMode = merged.previewMode === 'compact' ? 'compact' : 'pretty';
+    merged.nodeIdKey = typeof merged.nodeIdKey === 'string' ? merged.nodeIdKey : 'nodeId';
+    merged.typeKey = typeof merged.typeKey === 'string' ? merged.typeKey : 'type';
+    merged.typeValue = merged.typeValue !== undefined && merged.typeValue !== null ? merged.typeValue : 'text';
+    merged.typeBackupKey = typeof merged.typeBackupKey === 'string' ? merged.typeBackupKey : 'messageType';
+    merged.textKey = typeof merged.textKey === 'string' ? merged.textKey : 'text';
+    merged.incomingMode = ['replace', 'append', 'ignore'].includes(merged.incomingMode) ? merged.incomingMode : 'replace';
+    return merged;
+  }
+
+  function formatTextInputPreview(payload, cfg) {
+    if (payload === null || payload === undefined) return '(empty)';
+    if (typeof payload === 'string') return payload || '(empty)';
+    try {
+      if (cfg.previewMode === 'compact') return JSON.stringify(payload);
+      return JSON.stringify(payload, null, 2);
+    } catch (err) {
+      try {
+        return String(payload);
+      } catch (_) {
+        return '(unserializable)';
+      }
+    }
+  }
+
+  function textInputCopyValue(payload, cfg) {
+    if (payload === null || payload === undefined) return '';
+    if (typeof payload === 'string') return payload;
+    try {
+      if (cfg.previewMode === 'compact') return JSON.stringify(payload);
+      return JSON.stringify(payload, null, 2);
+    } catch (_) {
+      try {
+        return String(payload);
+      } catch (err) {
+        return '';
+      }
+    }
+  }
+
+  function evaluateTextInputField(entry, context) {
+    const mode = entry.mode || 'literal';
+    const value = entry.value ?? '';
+    switch (mode) {
+      case 'literal':
+        return value;
+      case 'text':
+        return context.text;
+      case 'incoming':
+        return context.incomingText;
+      case 'raw':
+        return context.incomingPayload !== undefined ? context.incomingPayload : context.incomingText;
+      case 'action':
+        if (!context.actionKey || context.actionKey === '(none)') return undefined;
+        return context.actionValue;
+      case 'json':
+        try {
+          return JSON.parse(value || '{}');
+        } catch (err) {
+          return undefined;
+        }
+      case 'number': {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : undefined;
+      }
+      case 'boolean': {
+        const normalized = String(value).trim().toLowerCase();
+        if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+        return undefined;
+      }
+      case 'nodeId':
+        return context.nodeId;
+      case 'timestamp':
+        return value === 'ms' ? context.timestampMs : context.timestampIso;
+      case 'template': {
+        const template = value || '';
+        return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, token) => {
+          if (token === 'text') return context.text;
+          if (token === 'incoming') return context.incomingText;
+          if (token === 'action') return context.actionValue;
+          if (token === 'nodeId') return context.nodeId;
+          if (token === 'type') return context.typeValue;
+          if (token === 'timestamp') return context.timestampIso;
+          if (token === 'ms') return String(context.timestampMs);
+          return '';
+        });
+      }
+      case 'type':
+        return context.typeValue;
+      default:
+        return value;
+    }
+  }
+
+  function composeTextInputPayload(node, cfg, state, {
+    text = '',
+    incomingPayload,
+    incomingText,
+    origin = 'manual',
+    forPreview = false
+  } = {}) {
+    if (!node) return null;
+    const nodeId = node.id;
+    const normalized = normalizeTextInputConfig(cfg);
+    const trimmedText = typeof text === 'string' ? text : '';
+    const resolvedIncomingPayload = incomingPayload !== undefined ? incomingPayload : state?.lastIncomingPayload;
+    const resolvedIncomingText = incomingText !== undefined
+      ? incomingText
+      : (state?.lastIncomingText ?? '');
+    const actionKey = (normalized.emitActionKey || '(none)').trim();
+    const actionValue = (normalized.actionValue || '').trim() || 'type';
+    const timestamp = Date.now();
+    const context = {
+      nodeId,
+      text: trimmedText,
+      incomingText: resolvedIncomingText || '',
+      incomingPayload: resolvedIncomingPayload,
+      actionKey,
+      actionValue,
+      typeValue: normalized.typeValue,
+      timestampMs: timestamp,
+      timestampIso: new Date(timestamp).toISOString()
+    };
+
+    let payload;
+    if (normalized.outputMode === 'text') {
+      if (!trimmedText && !forPreview) return null;
+      payload = trimmedText;
+    } else {
+      const obj = {};
+      let typeKeyUsed = '';
+      if (normalized.includeNodeId) {
+        const nodeKeyRaw = typeof normalized.nodeIdKey === 'string' ? normalized.nodeIdKey.trim() : 'nodeId';
+        if (nodeKeyRaw) obj[nodeKeyRaw] = nodeId;
+      }
+      const typeKeyRaw = typeof normalized.typeKey === 'string' ? normalized.typeKey.trim() : 'type';
+      if (typeKeyRaw) {
+        typeKeyUsed = typeKeyRaw;
+        obj[typeKeyRaw] = normalized.typeValue;
+      }
+      const textKeyRaw = typeof normalized.textKey === 'string' ? normalized.textKey.trim() : 'text';
+      if (normalized.includeText && textKeyRaw) {
+        obj[textKeyRaw] = trimmedText;
+      }
+      const fields = sanitizeTextInputFields(normalized.customFields);
+      fields.forEach((entry) => {
+        const key = (entry.key || '').trim();
+        if (!key) return;
+        const value = evaluateTextInputField(entry, context);
+        if (value === undefined) return;
+        obj[key] = value;
+      });
+      if (actionKey && actionKey !== '(none)') {
+        obj[actionKey] = actionValue;
+        const backupKeyRaw = typeof normalized.typeBackupKey === 'string' ? normalized.typeBackupKey.trim() : 'messageType';
+        if (typeKeyUsed && actionKey === typeKeyUsed && backupKeyRaw && !obj[backupKeyRaw]) {
+          obj[backupKeyRaw] = normalized.typeValue;
+        }
+      }
+      payload = obj;
+    }
+
+    const preview = formatTextInputPreview(payload, normalized);
+    const copyValue = textInputCopyValue(payload, normalized);
+    return {
+      payload,
+      preview,
+      copyValue,
+      actionKey,
+      actionValue,
+      typeValue: normalized.typeValue,
+      text: trimmedText,
+      origin,
+      incomingText: resolvedIncomingText
+    };
+  }
+
+  function setTextInputPreview(node, previewText, { status = 'draft', origin = 'manual', copyValue } = {}) {
+    const state = getTextInputState(node);
+    if (!state) return;
+    state.previewText = previewText || '';
+    state.previewStatus = status;
+    state.previewOrigin = origin;
+    if (copyValue !== undefined) state.previewCopyValue = copyValue;
+    else state.previewCopyValue = previewText || '';
+    const labelEl = state.previewLabel;
+    const bodyEl = state.previewBody;
+    const copyBtn = state.previewCopy;
+    if (labelEl) {
+      if (status === 'emitted') {
+        labelEl.textContent = origin === 'incoming' ? 'Last emitted payload (incoming)' : 'Last emitted payload';
+      } else {
+        labelEl.textContent = origin === 'incoming' ? 'Incoming preview' : 'Draft preview';
+      }
+    }
+    if (bodyEl) {
+      bodyEl.textContent = (previewText && previewText.length) ? previewText : '(empty)';
+      bodyEl.dataset.status = status;
+      bodyEl.dataset.origin = origin;
+    }
+    if (copyBtn) {
+      const copyText = state.previewCopyValue;
+      copyBtn.disabled = !(copyText && String(copyText).length);
+    }
+  }
+
+  function refreshTextInputDraft(node) {
+    if (!node) return;
+    const state = getTextInputState(node);
+    const cfg = NodeStore.ensure(node.id, 'TextInput').config || {};
+    const normalized = normalizeTextInputConfig(cfg);
+    const textarea = state?.textarea;
+    const draftText = textarea ? textarea.value.trim() : (cfg.text || '');
+    const result = composeTextInputPayload(node, normalized, state, {
+      text: draftText,
+      origin: 'manual',
+      forPreview: true
+    });
+    if (result) setTextInputPreview(node, result.preview, { status: 'draft', origin: 'manual', copyValue: result.copyValue });
+    else setTextInputPreview(node, '', { status: 'draft', origin: 'manual', copyValue: '' });
+  }
+
+  function handleTextInputIngress(nodeId, portName, payload) {
+    if (portName !== 'incoming' && portName !== 'text') return;
+    const node = WS.nodes.get(nodeId);
+    if (!node) return;
+    const state = getTextInputState(node);
+    state.lastIncomingPayload = payload;
+    const incomingText = extractPayloadText(payload);
+    state.lastIncomingText = incomingText;
+    const cfgObj = NodeStore.ensure(nodeId, 'TextInput').config || {};
+    const normalized = normalizeTextInputConfig(cfgObj);
+    const textarea = state.textarea;
+    const currentText = textarea ? textarea.value : (cfgObj.text || '');
+    let nextText = currentText;
+    if (normalized.incomingMode === 'replace') {
+      nextText = incomingText;
+    } else if (normalized.incomingMode === 'append') {
+      const separator = currentText && !currentText.endsWith('\n') ? '\n' : '';
+      nextText = currentText ? `${currentText}${separator}${incomingText}` : incomingText;
+    }
+
+    if (normalized.incomingMode !== 'ignore') {
+      NodeStore.update(nodeId, { type: 'TextInput', text: nextText, lastIncomingText: incomingText });
+      if (state.setValue) state.setValue(nextText);
+    } else {
+      NodeStore.update(nodeId, { type: 'TextInput', lastIncomingText: incomingText });
+    }
+
+    const result = composeTextInputPayload(node, normalized, state, {
+      text: nextText.trim(),
+      incomingPayload: payload,
+      incomingText,
+      origin: 'incoming'
+    });
+    if (!result) {
+      setTextInputPreview(node, '', { status: 'draft', origin: 'incoming', copyValue: '' });
+      return;
+    }
+
+    if (normalized.autoSendIncoming) {
+      Router.sendFrom(nodeId, 'text', result.payload);
+      NodeStore.update(nodeId, {
+        type: 'TextInput',
+        lastSent: nextText.trim(),
+        lastPreview: result.preview,
+        lastPreviewCopy: result.copyValue,
+        lastPreviewOrigin: 'incoming'
+      });
+      setTextInputPreview(node, result.preview, { status: 'emitted', origin: 'incoming', copyValue: result.copyValue });
+    } else {
+      setTextInputPreview(node, result.preview, { status: 'draft', origin: 'incoming', copyValue: result.copyValue });
+    }
+  }
+
   function initTextInputNode(node) {
     const textarea = node.el?.querySelector('[data-textinput-field]');
     const sendBtn = node.el?.querySelector('[data-textinput-send]');
-    const cfg = NodeStore.ensure(node.id, 'TextInput').config || {};
+    const previewLabel = node.el?.querySelector('[data-textinput-preview-label]');
+    const previewBody = node.el?.querySelector('[data-textinput-preview-body]');
+    const previewCopy = node.el?.querySelector('[data-textinput-preview-copy]');
+    const cfgRaw = NodeStore.ensure(node.id, 'TextInput').config || {};
+    const cfg = normalizeTextInputConfig(cfgRaw);
+    const state = getTextInputState(node);
+
+    if (state) {
+      state.textarea = textarea || null;
+      state.previewLabel = previewLabel || null;
+      state.previewBody = previewBody || null;
+      state.previewCopy = previewCopy || null;
+    }
+
+    if (previewCopy && !previewCopy._textInputBound) {
+      previewCopy.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const currentState = getTextInputState(node);
+        const copyText = currentState?.previewCopyValue ?? currentState?.previewText ?? '';
+        if (!copyText) {
+          setBadge('Preview empty', false);
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(copyText);
+          setBadge('Preview copied');
+        } catch (err) {
+          setBadge(`Copy failed: ${err?.message || err}`, false);
+        }
+      });
+      previewCopy._textInputBound = true;
+    }
+
     if (textarea) {
       textarea.placeholder = cfg.placeholder || 'Type a message…';
       if (!node._textInputReady) {
         let suppressInput = false;
-        const saveDraft = () => {
+        const getLatestConfig = () => {
+          const latest = NodeStore.ensure(node.id, 'TextInput').config || {};
+          return normalizeTextInputConfig(latest);
+        };
+        const applyDraft = () => {
           if (suppressInput) return;
           NodeStore.update(node.id, { type: 'TextInput', text: textarea.value });
+          refreshTextInputDraft(node);
+        };
+        state.setValue = (value, { silent = true } = {}) => {
+          suppressInput = true;
+          textarea.value = value ?? '';
+          suppressInput = false;
+          if (!silent) {
+            NodeStore.update(node.id, { type: 'TextInput', text: textarea.value });
+          }
+          refreshTextInputDraft(node);
         };
         const send = () => {
-          const current = textarea.value;
-          const value = current.trim();
-          if (!value) return;
-          NodeStore.update(node.id, { type: 'TextInput', text: '', lastSent: value });
-          Router.sendFrom(node.id, 'text', { nodeId: node.id, type: 'text', text: value });
+          const currentCfg = getLatestConfig();
+          const current = textarea.value || '';
+          const trimmed = current.trim();
+          const result = composeTextInputPayload(node, currentCfg, state, {
+            text: trimmed,
+            origin: 'manual'
+          });
+          if (!result) {
+            setTextInputPreview(node, '', { status: 'draft', origin: 'manual' });
+            return;
+          }
+          Router.sendFrom(node.id, 'text', result.payload);
           suppressInput = true;
           textarea.value = '';
           suppressInput = false;
+          NodeStore.update(node.id, {
+            type: 'TextInput',
+            text: '',
+            lastSent: trimmed,
+            lastPreview: result.preview,
+            lastPreviewCopy: result.copyValue,
+            lastPreviewOrigin: 'manual'
+          });
+          setTextInputPreview(node, result.preview, { status: 'emitted', origin: 'manual', copyValue: result.copyValue });
+          state.previewText = result.preview;
         };
         sendBtn?.addEventListener('click', send);
         textarea.addEventListener('keydown', (e) => {
@@ -4307,10 +5050,30 @@ function refreshNodeResolution(force = false) {
             send();
           }
         });
-        textarea.addEventListener('input', saveDraft);
+        textarea.addEventListener('input', applyDraft);
         node._textInputReady = true;
+      } else if (!state.setValue) {
+        state.setValue = (value, { silent = true } = {}) => {
+          textarea.value = value ?? '';
+          if (!silent) {
+            NodeStore.update(node.id, { type: 'TextInput', text: textarea.value });
+          }
+          refreshTextInputDraft(node);
+        };
       }
-      textarea.value = cfg.text || '';
+      if (typeof cfg.text === 'string') {
+        state?.setValue?.(cfg.text, { silent: true });
+      }
+    }
+
+    if (cfg.lastPreview) {
+      setTextInputPreview(node, cfg.lastPreview, {
+        status: 'emitted',
+        origin: cfg.lastPreviewOrigin || 'manual',
+        copyValue: cfg.lastPreviewCopy !== undefined ? cfg.lastPreviewCopy : cfg.lastPreview
+      });
+    } else {
+      refreshTextInputDraft(node);
     }
   }
 
@@ -4936,6 +5699,12 @@ function refreshNodeResolution(force = false) {
       }
       if (field.type === 'logicRules') {
         const editor = createLogicRulesEditor(node, field, cfg);
+        fields.appendChild(label);
+        fields.appendChild(editor);
+        continue;
+      }
+      if (field.type === 'fieldMap') {
+        const editor = createFieldMapEditor(field, cfg);
         fields.appendChild(label);
         fields.appendChild(editor);
         continue;
@@ -6017,6 +6786,24 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
             parsed = [];
           }
           patch[k] = sanitizeLogicRules(parsed);
+          continue;
+        }
+        if (schema.type === 'fieldMap') {
+          let parsed = [];
+          try {
+            const raw = JSON.parse(v);
+            if (Array.isArray(raw)) parsed = raw;
+          } catch (_) {
+            parsed = [];
+          }
+          patch[k] = parsed.map((entry) => {
+            const normalized = entry && typeof entry === 'object' ? entry : {};
+            return {
+              key: typeof normalized.key === 'string' ? normalized.key : '',
+              mode: typeof normalized.mode === 'string' ? normalized.mode : 'literal',
+              value: normalized.value !== undefined && normalized.value !== null ? String(normalized.value) : ''
+            };
+          });
           continue;
         }
         if (schema.type === 'filterList') {

@@ -70,20 +70,68 @@ const GraphTypes = {
     supportsNkn: true,
     relayKey: 'relay',
     inputs: [
-      { name: 'url' },
-      { name: 'action' },
-      { name: 'selector' },
-      { name: 'text' },
-      { name: 'amount' },
-      { name: 'xy' },
-      { name: 'sid' }
+      {
+        name: 'url',
+        label: 'URL',
+        tooltip: 'Target URL for navigation.\nAccepts plain strings or objects with a text field (Text Input wiring works automatically).\nUsed by nav/open actions and the on-card address bar.'
+      },
+      {
+        name: 'action',
+        label: 'Action',
+        tooltip: 'Drive browser actions.\nSend a string like "connect" or an object with action/type/kind/mode keys (Text Input emit setting helps).\nUnderstands: connect/open, close, nav/back/forward, click, type, enter, scroll, scroll_up, scroll_down, drag, screenshot, dom, events.'
+      },
+      {
+        name: 'selector',
+        label: 'Selector',
+        tooltip: 'CSS selector for element actions.\nSend strings or objects with a text field.\nUsed by click, type, drag, and scroll point operations.'
+      },
+      {
+        name: 'text',
+        label: 'Text',
+        tooltip: 'Typing payload or default field value.\nAccepts strings or objects with text/value.\nConsumed by type/enter actions and stored as the active input buffer.'
+      },
+      {
+        name: 'amount',
+        label: 'Amount',
+        tooltip: 'Scroll distance in pixels.\nProvide numbers or numeric strings.\nConsumed by scroll, scroll_up, and scroll_down actions.'
+      },
+      {
+        name: 'xy',
+        label: 'XY',
+        tooltip: 'Viewport coordinates for click/drag helpers.\nSend objects such as { x, y, viewportW, viewportH, naturalW, naturalH }.'
+      },
+      {
+        name: 'sid',
+        label: 'Session',
+        tooltip: 'Manual session id override.\nSend a string to attach to an existing browser session and resume streaming events.'
+      }
     ],
     outputs: [
-      { name: 'status' },
-      { name: 'frame' },
-      { name: 'dom' },
-      { name: 'log' },
-      { name: 'rawFrame', label: 'Raw Frame' }
+      {
+        name: 'status',
+        label: 'Status',
+        tooltip: 'Status text describing the latest action.\nForward downstream for logging or user feedback.'
+      },
+      {
+        name: 'frame',
+        label: 'Frame',
+        tooltip: 'Screenshot output.\nIn "wrapped" mode emits metadata (blobUrl, b64, size); in "raw" mode emits the base64 image string.'
+      },
+      {
+        name: 'dom',
+        label: 'DOM',
+        tooltip: 'DOM snapshot payload ({ dom, length, sid }).\nProduced by the DOM action and useful for parsing or inspection.'
+      },
+      {
+        name: 'log',
+        label: 'Log',
+        tooltip: 'On-card log stream.\nShows detailed progress in the Web Scraper UI (no router payload emitted).'
+      },
+      {
+        name: 'rawFrame',
+        label: 'Raw Frame',
+        tooltip: 'Base64 screenshot string.\nAlways emits the raw image data regardless of the configured frame output mode.'
+      }
     ],
     schema: [
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:8130' },
@@ -106,10 +154,37 @@ const GraphTypes = {
   },
   TextInput: {
     title: 'Text Input',
-    inputs: [],
-    outputs: [{ name: 'text' }],
+    inputs: [{
+      name: 'incoming',
+      label: 'Incoming',
+      tooltip: 'Optional upstream payload to reformat.\nAccepts text, numbers, or objects; Text Input can auto-package it using the configured output schema.'
+    }],
+    outputs: [{
+      name: 'text',
+      label: 'Output',
+      tooltip: 'Emits the formatted payload.\nConfigure keys and structure below to match downstream expectations.'
+    }],
     schema: [
-      { key: 'placeholder', label: 'Placeholder', type: 'text', placeholder: 'Type a message…' }
+      { key: 'placeholder', label: 'Placeholder', type: 'text', placeholder: 'Type a message…' },
+      { key: 'emitActionKey', label: 'Emit Action Key', type: 'select', options: ['(none)', 'action', 'type', 'kind', 'mode'], def: '(none)' },
+      { key: 'actionValue', label: 'Action Value', type: 'text', placeholder: 'type | nav | click' },
+      { key: 'outputMode', label: 'Output Format', type: 'select', options: ['object', 'text'], def: 'object' },
+      { key: 'includeNodeId', label: 'Include Node ID', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'nodeIdKey', label: 'Node ID Key', type: 'text', placeholder: 'nodeId' },
+      { key: 'typeKey', label: 'Type Key', type: 'text', placeholder: 'type' },
+      { key: 'typeValue', label: 'Type Value', type: 'text', placeholder: 'text' },
+      { key: 'typeBackupKey', label: 'Type Backup Key', type: 'text', placeholder: 'messageType', note: 'Used when Emit Action Key is also "type" so the original type is preserved.' },
+      { key: 'includeText', label: 'Include Text Field', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'textKey', label: 'Text Key', type: 'text', placeholder: 'text' },
+      { key: 'autoSendIncoming', label: 'Auto Send Incoming Payloads', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'incomingMode', label: 'Incoming Text Mode', type: 'select', options: ['replace', 'append', 'ignore'], def: 'replace', note: 'How incoming data updates the composer before emission.' },
+      { key: 'previewMode', label: 'Preview Style', type: 'select', options: ['pretty', 'compact'], def: 'pretty' },
+      {
+        key: 'customFields',
+        label: 'Additional Fields',
+        type: 'fieldMap',
+        note: 'Add extra keys for the outgoing payload. Choose a value type per entry (literal, text, incoming, raw, action, json, number, boolean, nodeId, timestamp, template).'
+      }
     ]
   },
   TextDisplay: {

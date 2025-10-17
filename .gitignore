@@ -8,6 +8,7 @@ docs/*.pem
 docs/config.json
 docs/router_config.json
 docs/__*
+docs/test*
 service_router/.*
 service_router/.*
 service_router/bridge-node

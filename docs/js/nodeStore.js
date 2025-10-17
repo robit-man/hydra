@@ -109,7 +109,25 @@ const NodeStore = {
     TextInput: {
       placeholder: '',
       text: '',
-      lastSent: ''
+      lastSent: '',
+      emitActionKey: '(none)',
+      actionValue: 'type',
+      outputMode: 'object',
+      includeNodeId: true,
+      nodeIdKey: 'nodeId',
+      typeKey: 'type',
+      typeValue: 'text',
+      typeBackupKey: 'messageType',
+      includeText: true,
+      textKey: 'text',
+      autoSendIncoming: true,
+      incomingMode: 'replace',
+      previewMode: 'pretty',
+      customFields: [{ key: 'intent', mode: 'action', value: '' }],
+      lastPreview: '',
+      lastPreviewCopy: '',
+      lastPreviewOrigin: '',
+      lastIncomingText: ''
     },
     Template: {
       template: 'Hello {name}',
