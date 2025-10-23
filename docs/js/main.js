@@ -25,6 +25,7 @@ import { primeLocalNetworkRequest } from './localNetwork.js';
 import { createPeerDiscovery } from './peerDiscovery.js';
 import { createPayments } from './payments.js';
 import { createWebScraper } from './webScraper.js';
+import { createNoClipBridge } from './noclipBridge.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -171,6 +172,14 @@ const Vision = createVision({
   log
 });
 
+const NoClipBridge = createNoClipBridge({
+  NodeStore,
+  Router,
+  Net,
+  setBadge,
+  log
+});
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -188,6 +197,7 @@ const Graph = createGraph({
   WebSerial,
   WebScraper,
   Vision,
+  NoClip: NoClipBridge,
   Net,
   CFG,
   saveCFG,

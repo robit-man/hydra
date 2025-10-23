@@ -29,6 +29,7 @@ function createGraph({
   WebSerial,
   WebScraper,
   Vision,
+  NoClip,
   Net,
   CFG,
   saveCFG,
@@ -978,6 +979,12 @@ function refreshNodeResolution(force = false) {
     if (node.type === 'NknDM') {
       if (portName === 'text') return NknDM.onText(node.id, payload);
       if (portName === 'packet') return NknDM.onPacket(node.id, payload);
+      return;
+    }
+    if (node.type === 'NoClipBridge') {
+      if (portName === 'pose') return NoClip?.onPose?.(node.id, payload);
+      if (portName === 'resource') return NoClip?.onResource?.(node.id, payload);
+      if (portName === 'command') return NoClip?.onCommand?.(node.id, payload);
       return;
     }
     if (node.type === 'WebSerial') {
@@ -2261,6 +2268,10 @@ function refreshNodeResolution(force = false) {
 
     if (node.type === 'NknDM') {
       initNknDmNode(node);
+    }
+
+    if (node.type === 'NoClipBridge') {
+      initNoClipNode(node);
     }
 
     if (node.type === 'ImageInput') {
@@ -5286,6 +5297,15 @@ function refreshNodeResolution(force = false) {
     NknDM.init(node.id);
   }
 
+  function initNoClipNode(node) {
+    if (!node || node.type !== 'NoClipBridge') return;
+    NoClip?.refresh?.(node.id);
+    if (!node._noclipInit) {
+      NoClip?.init?.(node.id);
+      node._noclipInit = true;
+    }
+  }
+
   function openSettings(nodeId) {
     const node = WS.nodes.get(nodeId);
     if (!node) return;
@@ -6668,6 +6688,9 @@ function refreshNodeResolution(force = false) {
     if (nodeType === 'NknDM') {
       initNknDmNode(node);
     }
+    if (nodeType === 'NoClipBridge') {
+      initNoClipNode(node);
+    }
     if (nodeType === 'MCP') {
       const res = MCP.refresh(nodeId, { quiet: true });
       if (res && typeof res.catch === 'function') res.catch(() => { });
@@ -6981,6 +7004,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'NknDM') {
       NknDM.dispose(nodeId);
     }
+    if (node.type === 'NoClipBridge') {
+      NoClip?.dispose?.(nodeId);
+    }
     if (node.type === 'MCP') {
       MCP.dispose(nodeId);
     }
@@ -7043,6 +7069,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'LogicGate', label: 'Logic Gate', x: 520, y: 260 },
       { type: 'ImageInput', label: 'Image Input', x: 600, y: 220 },
       { type: 'NknDM', label: 'NKN DM', x: 720, y: 140 },
+      { type: 'NoClipBridge', label: 'NoClip Bridge', x: 760, y: 140 },
       { type: 'FileTransfer', label: 'File Transfer', x: 780, y: 200 },
       { type: 'Payments', label: 'Payments', x: 820, y: 260 },
       { type: 'MCP', label: 'MCP Server', x: 260, y: 220 },

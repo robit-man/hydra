@@ -237,6 +237,61 @@ const GraphTypes = {
       { key: 'heartbeatInterval', label: 'Heartbeat (s)', type: 'number', def: 15 }
     ]
   },
+  NoClipBridge: {
+    title: 'NoClip Bridge',
+    supportsNkn: true,
+    relayKey: 'targetAddr',
+    inputs: [
+      {
+        name: 'pose',
+        label: 'Pose',
+        tooltip: 'Pose payload with position/rotation for the remote scene.'
+      },
+      {
+        name: 'resource',
+        label: 'Resource',
+        tooltip: 'Resource descriptor to inject (GLTF URL, media, etc.).'
+      },
+      {
+        name: 'command',
+        label: 'Command',
+        tooltip: 'Arbitrary bridge command forwarded to the NoClip peer.'
+      }
+    ],
+    outputs: [
+      {
+        name: 'state',
+        label: 'State',
+        tooltip: 'Normalized state snapshots returned by the NoClip peer.'
+      },
+      {
+        name: 'pose',
+        label: 'Pose',
+        tooltip: 'Pose updates emitted by the NoClip peer.'
+      },
+      {
+        name: 'peers',
+        label: 'Peers',
+        tooltip: 'Discovery information for connected NoClip peers.'
+      },
+      {
+        name: 'events',
+        label: 'Events',
+        tooltip: 'Lifecycle events (friend responses, acknowledgements).'
+      },
+      {
+        name: 'chat',
+        label: 'Chat',
+        tooltip: 'Chat messages received over the bridge.'
+      }
+    ],
+    schema: [
+      { key: 'targetPub', label: 'Target NKN Pub', type: 'text', placeholder: 'hex64 peer id' },
+      { key: 'targetAddr', label: 'Target Address', type: 'text', placeholder: 'web.<hex64>' },
+      { key: 'room', label: 'Discovery Room (override)', type: 'text', placeholder: '(auto from url)' },
+      { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' }
+    ]
+  },
   Payments: {
     title: 'Payments',
     supportsNkn: false,

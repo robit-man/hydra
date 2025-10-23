@@ -1,4 +1,5 @@
 import { qs, LS } from './utils.js';
+import { createDiscovery as createNoClipDiscovery } from './nats.js';
 
 const NATS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/nats.ws/+esm';
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
@@ -375,7 +376,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       onlyFavorites: false
     },
     layout: {
-      activePane: 'list'
+      activePane: 'list',
+      activeNetwork: 'hydra'
     },
     chat: {
       activePeer: null,
@@ -384,6 +386,12 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
       typingTimers: new Map(),
       favorites: new Set(),
       promptMessage: null
+    },
+    noclip: {
+      discovery: null,
+      connecting: null,
+      peers: new Map(),
+      status: { state: 'idle', detail: '' }
     },
     pokeNoticeTimer: null,
     nknListenerAttached: false,
@@ -1059,10 +1067,13 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     els.favToggle = qs('#peerFavoritesToggle');
     els.tabs = qs('#peerTabs');
     els.tabButtons = els.tabs ? Array.from(els.tabs.querySelectorAll('.peer-tab')) : [];
+    els.networkTabs = qs('#peerNetworkTabs');
+    els.networkButtons = els.networkTabs ? Array.from(els.networkTabs.querySelectorAll('[data-network]')) : [];
     if (els.nameInput) els.nameInput.value = state.username || '';
     if (els.search) els.search.value = state.filters.search || '';
     if (els.favToggle) els.favToggle.classList.toggle('active', !!state.filters.onlyFavorites);
     setActivePane(state.layout.activePane);
+    setActiveNetwork(state.layout.activeNetwork, { render: false });
     updateSelf();
     updateBadge();
     renderChat();
@@ -1664,6 +1675,32 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
   }
 
+  function setActiveNetwork(network, { render = true } = {}) {
+    const normalized = network === 'noclip' ? 'noclip' : 'hydra';
+    if (state.layout.activeNetwork === normalized) {
+      if (render) {
+        renderPeers();
+        renderChat();
+      }
+      return;
+    }
+    state.layout.activeNetwork = normalized;
+    if (els.networkButtons && els.networkButtons.length) {
+      els.networkButtons.forEach((btn) => {
+        const match = (btn.dataset?.network || 'hydra') === normalized;
+        btn.classList.toggle('active', match);
+        btn.setAttribute('aria-pressed', match ? 'true' : 'false');
+      });
+    }
+    if (normalized === 'noclip') {
+      ensureNoclipDiscovery().catch(() => {});
+    }
+    if (render) {
+      renderPeers();
+      renderChat();
+    }
+  }
+
   function clearInlineChatDecision() {
     const row = els.chatWrap?.querySelector('.chat-decision-row');
     if (row) row.remove();
@@ -1721,6 +1758,23 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
 
   function renderChat() {
     if (!els.chatWrap) return;
+    const network = state.layout.activeNetwork || 'hydra';
+    const isHydra = network === 'hydra';
+    if (!isHydra) {
+      state.chat.activePeer = null;
+      if (els.chatName) els.chatName.textContent = 'Bridge required';
+      if (els.chatStatus) els.chatStatus.textContent = 'Use a NoClip Bridge node to exchange chat.';
+      if (els.chatMsgs) els.chatMsgs.innerHTML = '';
+      if (els.chatInput) {
+        els.chatInput.value = '';
+        els.chatInput.disabled = true;
+      }
+      if (els.chatSend) els.chatSend.disabled = true;
+      if (els.chatFav) els.chatFav.classList.remove('active');
+      if (els.chatTyping) els.chatTyping.classList.add('hidden');
+      clearInlineChatDecision();
+      return;
+    }
     const key = state.chat.activePeer;
     const discoveryReady = !!state.discovery;
     if (!key) {
@@ -1853,12 +1907,16 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     if (els.search && els.search.value !== state.filters.search) {
       els.search.value = state.filters.search || '';
     }
+    const network = state.layout.activeNetwork || 'hydra';
+    const isHydra = network === 'hydra';
     if (els.favToggle) {
-      els.favToggle.classList.toggle('active', !!state.filters.onlyFavorites);
+      els.favToggle.disabled = !isHydra;
+      els.favToggle.classList.toggle('active', isHydra && !!state.filters.onlyFavorites);
     }
     const now = nowSeconds();
-    let peers = Array.from(state.peers.values()).filter((peer) => peer?.nknPub);
-    if (state.filters.onlyFavorites) {
+    const peersMap = isHydra ? state.peers : state.noclip.peers;
+    let peers = Array.from(peersMap.values()).filter((peer) => peer?.nknPub);
+    if (isHydra && state.filters.onlyFavorites) {
       peers = peers.filter((peer) => state.chat.favorites.has(normalizePeerKey(peer)));
     }
     const searchTerm = (state.filters.search || '').trim().toLowerCase();
@@ -1873,8 +1931,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       const onlineA = a.online ? 1 : 0;
       const onlineB = b.online ? 1 : 0;
       if (onlineA !== onlineB) return onlineB - onlineA;
-      const orderA = state.peerOrder.get(normalizePubKey(a.nknPub || a.addr)) || Number.MAX_SAFE_INTEGER;
-      const orderB = state.peerOrder.get(normalizePubKey(b.nknPub || b.addr)) || Number.MAX_SAFE_INTEGER;
+      const orderA = isHydra
+        ? state.peerOrder.get(normalizePubKey(a.nknPub || a.addr)) || Number.MAX_SAFE_INTEGER
+        : Number.MAX_SAFE_INTEGER;
+      const orderB = isHydra
+        ? state.peerOrder.get(normalizePubKey(b.nknPub || b.addr)) || Number.MAX_SAFE_INTEGER
+        : Number.MAX_SAFE_INTEGER;
       if (orderA !== orderB) return orderA - orderB;
       const lastA = a.last || now;
       const lastB = b.last || now;
@@ -1887,14 +1949,17 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     if (!peers.length) {
       const empty = document.createElement('div');
       empty.className = 'peer-empty';
-      if (state.filters.onlyFavorites && !state.chat.favorites.size) {
+      if (isHydra && state.filters.onlyFavorites && !state.chat.favorites.size) {
         empty.textContent = 'No favorites saved yet.';
-      } else if (state.filters.onlyFavorites) {
-        empty.textContent = 'No favorites match your filters.';
       } else if (searchTerm) {
         empty.textContent = 'No peers match your search.';
-      } else {
+      } else if (isHydra) {
         empty.textContent = state.discovery ? 'No peers discovered yet.' : 'Discovery offline.';
+      } else {
+        const status = state.noclip.status?.state || 'idle';
+        if (status === 'error') empty.textContent = 'NoClip discovery unavailable.';
+        else if (status === 'connecting') empty.textContent = 'Connecting to NoClip discovery…';
+        else empty.textContent = 'No NoClip peers discovered yet.';
       }
       els.list.appendChild(empty);
       refreshStatus();
@@ -1914,7 +1979,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       const nameEl = document.createElement('div');
       nameEl.className = 'peer-name';
       const displayName = getDisplayName(peer);
-      const isFavorite = state.chat.favorites.has(normalizePeerKey(peer));
+      const isFavorite = isHydra && state.chat.favorites.has(normalizePeerKey(peer));
       nameEl.textContent = `${isFavorite ? '★ ' : ''}${displayName}`;
       meta.appendChild(nameEl);
 
@@ -1937,48 +2002,29 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
           : 0;
       parts.push(statusText);
       parts.push(`Last seen ${formatLast(lastSeconds)}`);
-      if (peer.meta?.graphId) parts.push(`Graph ${String(peer.meta.graphId).slice(0, 8)}`);
+      const graphLabel = peer.meta?.graphId;
+      if (graphLabel) parts.push(`Graph ${String(graphLabel).slice(0, 8)}`);
+      if (!isHydra) parts.push('NoClip network');
       infoEl.textContent = parts.join(' • ');
       meta.appendChild(infoEl);
 
       entry.appendChild(meta);
 
-      if (Array.isArray(peer.sharedSources) && peer.sharedSources.length) {
-        const sharedRow = document.createElement('div');
-        sharedRow.className = 'peer-shared';
-        sharedRow.append('Shared from ');
-        const first = peer.sharedSources[0];
-        const targetKey = first?.key || normalizePubKey(first?.label) || '';
-        if (!targetKey) {
-          return;
-        }
-        const label = first?.label || formatAddress(first?.key || '');
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = label || formatAddress(targetKey);
-        btn.addEventListener('click', () => scrollToPeer(targetKey));
-        sharedRow.appendChild(btn);
-        if (peer.sharedSources.length > 1) {
-          const more = document.createElement('span');
-          more.textContent = ` (+${peer.sharedSources.length - 1} more)`;
-          sharedRow.appendChild(more);
-        }
-        entry.appendChild(sharedRow);
-      }
-
       const actions = document.createElement('div');
       actions.className = 'peer-actions';
-      const syncBtn = document.createElement('button');
-      syncBtn.className = 'secondary';
-      syncBtn.textContent = 'Sync';
-      syncBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const target = peer.addr || peer.originalPub || peer.nknPub;
-        if (!target) return;
-        WorkspaceSync.promptSync(target);
-        hideModal();
-      });
-      actions.appendChild(syncBtn);
+      if (isHydra) {
+        const syncBtn = document.createElement('button');
+        syncBtn.className = 'secondary';
+        syncBtn.textContent = 'Sync';
+        syncBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const target = peer.addr || peer.originalPub || peer.nknPub;
+          if (!target) return;
+          WorkspaceSync.promptSync(target);
+          hideModal();
+        });
+        actions.appendChild(syncBtn);
+      }
 
       const pokeBtn = document.createElement('button');
       pokeBtn.className = 'ghost';
@@ -1986,7 +2032,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       pokeBtn.title = 'Send a notification ping';
       pokeBtn.addEventListener('click', async (e) => {
         e.preventDefault();
-        const target = targetAddress(peer);
+        const target = peer.addr || peer.originalPub || peer.nknPub;
         if (!target) return;
         const ok = await sendPeerPayload(target, { type: 'peer-poke', note: '👋' });
         if (ok) setBadge?.('Poke sent');
@@ -1994,23 +2040,44 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       });
       actions.appendChild(pokeBtn);
 
-      const chatBtn = document.createElement('button');
-      chatBtn.className = 'ghost';
-      chatBtn.textContent = 'Chat';
-      chatBtn.title = 'Request to chat';
-      chatBtn.addEventListener('click', async (e) => {
-        e.preventDefault();
-        await openChatWithPeer(peer);
-      });
-      actions.appendChild(chatBtn);
+      if (isHydra) {
+        const chatBtn = document.createElement('button');
+        chatBtn.className = 'ghost';
+        chatBtn.textContent = 'Chat';
+        chatBtn.title = 'Request to chat';
+        chatBtn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          await openChatWithPeer(peer);
+        });
+        actions.appendChild(chatBtn);
+      } else {
+        const bridgeBtn = document.createElement('button');
+        bridgeBtn.className = 'ghost';
+        bridgeBtn.textContent = 'Bridge';
+        bridgeBtn.title = 'Configure a NoClip Bridge node for this peer';
+        bridgeBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          promptNoClipBridge(peer);
+        });
+        actions.appendChild(bridgeBtn);
+      }
 
       entry.appendChild(actions);
-
       frag.appendChild(entry);
     });
     els.list.appendChild(frag);
     refreshStatus();
     renderChat();
+  }
+
+  function promptNoClipBridge(peer) {
+    const target = normalizePubKey(peer?.nknPub || peer?.addr || peer?.originalPub);
+    if (!target) {
+      setBadge?.('No peer identifier available', false);
+      return;
+    }
+    setBadge?.(`Configure a NoClip Bridge node with target ${target.slice(0, 8)}…`, true);
+    hideModal();
   }
 
   function rememberPeersFromDiscovery() {
@@ -2215,6 +2282,73 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     return promise;
   }
 
+  function handleNoclipDm(evt) {
+    if (!evt) return;
+    const msg = evt.msg || {};
+    const from = normalizePubKey(evt.from || msg.pub || msg.from);
+    if (!from) return;
+    const existing = state.noclip.peers.get(from) || { nknPub: from };
+    const merged = {
+      ...existing,
+      nknPub: from,
+      addr: msg.addr || existing.addr || evt.from || from,
+      last: msg.ts || nowSeconds(),
+      meta: { ...(existing.meta || {}), lastMessageType: msg.type || existing.meta?.lastMessageType || '' }
+    };
+    state.noclip.peers.set(from, merged);
+    if (state.layout.activeNetwork === 'noclip') scheduleRender();
+  }
+
+  async function ensureNoclipDiscovery() {
+    if (state.noclip.discovery) return state.noclip.discovery;
+    if (state.noclip.connecting) return state.noclip.connecting;
+    const promise = (async () => {
+      try {
+        await waitForNknAddress(6000).catch(() => null);
+      } catch (_) {
+        // ignore
+      }
+      const addr = state.meAddr || Net.nkn?.addr || '';
+      const pub = normalizePubKey(state.mePub || addr);
+      const roomName = sanitizeRoomName(
+        `${window.location.host || 'local'}${(window.location.pathname || '').replace(/\//g, '-')}`
+      );
+      const discovery = await createNoClipDiscovery({
+        room: roomName,
+        servers: DEFAULT_SERVERS,
+        me: {
+          nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
+          addr,
+          meta: { username: state.username || '', network: 'hydra' }
+        }
+      });
+      discovery.on('peer', (peer) => {
+        const normalized = normalizePeerEntry(peer);
+        if (!normalized) return;
+        const key = normalizePubKey(normalized.nknPub || normalized.addr);
+        if (!key) return;
+        state.noclip.peers.set(key, { ...normalized, source: 'noclip' });
+        if (state.layout.activeNetwork === 'noclip') scheduleRender();
+      });
+      discovery.on('dm', (evt) => handleNoclipDm(evt));
+      discovery.on('status', (ev) => {
+        if (!ev) return;
+        state.noclip.status = { state: ev.type || 'update', detail: ev.data ? String(ev.data) : '' };
+        if (state.layout.activeNetwork === 'noclip') scheduleRender();
+      });
+      state.noclip.status = { state: 'ready', detail: '' };
+      state.noclip.discovery = discovery;
+      return discovery;
+    })().catch((err) => {
+      state.noclip.status = { state: 'error', detail: err?.message || 'connect failed' };
+      throw err;
+    }).finally(() => {
+      state.noclip.connecting = null;
+    });
+    state.noclip.connecting = promise;
+    return promise;
+  }
+
   function bindUI() {
     if (els.button && !els.button._peerBound) {
       els.button.addEventListener('click', (e) => {
@@ -2296,6 +2430,18 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
           setActivePane(pane);
         });
         btn._peerBound = true;
+      });
+    }
+
+    if (els.networkButtons && els.networkButtons.length) {
+      els.networkButtons.forEach((btn) => {
+        if (btn._peerNetworkBound) return;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const network = btn.dataset?.network || 'hydra';
+          setActiveNetwork(network);
+        });
+        btn._peerNetworkBound = true;
       });
     }
 

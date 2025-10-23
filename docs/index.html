@@ -12,7 +12,8 @@
         {
             "imports": {
                 "three": "https://unpkg.com/three@0.152.2/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.152.2/examples/jsm/"
+                "three/addons/": "https://unpkg.com/three@0.152.2/examples/jsm/",
+                "nats.ws": "https://cdn.jsdelivr.net/npm/nats.ws@1.29.2/esm/nats.js"
             }
         }
     </script>
@@ -230,6 +231,10 @@
                         <div class="peer-self-name muted" id="peerSelfName"></div>
                     </div>
                     <div class="peer-filters">
+                        <div class="peer-network-tabs" id="peerNetworkTabs">
+                            <button type="button" class="ghost active" data-network="hydra">Hydra</button>
+                            <button type="button" class="ghost" data-network="noclip">NoClip</button>
+                        </div>
                         <input id="peerSearchInput" type="text" placeholder="Search peers" autocomplete="off"
                             spellcheck="false">
                         <button type="button" class="ghost" id="peerFavoritesToggle" title="Show favorites only">Favorites</button>

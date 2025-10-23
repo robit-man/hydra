@@ -169,6 +169,12 @@ const NodeStore = {
       autoAccept: false,
       autoChunk: false
     },
+    NoClipBridge: {
+      targetPub: '',
+      targetAddr: '',
+      room: 'hybrid-bridge',
+      autoConnect: true
+    },
     MCP: {
       base: 'http://127.0.0.1:9003',
       relay: '',
