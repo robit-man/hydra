@@ -2,8 +2,41 @@ import { createDiscovery as createNatsDiscovery } from './nats.js';
 
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const CONNECT_TIMEOUT_MS = 12000;
+const EARTH_RADIUS_M = 6371000;
 
-function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
+const toRadians = (deg) => (deg * Math.PI) / 180;
+
+const haversineDistance = (aLat, aLon, bLat, bLon) => {
+  if (![aLat, aLon, bLat, bLon].every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  const dLat = toRadians(bLat - aLat);
+  const dLon = toRadians(bLon - aLon);
+  const lat1 = toRadians(aLat);
+  const lat2 = toRadians(bLat);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLon = Math.sin(dLon / 2);
+  const aa = sinLat * sinLat + sinLon * sinLon * Math.cos(lat1) * Math.cos(lat2);
+  const c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
+  return EARTH_RADIUS_M * c;
+};
+
+const normalizeGeo = (geo) => {
+  if (!geo || typeof geo !== 'object') return null;
+  const lat = Number(geo.lat);
+  const lon = Number(geo.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const normalized = { lat, lon };
+  if (Number.isFinite(geo.radius)) normalized.radius = Number(geo.radius);
+  if (typeof geo.gh === 'string') normalized.gh = geo.gh;
+  if (Number.isFinite(geo.prec)) normalized.prec = Number(geo.prec);
+  if (Number.isFinite(geo.eye)) normalized.eye = Number(geo.eye);
+  if (Number.isFinite(geo.ground)) normalized.ground = Number(geo.ground);
+  if (Number.isFinite(geo.ts)) normalized.ts = Number(geo.ts);
+  return normalized;
+};
+
+const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const NODE_STATE = new Map();
   const TARGET_INDEX = new Map();
   let discovery = null;
@@ -45,6 +78,8 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
       const record = NodeStore.ensure(key, 'NoClipBridge') || { config: {} };
       const cfg = record.config || {};
       NODE_STATE.set(key, {
+        nodeId: key,
+        graphId: CFG?.graphId || '',
         cfg,
         targetPub: sanitizePubKey(cfg.targetPub),
         targetAddr: sanitizeAddr(cfg.targetAddr) || null,
@@ -79,6 +114,97 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
     if (!normalized) return;
     if (!TARGET_INDEX.has(normalized)) TARGET_INDEX.set(normalized, new Set());
     TARGET_INDEX.get(normalized).add(nodeId);
+  };
+
+  const upsertRemotePeer = (state, pub, updates = {}) => {
+    if (!state) return null;
+    const normalized = sanitizePubKey(pub);
+    if (!normalized) return null;
+    let entry = state.remotePeers.get(normalized);
+    if (!entry) {
+      entry = {
+        pub: normalized,
+        addr: '',
+        meta: {},
+        geo: null,
+        pose: null,
+        state: null,
+        lastTs: 0
+      };
+    }
+    if (updates.addr) {
+      const addr = sanitizeAddr(updates.addr);
+      if (addr) entry.addr = addr;
+    }
+    if (updates.meta) {
+      entry.meta = { ...(entry.meta || {}), ...(updates.meta || {}) };
+    }
+    if (updates.geo) {
+      const geo = normalizeGeo(updates.geo);
+      if (geo) entry.geo = geo;
+    }
+    if (updates.pose) {
+      entry.pose = updates.pose;
+    }
+    if (updates.state) {
+      entry.state = { ...(entry.state || {}), ...(updates.state || {}) };
+    }
+    if (updates.lastTs) {
+      entry.lastTs = Number(updates.lastTs) || entry.lastTs;
+    }
+    state.remotePeers.set(normalized, entry);
+    return entry;
+  };
+
+  const peersForOutput = (state) => {
+    if (!state) return [];
+    return Array.from(state.remotePeers.values()).map((entry) => ({
+      nknPub: entry.pub,
+      addr: entry.addr || `web.${entry.pub}`,
+      meta: entry.meta || {},
+      geo: entry.geo || null,
+      pose: entry.pose || null,
+      state: entry.state || null,
+      last: entry.lastTs || 0
+    }));
+  };
+
+  const selectTargets = (state, filters = {}) => {
+    const list = peersForOutput(state);
+    if (!list.length) return [];
+    const requireLocation = !!filters.requireLocation;
+    const geohashPrefix = typeof filters.geohashPrefix === 'string' ? filters.geohashPrefix.trim().toLowerCase() : '';
+    const near = filters.near && typeof filters.near === 'object' ? filters.near : null;
+    const radius = Number.isFinite(near?.radiusMeters) ? Number(near.radiusMeters) : null;
+    const nearLat = Number(near?.lat);
+    const nearLon = Number(near?.lon);
+
+    let filtered = list.filter((peer) => {
+      const geo = peer.geo;
+      if (requireLocation && !geo) return false;
+      if (geohashPrefix && (!geo?.gh || !geo.gh.toLowerCase().startsWith(geohashPrefix))) return false;
+      if (radius && Number.isFinite(nearLat) && Number.isFinite(nearLon)) {
+        if (!geo) return false;
+        const distance = haversineDistance(nearLat, nearLon, geo.lat, geo.lon);
+        if (!Number.isFinite(distance) || distance > radius) return false;
+      }
+      if (Array.isArray(filters.tags) && filters.tags.length) {
+        const tagSet = new Set(
+          (Array.isArray(peer.meta?.tags) ? peer.meta.tags : [])
+            .map((tag) => String(tag || '').trim().toLowerCase())
+            .filter(Boolean)
+        );
+        const missing = filters.tags.some((tag) => !tagSet.has(String(tag || '').trim().toLowerCase()));
+        if (missing) return false;
+      }
+      return true;
+    });
+
+    if (Number.isFinite(filters.maxPeers) && filters.maxPeers > 0) {
+      filtered = filtered.slice(0, Math.max(1, Math.floor(filters.maxPeers)));
+    }
+
+    return filtered.map((peer) => peer.nknPub).filter(Boolean);
   };
 
   const waitForNknClient = (timeoutMs = CONNECT_TIMEOUT_MS) =>
@@ -127,27 +253,22 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
       });
       discoveryClient.on('dm', handleDiscoveryDm);
       discoveryClient.on('peer', (peer) => {
-        // fan peer lists to nodes watching this pub
         const normalized = sanitizePubKey(peer?.nknPub);
         if (!normalized) return;
         const watchers = TARGET_INDEX.get(normalized);
         if (!watchers || !watchers.size) return;
+        const updates = {
+          addr: peer.addr || '',
+          meta: peer.meta || {},
+          lastTs: peer.last || nowMs()
+        };
         for (const nodeId of watchers) {
           const st = ensureNodeState(nodeId);
           if (!st) continue;
-          st.remotePeers.set(normalized, {
-            addr: peer.addr || '',
-            meta: peer.meta || {},
-            last: peer.last || 0
-          });
+          upsertRemotePeer(st, normalized, updates);
           Router.sendFrom(nodeId, 'peers', {
             nodeId,
-            peers: Array.from(st.remotePeers.entries()).map(([key, entry]) => ({
-              nknPub: key,
-              addr: entry.addr || '',
-              last: entry.last || 0,
-              meta: entry.meta || {}
-            }))
+            peers: peersForOutput(st)
           });
         }
       });
@@ -170,6 +291,27 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
     const type = msg.type;
     if (type === 'hybrid-bridge-state') {
       for (const nodeId of watchers) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+        if (Array.isArray(msg.peers)) {
+          msg.peers.forEach((entry) => {
+            const peerPub = entry?.nknPub || entry?.pub || entry?.addr;
+            if (!peerPub) return;
+            upsertRemotePeer(st, peerPub, {
+              addr: entry.addr || '',
+              meta: entry.meta || {},
+              geo: entry.geo,
+              pose: entry.pose,
+              state: entry.state,
+              lastTs: entry.last || msg.ts || nowMs()
+            });
+          });
+          Router.sendFrom(nodeId, 'peers', {
+            nodeId,
+            peer: from,
+            peers: peersForOutput(st)
+          });
+        }
         Router.sendFrom(nodeId, 'state', {
           nodeId,
           peer: from,
@@ -185,15 +327,17 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
             ts: msg.ts || nowMs()
           });
         }
-        if (msg.peers) {
-          Router.sendFrom(nodeId, 'peers', {
-            nodeId,
-            peer: from,
-            peers: msg.peers
-          });
-        }
       }
-    } else if (type === 'hybrid-friend-response') {
+    } else if (type === 'hybrid-friend-response' || type === 'hybrid-bridge-log') {
+      for (const nodeId of watchers) {
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type,
+          payload: msg
+        });
+      }
+    } else if (type === 'hybrid-bridge-resource' || type === 'hybrid-bridge-command') {
       for (const nodeId of watchers) {
         Router.sendFrom(nodeId, 'events', {
           nodeId,
@@ -281,9 +425,23 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
     return out;
   };
 
-  async function sendBridgePayload(nodeId, state, payload) {
-    if (!state?.targetPub) {
-      maybeBadge(state || {}, 'No target peer configured', false);
+  async function sendBridgePayload(nodeId, state, payload, { targets } = {}) {
+    const targetList = ensureArray(targets)
+      .map((value) => {
+        if (!value) return '';
+        if (typeof value === 'string') {
+          const text = value.trim();
+          const stripped = text.replace(/^graph\./i, '');
+          return sanitizePubKey(stripped);
+        }
+        const candidate = value?.pub || value?.nknPub || value?.addr || '';
+        const stripped = String(candidate).replace(/^graph\./i, '');
+        return sanitizePubKey(stripped);
+      })
+      .filter(Boolean);
+    if (state?.targetPub && !targetList.length) targetList.push(state.targetPub);
+    if (!targetList.length) {
+      maybeBadge(state || {}, 'No eligible peers selected', false);
       return false;
     }
     let disco;
@@ -295,14 +453,17 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
       return false;
     }
     if (!disco) return false;
-    try {
-      await disco.dm(state.targetPub, payload);
-      return true;
-    } catch (err) {
-      log?.(`[noclip] send failed: ${err?.message || err}`);
-      maybeBadge(state, 'Bridge send failed', false);
-      return false;
+    let success = false;
+    for (const targetPub of targetList) {
+      try {
+        await disco.dm(targetPub, { ...payload, target: targetPub });
+        success = true;
+      } catch (err) {
+        log?.(`[noclip] send failed to ${targetPub}: ${err?.message || err}`);
+      }
     }
+    if (!success) maybeBadge(state, 'Bridge send failed', false);
+    return success;
   }
 
   return {
@@ -320,6 +481,7 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
       const record = NodeStore.ensure(nodeId, 'NoClipBridge');
       const cfg = record?.config || {};
       st.cfg = cfg;
+       st.graphId = CFG?.graphId || st.graphId;
       overrideRoom = sanitizeRoomName(cfg.room || overrideRoom || 'hybrid-bridge');
       st.targetPub = sanitizePubKey(cfg.targetPub);
       st.targetAddr = sanitizeAddr(cfg.targetAddr) || null;
@@ -348,20 +510,60 @@ function createNoClipBridge({ NodeStore, Router, Net, setBadge, log }) {
     async onResource(nodeId, payload) {
       const st = ensureNodeState(nodeId);
       if (!st || !payload) return;
-      let resource = null;
-      if (typeof payload === 'string') {
-        resource = { type: 'text', value: payload };
-      } else if (payload && typeof payload === 'object') {
-        resource = payload;
+      let request = payload;
+      if (typeof payload === 'string') request = { resource: { type: 'text', value: payload } };
+      if (Array.isArray(payload)) request = { resource: { items: payload } };
+      if (!request || typeof request !== 'object') return;
+
+      let resource = request.resource;
+      if (!resource || typeof resource !== 'object') {
+        resource = { type: 'object', value: request };
       }
-      if (!resource) return;
+
+      if (!resource.id) {
+        resource.id = `res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      }
+
+      if (!resource.label) {
+        const graphLabel = st.graphId || CFG?.graphId || '';
+        resource.label = graphLabel ? `${graphLabel}` : `node:${nodeId}`;
+      }
+
+      const filters = request.filters || resource.filters || null;
+      const targetSeeds = ensureArray(request.targets || resource.targets);
+      let targets = targetSeeds
+        .map((target) => sanitizePubKey(typeof target === 'string' ? target : target?.pub || target?.nknPub))
+        .filter(Boolean);
+      if (!targets.length && filters) {
+        targets = selectTargets(st, filters);
+      }
+
       const packet = {
         type: 'hybrid-bridge-resource',
         nodeId,
+        issuer: {
+          graphId: st.graphId || CFG?.graphId || '',
+          nodeId,
+          address: st.cfg?.address || st.cfg?.targetAddr || ''
+        },
         resource,
+        filters: filters || null,
         ts: nowMs()
       };
-      await sendBridgePayload(nodeId, st, packet);
+
+      const ok = await sendBridgePayload(nodeId, st, packet, { targets });
+      Router.sendFrom(nodeId, 'events', {
+        nodeId,
+        peer: targets,
+        type: 'resource-dispatched',
+        payload: {
+          resource,
+          filters,
+          success: ok,
+          targets
+        }
+      });
+      if (ok) maybeBadge(st, `Resource sent to ${targets?.length || 1} peer${targets?.length === 1 ? '' : 's'}`);
     },
 
     async onCommand(nodeId, payload) {

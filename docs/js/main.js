@@ -176,6 +176,7 @@ const NoClipBridge = createNoClipBridge({
   NodeStore,
   Router,
   Net,
+  CFG,
   setBadge,
   log
 });
