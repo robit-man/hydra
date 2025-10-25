@@ -444,10 +444,21 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         // Auto-respond with acknowledgment
         sendBridgePayload(nodeId, st, {
           type: 'hybrid-bridge-handshake-ack',
-          capabilities: ['graph', 'resources', 'commands', 'data-export'],
+          capabilities: ['graph', 'resources', 'commands', 'data-export', 'audio'],
           graphId: CFG?.graphId || nodeId,
           nodeId,
           ts: nowMs()
+        });
+      }
+    } else if (type === 'smart-object-audio') {
+      // Handle audio packets from NoClip Smart Objects for ASR
+      for (const nodeId of watchers) {
+        Router.sendFrom(nodeId, 'audioInput', {
+          nodeId,
+          peer: from,
+          objectId: msg.objectId,
+          audioPacket: msg.audioPacket || msg,
+          ts: msg.ts || nowMs()
         });
       }
     }
@@ -688,6 +699,32 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         ts: nowMs()
       };
       await sendBridgePayload(nodeId, st, packet);
+    },
+
+    async onAudioOutput(nodeId, payload) {
+      // Handle audio packets from TTS node to send to NoClip Smart Objects
+      const st = ensureNodeState(nodeId);
+      if (!st || !payload) return;
+
+      const packet = {
+        type: 'smart-object-audio-output',
+        nodeId,
+        audioPacket: payload,
+        ts: nowMs()
+      };
+
+      await sendBridgePayload(nodeId, st, packet);
+    },
+
+    async onAudioInput(nodeId, payload) {
+      // This is called when audio comes from NoClip - route it to connected nodes
+      // The actual routing happens in handleDiscoveryDm via 'smart-object-audio' type
+      // This handler could be used for outgoing audio requests if needed
+      const st = ensureNodeState(nodeId);
+      if (!st || !payload) return;
+
+      // For now, just log reception - actual routing happens in handleDiscoveryDm
+      log?.(`[noclip-bridge] Received audio input for node ${nodeId}`);
     },
 
     requestFriend(nodeId, note) {

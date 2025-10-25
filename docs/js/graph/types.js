@@ -3,7 +3,10 @@ const GraphTypes = {
     title: 'ASR',
     supportsNkn: true,
     relayKey: 'relay',
-    inputs: [{ name: 'mute', label: 'Mute' }],
+    inputs: [
+      { name: 'mute', label: 'Mute' },
+      { name: 'audio', label: 'Audio Input', type: 'audio' }
+    ],
     outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }, { name: 'active', label: 'Active' }],
     schema: [
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8126' },
@@ -53,7 +56,10 @@ const GraphTypes = {
     supportsNkn: true,
     relayKey: 'relay',
     inputs: [{ name: 'text' }, { name: 'mute', label: 'Mute' }],
-    outputs: [{ name: 'active', label: 'Active' }],
+    outputs: [
+      { name: 'active', label: 'Active' },
+      { name: 'audio', label: 'Audio Stream', type: 'audio' }
+    ],
     schema: [
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8123' },
       { key: 'relay', label: 'NKN Relay', type: 'text' },
@@ -256,6 +262,12 @@ const GraphTypes = {
         name: 'command',
         label: 'Command',
         tooltip: 'Arbitrary bridge command forwarded to the NoClip peer.'
+      },
+      {
+        name: 'audioOutput',
+        label: 'Audio Out',
+        type: 'audio',
+        tooltip: 'Audio stream to send to NoClip Smart Objects (from TTS).'
       }
     ],
     outputs: [
@@ -283,6 +295,12 @@ const GraphTypes = {
         name: 'chat',
         label: 'Chat',
         tooltip: 'Chat messages received over the bridge.'
+      },
+      {
+        name: 'audioInput',
+        label: 'Audio In',
+        type: 'audio',
+        tooltip: 'Audio stream from NoClip Smart Objects (for ASR).'
       }
     ],
     schema: [

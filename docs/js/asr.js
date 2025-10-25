@@ -1224,6 +1224,74 @@ function createASR({
     }
   };
 
+  ASR.onAudio = async (nodeId, payload) => {
+    if (!nodeId || !payload) return;
+
+    // Only process if this ASR node is the active owner
+    if (ASR.ownerId !== nodeId) {
+      // Auto-start ASR if not running and receiving external audio
+      try {
+        const rec = NodeStore.ensure(nodeId, 'ASR');
+        const cfg = rec?.config || {};
+        await ASR.start(nodeId, cfg);
+      } catch (err) {
+        log(`[asr] Failed to auto-start for external audio: ${err?.message || err}`);
+        return;
+      }
+    }
+
+    if (ASR.ownerId !== nodeId || ASR._muted) return;
+
+    try {
+      // Extract audio data from packet
+      const audioData = payload.data || payload;
+      const format = payload.format || 'pcm16';
+      const sampleRate = payload.sampleRate || 22050;
+
+      if (!audioData || !Array.isArray(audioData)) {
+        log('[asr] Invalid audio data format');
+        return;
+      }
+
+      // Convert PCM16 Int16Array to Float32Array
+      let f32;
+      if (format === 'pcm16') {
+        const int16 = new Int16Array(audioData);
+        f32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) {
+          f32[i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+        }
+      } else if (format === 'float32') {
+        f32 = new Float32Array(audioData);
+      } else {
+        log(`[asr] Unsupported audio format: ${format}`);
+        return;
+      }
+
+      // Resample if needed to match ASR target rate
+      const targetRate = ASR._rate || 16000;
+      if (sampleRate !== targetRate) {
+        f32 = ASR.resample(f32, sampleRate, targetRate);
+      }
+
+      // Push audio into the processing pipeline
+      // This will be picked up by the normal processing loop
+      ASR.pushF32(f32);
+
+      // Update visualization if active
+      const now = performance.now();
+      let sum = 0;
+      for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+      const rmsCur = Math.sqrt(sum / f32.length);
+
+      // Update RMS display
+      ASR._setRms(rmsCur, rmsCur, nodeId);
+
+    } catch (err) {
+      log(`[asr] Error processing external audio: ${err?.message || err}`);
+    }
+  };
+
   ASR.refreshConfig = (nodeId) => {
     if (!nodeId) return;
     const current = lastActiveByNode.get(nodeId) === true;

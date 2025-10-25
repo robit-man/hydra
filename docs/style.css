@@ -3530,3 +3530,21 @@ button.ghost.danger:disabled {
   overflow: auto;
   white-space: pre-wrap;
 }
+
+/* Audio port styling for Smart Objects */
+.audio-port {
+  background: linear-gradient(135deg, #5ee3a6, #a8ff60) !important;
+  box-shadow: 0 0 8px rgba(94, 227, 166, 0.6) !important;
+  animation: audio-pulse 2s ease-in-out infinite;
+}
+
+@keyframes audio-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.1);
+  }
+}

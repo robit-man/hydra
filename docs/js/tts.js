@@ -527,7 +527,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       chain: Promise.resolve(),
       muted: muteRequests.get(nodeId) === true,
       active: false,
-      lastProducedAt: 0
+      lastProducedAt: 0,
+      audioSeq: 0
     };
 
     node.onaudioprocess = (evt) => {
@@ -562,6 +563,30 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       if (produced && !st.muted) {
         st.lastProducedAt = now;
         setActiveState(nodeId, st, true);
+
+        // Emit raw audio packet through the audio output port for Smart Objects
+        if (Router && typeof Router.sendFrom === 'function') {
+          // Convert Float32Array to Int16Array (PCM16) for transmission
+          const pcm16 = new Int16Array(out.length);
+          for (let i = 0; i < out.length; i++) {
+            const s = Math.max(-1, Math.min(1, out[i]));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+
+          const audioPacket = {
+            type: 'audio',
+            format: 'pcm16',
+            sampleRate: st.sr || 22050,
+            channels: 1,
+            samples: out.length,
+            data: Array.from(pcm16),
+            timestamp: now,
+            sequence: st.audioSeq || 0
+          };
+
+          st.audioSeq = (st.audioSeq || 0) + 1;
+          Router.sendFrom(nodeId, 'audio', audioPacket);
+        }
       } else {
         const elapsed = now - (st.lastProducedAt || 0);
         if (st.muted) {

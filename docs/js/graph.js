@@ -1082,7 +1082,7 @@ function refreshNodeResolution(force = false) {
     }
   }
 
-  function createInputPort(node, container, portName, label = portName, tooltip = '') {
+  function createInputPort(node, container, portName, label = portName, tooltip = '', portType = null) {
     if (!node || !container) return null;
     node.portEls = node.portEls || {};
     const key = `in:${portName}`;
@@ -1096,8 +1096,12 @@ function refreshNodeResolution(force = false) {
     const portEl = document.createElement('div');
     portEl.className = 'wp-port in';
     portEl.dataset.port = portName;
+    if (portType) portEl.dataset.portType = portType;
     applyPortTooltip(portEl, label, tooltip);
-    portEl.innerHTML = `<span class="dot"></span><span>${label}</span>`;
+
+    // Audio ports get special styling
+    const dotClass = portType === 'audio' ? 'dot audio-port' : 'dot';
+    portEl.innerHTML = `<span class="${dotClass}"></span><span>${label}</span>`;
     node.portEls[key] = portEl;
 
     portEl.addEventListener('click', (ev) => {
@@ -1185,7 +1189,7 @@ function refreshNodeResolution(force = false) {
     return portEl;
   }
 
-  function createOutputPort(node, container, portName, label = portName, tooltip = '') {
+  function createOutputPort(node, container, portName, label = portName, tooltip = '', portType = null) {
     if (!node || !container) return null;
     node.portEls = node.portEls || {};
     const key = `out:${portName}`;
@@ -1199,8 +1203,12 @@ function refreshNodeResolution(force = false) {
     const portEl = document.createElement('div');
     portEl.className = 'wp-port out';
     portEl.dataset.port = portName;
+    if (portType) portEl.dataset.portType = portType;
     applyPortTooltip(portEl, label, tooltip);
-    portEl.innerHTML = `<span>${label}</span><span class="dot"></span>`;
+
+    // Audio ports get special styling
+    const dotClass = portType === 'audio' ? 'dot audio-port' : 'dot';
+    portEl.innerHTML = `<span>${label}</span><span class="${dotClass}"></span>`;
     node.portEls[key] = portEl;
 
     portEl.addEventListener('click', (ev) => {
@@ -2279,11 +2287,11 @@ function refreshNodeResolution(force = false) {
     }
 
     for (const p of (t.inputs || [])) {
-      createInputPort(node, left, p.name, p.label || p.name, p.tooltip);
+      createInputPort(node, left, p.name, p.label || p.name, p.tooltip, p.type);
     }
 
     for (const p of (t.outputs || [])) {
-      createOutputPort(node, right, p.name, p.label || p.name, p.tooltip);
+      createOutputPort(node, right, p.name, p.label || p.name, p.tooltip, p.type);
     }
 
     if (node.type === 'Meshtastic') {
