@@ -354,6 +354,31 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           message: msg
         });
       }
+    } else if (type === 'hybrid-bridge-handshake') {
+      // Handle handshake request from NoClip peer
+      for (const nodeId of watchers) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+
+        // Send handshake event to node
+        Router.sendFrom(nodeId, 'handshake', {
+          nodeId,
+          peer: from,
+          capabilities: msg.capabilities || [],
+          clientType: msg.clientType || 'unknown',
+          graphId: msg.graphId || '',
+          ts: msg.ts || nowMs()
+        });
+
+        // Auto-respond with acknowledgment
+        sendBridgePayload(nodeId, st, {
+          type: 'hybrid-bridge-handshake-ack',
+          capabilities: ['graph', 'resources', 'commands', 'data-export'],
+          graphId: CFG?.graphId || nodeId,
+          nodeId,
+          ts: nowMs()
+        });
+      }
     }
   }
 
