@@ -39,6 +39,7 @@ const ensureArray = (value) => (Array.isArray(value) ? value : []);
 function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const NODE_STATE = new Map();
   const TARGET_INDEX = new Map();
+  const NOCLIP_PEERS = new Map(); // Track discovered NoClip peers
   let discovery = null;
   let discoveryInit = null;
   let overrideRoom = null;
@@ -56,7 +57,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const text = String(value).trim();
     if (!text) return '';
     if (/^[a-z0-9_-]+\.[0-9a-f]{64}$/i.test(text)) return text;
-    if (/^[0-9a-f]{64}$/i.test(text)) return `web.${text.toLowerCase()}`;
+    // Use noclip. prefix for NoClip peers (changed from web.)
+    if (/^[0-9a-f]{64}$/i.test(text)) return `noclip.${text.toLowerCase()}`;
     return '';
   };
 
@@ -108,6 +110,23 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
     } catch (err) {
       return null;
+    }
+  };
+
+  const updateNoclipBadge = () => {
+    try {
+      const badge = document.querySelector('#noclipPeerBadge');
+      if (!badge) return;
+
+      const count = NOCLIP_PEERS.size;
+      if (count > 0) {
+        badge.textContent = String(count);
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+    } catch (err) {
+      // Silently fail if badge element doesn't exist
     }
   };
 
@@ -200,7 +219,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (!state) return [];
     return Array.from(state.remotePeers.values()).map((entry) => ({
       nknPub: entry.pub,
-      addr: entry.addr || `web.${entry.pub}`,
+      addr: entry.addr || `noclip.${entry.pub}`,
       meta: entry.meta || {},
       geo: entry.geo || null,
       pose: entry.pose || null,
@@ -295,6 +314,18 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       discoveryClient.on('peer', (peer) => {
         const normalized = sanitizePubKey(peer?.nknPub);
         if (!normalized) return;
+
+        // Track NoClip peers (identified by network: 'noclip' in metadata)
+        if (peer.meta?.network === 'noclip') {
+          NOCLIP_PEERS.set(normalized, {
+            pub: normalized,
+            addr: peer.addr || `noclip.${normalized}`,
+            meta: peer.meta || {},
+            last: peer.last || nowMs()
+          });
+          updateNoclipBadge();
+        }
+
         const watchers = TARGET_INDEX.get(normalized);
         if (!watchers || !watchers.size) return;
         const updates = {

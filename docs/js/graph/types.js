@@ -135,7 +135,7 @@ const GraphTypes = {
     ],
     schema: [
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:8130' },
-      { key: 'relay', label: 'NKN Relay', type: 'text', placeholder: 'graph.router' },
+      { key: 'relay', label: 'NKN Relay', type: 'text', placeholder: 'hydra.router' },
       { key: 'service', label: 'Service Alias', type: 'text', placeholder: 'web_scrape' },
       { key: 'api', label: 'API Key / Bearer', type: 'text', placeholder: '(optional)' },
       { key: 'headless', label: 'Headless', type: 'select', options: ['true', 'false'], def: 'true' },
@@ -287,7 +287,7 @@ const GraphTypes = {
     ],
     schema: [
       { key: 'targetPub', label: 'Target NKN Pub', type: 'text', placeholder: 'hex64 peer id' },
-      { key: 'targetAddr', label: 'Target Address', type: 'text', placeholder: 'web.<hex64>' },
+      { key: 'targetAddr', label: 'Target Address', type: 'text', placeholder: 'noclip.<hex64>' },
       { key: 'room', label: 'Discovery Room (override)', type: 'text', placeholder: '(auto from url)' },
       { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' }
     ]

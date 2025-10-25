@@ -1742,7 +1742,7 @@ function refreshNodeResolution(force = false) {
           <div class="muted" style="margin-top:10px;">Send Targets</div>
           <div class="media-targets">
             <div class="media-target-entry">
-              <input data-media-target-input type="text" placeholder="graph.peer" autocapitalize="none" autocomplete="off" spellcheck="false" />
+              <input data-media-target-input type="text" placeholder="hydra.peer" autocapitalize="none" autocomplete="off" spellcheck="false" />
               <button type="button" class="ghost" data-media-target-add title="Add target">＋</button>
             </div>
             <div class="media-target-chips" data-media-target-chips></div>
@@ -6320,7 +6320,7 @@ function refreshNodeResolution(force = false) {
 
       const addInput = document.createElement('input');
       addInput.type = 'text';
-      addInput.placeholder = 'graph.peer';
+      addInput.placeholder = 'hydra.peer';
       addInput.autocomplete = 'off';
       addInput.spellcheck = false;
       addInput.className = 'media-settings-input';

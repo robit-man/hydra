@@ -2660,6 +2660,12 @@ audio {
   height: 32px
 }
 
+.peer-network-tabs{
+  display:flex;
+  flex-flow:wrap;
+  gap:8px;
+}
+
 .peer-modal-body {
   display: flex;
   flex-direction: column;
@@ -3090,6 +3096,24 @@ audio {
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
+}
+
+.noclip-peer-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 2px;
+  background: #ffd700;
+  color: #000;
+  font-weight: bold;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 0 4px rgba(255, 215, 0, 0.5);
 }
 
 #peerListButton {

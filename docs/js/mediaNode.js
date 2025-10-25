@@ -82,7 +82,8 @@ const ensureGraphPrefix = (addr) => {
   const raw = stripGraphPrefix(addr);
   if (!raw) return '';
   const lower = raw.toLowerCase();
-  return lower.startsWith('graph.') ? lower : `graph.${lower}`;
+  // Use hydra. prefix for Hydra peers (changed from graph.)
+  return lower.startsWith('hydra.') ? lower : `hydra.${lower}`;
 };
 
 const formatAddress = (addr) => {
@@ -650,7 +651,7 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
   async function sendPing(id, address) {
     const now = Date.now();
     const normalized = ensureGraphPrefix(address);
-    if (!normalized || normalized.startsWith('graph.local.')) return;
+    if (!normalized || normalized.startsWith('hydra.local.')) return;
     const meta = ensurePeerMeta(id, normalized) || {};
     const pingId = `ping.${now}.${Math.random().toString(16).slice(2, 8)}`;
     const nextMissed = meta.awaitingPingId ? (meta.missed || 0) + 1 : meta.missed || 0;
@@ -671,7 +672,7 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
   function startHeartbeat(id, address) {
     const st = ensureState(id);
     const normalized = ensureGraphPrefix(address);
-    if (!normalized || normalized.startsWith('graph.local.') || st.heartbeats.has(normalized)) return;
+    if (!normalized || normalized.startsWith('hydra.local.') || st.heartbeats.has(normalized)) return;
     const meta = ensurePeerMeta(id, normalized);
     if (!isHandshakeAccepted(meta)) return;
     mediaLog('heartbeat started', { nodeId: id, address: normalized });

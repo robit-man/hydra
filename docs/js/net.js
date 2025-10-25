@@ -81,7 +81,8 @@ const Net = {
       return null;
     };
 
-    let options = { identifier: 'graph', numSubClients: 4, wsConnHeartbeatTimeout: 60000 };
+    // Use hydra. prefix for Hydra peers (changed from graph.)
+    let options = { identifier: 'hydra', numSubClients: 4, wsConnHeartbeatTimeout: 60000 };
     const normalizedSeed = normalizeSeedForUse(seed);
     if (normalizedSeed) options.seed = normalizedSeed;
     let client;
@@ -90,7 +91,7 @@ const Net = {
     } catch (err) {
       if (normalizedSeed) {
         try { LS.del(NKN_SEED_KEY); } catch (_) {}
-        options = { identifier: 'graph', numSubClients: 4, wsConnHeartbeatTimeout: 60000 };
+        options = { identifier: 'hydra', numSubClients: 4, wsConnHeartbeatTimeout: 60000 };
         client = new window.nkn.MultiClient(options);
       } else {
         throw err;

@@ -130,7 +130,8 @@ function createNknDM({ getNode, NodeStore, Net, CFG, Router, log, setRelayState 
   function ensureGraphPrefix(addr) {
     const raw = stripGraphPrefix(addr);
     if (!raw) return '';
-    return raw.startsWith('graph.') ? raw : `graph.${raw}`;
+    // Use hydra. prefix for Hydra peers (changed from graph.)
+    return raw.startsWith('hydra.') ? raw : `hydra.${raw}`;
   }
 
   const NKNDM_META_KEYS = [

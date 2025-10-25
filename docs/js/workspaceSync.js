@@ -74,14 +74,16 @@ function createWorkspaceSync({
 
   function stripGraphPrefix(addr) {
     if (!addr) return '';
-    return String(addr).replace(/^graph\./i, '');
+    // Strip both graph. and hydra. prefixes for backwards compatibility
+    return String(addr).replace(/^(graph|hydra)\./i, '');
   }
 
   function ensureGraphPrefix(addr) {
     const raw = stripGraphPrefix(addr);
     if (!raw) return '';
     if (/^[a-z0-9]+\./i.test(String(addr))) return String(addr);
-    return `graph.${raw}`;
+    // Use hydra. prefix for Hydra peers (changed from graph.)
+    return `hydra.${raw}`;
   }
 
   const qrReady = new Promise((resolve) => {
@@ -141,6 +143,54 @@ function createWorkspaceSync({
   function consumeSearchParam() {
     try {
       const url = new URL(window.location.href);
+
+      // Check for ?hydra= param (new format: hydra.<hex>)
+      let hydraValue = url.searchParams.get('hydra');
+      if (hydraValue) {
+        // Handle hydra.<hex> format
+        const parts = hydraValue.split('.');
+        const hex = parts.length === 2 && parts[0] === 'hydra' ? parts[1] : hydraValue;
+        const sanitized = sanitizeHex(hex);
+
+        if (sanitized) {
+          state.lastShareParam = sanitized;
+          state.lastShareType = 'hydra';
+          url.searchParams.delete('hydra');
+          const newSearch = url.searchParams.toString();
+          const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
+          try {
+            window.history.replaceState({}, document.title, newUrl);
+          } catch (err) {
+            // ignore history failures
+          }
+          return { type: 'hydra', hex: sanitized };
+        }
+      }
+
+      // Check for ?noclip= param (new format: noclip.<hex>)
+      let noclipValue = url.searchParams.get('noclip');
+      if (noclipValue) {
+        // Handle noclip.<hex> format
+        const parts = noclipValue.split('.');
+        const hex = parts.length === 2 && parts[0] === 'noclip' ? parts[1] : noclipValue;
+        const sanitized = sanitizeHex(hex);
+
+        if (sanitized) {
+          state.lastShareParam = sanitized;
+          state.lastShareType = 'noclip';
+          url.searchParams.delete('noclip');
+          const newSearch = url.searchParams.toString();
+          const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
+          try {
+            window.history.replaceState({}, document.title, newUrl);
+          } catch (err) {
+            // ignore history failures
+          }
+          return { type: 'noclip', hex: sanitized };
+        }
+      }
+
+      // Fallback: Check legacy ?sync= param for backwards compatibility
       let value = url.searchParams.get('sync');
       if (!value) {
         const raw = window.location.search;
@@ -149,6 +199,7 @@ function createWorkspaceSync({
       const hex = sanitizeHex(value);
       if (hex) {
         state.lastShareParam = hex;
+        state.lastShareType = 'hydra'; // Legacy params assumed to be hydra
         url.searchParams.delete('sync');
         const newSearch = url.searchParams.toString();
         const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
@@ -157,8 +208,9 @@ function createWorkspaceSync({
         } catch (err) {
           // ignore history failures
         }
+        return { type: 'hydra', hex };
       }
-      return hex;
+      return null;
     } catch (err) {
       return null;
     }
@@ -299,7 +351,8 @@ function createWorkspaceSync({
     const path = window.location.pathname;
     const base = `${origin}${path}`;
     const addressParam = stripGraphPrefix(addressFull);
-    const url = `${base}?sync=${addressParam}`;
+    // Use new ?hydra= param with hydra. prefix
+    const url = `${base}?hydra=hydra.${addressParam}`;
     if (els.qrLink) els.qrLink.textContent = url;
 
     if (els.qrCanvas) {
@@ -516,15 +569,66 @@ function createWorkspaceSync({
     });
   }
 
+  function handleNoclipParam(noclipHex) {
+    try {
+      // Generate a unique node ID for this NoClip bridge
+      const nodeId = `noclip-bridge-${noclipHex.slice(0, 8)}`;
+
+      log(`[sync] Auto-injecting NoClip bridge node for: ${noclipHex.slice(0, 8)}...`);
+
+      // Create/ensure the NoClip bridge node in NodeStore
+      const record = NodeStore.ensure(nodeId, 'NoClipBridge');
+      if (!record.config) record.config = {};
+
+      // Configure the bridge to connect to the NoClip peer
+      record.config.targetPub = noclipHex;
+      record.config.autoConnect = true;
+      record.config.room = 'hybrid-bridge'; // Use default hybrid bridge room
+
+      // Save the configuration
+      NodeStore.save();
+
+      // Trigger bridge refresh to establish connection
+      // The bridge module should auto-connect based on autoConnect flag
+      if (window.NoClipBridge && typeof window.NoClipBridge.refresh === 'function') {
+        setTimeout(() => {
+          try {
+            window.NoClipBridge.refresh(nodeId);
+            setBadge(`NoClip bridge connecting to ${noclipHex.slice(0, 8)}...`);
+          } catch (err) {
+            log(`[sync] Bridge refresh failed: ${err?.message || err}`);
+          }
+        }, 500);
+      }
+
+      // Show toast notification
+      setBadge(`NoClip bridge node created: ${nodeId}`, true);
+
+    } catch (err) {
+      log(`[sync] Failed to handle NoClip param: ${err?.message || err}`);
+      setBadge(`NoClip bridge setup failed: ${err?.message || err}`, false);
+    }
+  }
+
   function init() {
     assignElements();
     wireEvents();
 
-    const searchHex = consumeSearchParam();
-    if (searchHex) {
-      ensureNknTransport();
-      setBadge(`Sync target detected: ${formatAddress(searchHex)}`);
-      promptShare(searchHex);
+    const searchParam = consumeSearchParam();
+    if (searchParam) {
+      const { type, hex } = searchParam;
+
+      if (type === 'hydra') {
+        // Handle Hydra workspace sync (original behavior)
+        ensureNknTransport();
+        setBadge(`Sync target detected: ${formatAddress(hex)}`);
+        promptShare(hex);
+      } else if (type === 'noclip') {
+        // Handle NoClip bridge auto-injection
+        ensureNknTransport();
+        setBadge(`NoClip peer detected: noclip.${hex.slice(0, 8)}...`);
+        handleNoclipParam(hex);
+      }
     }
 
     // If already in NKN mode, attach listener immediately
