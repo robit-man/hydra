@@ -71,6 +71,46 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return sanitizeRoomName(`${host}${path.replace(/\//g, '-')}`);
   };
 
+  const consumePeerParam = () => {
+    try {
+      const url = new URL(window.location.href);
+      const peerParam = url.searchParams.get('peer');
+
+      if (!peerParam) return null;
+
+      // Format: <prefix>.<hex64> or just <hex64>
+      const parts = peerParam.split('.');
+      let hex = '';
+
+      if (parts.length === 2) {
+        hex = parts[1];
+      } else if (parts.length === 1) {
+        hex = parts[0];
+      } else {
+        return null;
+      }
+
+      // Validate and sanitize
+      const sanitized = sanitizePubKey(hex);
+      if (!sanitized) return null;
+
+      // Remove from URL
+      url.searchParams.delete('peer');
+      const newUrl = url.pathname + (url.searchParams.toString() ? `?${url.searchParams.toString()}` : '') + url.hash;
+
+      try {
+        window.history.replaceState({}, document.title, newUrl);
+      } catch (err) {
+        // ignore history failures
+      }
+
+      return sanitized;
+
+    } catch (err) {
+      return null;
+    }
+  };
+
   const ensureNodeState = (nodeId) => {
     const key = String(nodeId || '').trim();
     if (!key) return null;
@@ -506,9 +546,24 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const record = NodeStore.ensure(nodeId, 'NoClipBridge');
       const cfg = record?.config || {};
       st.cfg = cfg;
-       st.graphId = CFG?.graphId || st.graphId;
+      st.graphId = CFG?.graphId || st.graphId;
       overrideRoom = sanitizeRoomName(cfg.room || overrideRoom || 'hybrid-bridge');
-      st.targetPub = sanitizePubKey(cfg.targetPub);
+
+      // Check for ?peer= URL parameter and use it if no targetPub configured
+      let targetPub = sanitizePubKey(cfg.targetPub);
+      if (!targetPub) {
+        const urlPeer = consumePeerParam();
+        if (urlPeer) {
+          targetPub = urlPeer;
+          // Update config with URL peer
+          if (record && record.config) {
+            record.config.targetPub = targetPub;
+          }
+          log?.(`[noclipBridge] Using peer from URL: ${targetPub.slice(0, 8)}...`);
+        }
+      }
+
+      st.targetPub = targetPub;
       st.targetAddr = sanitizeAddr(cfg.targetAddr) || null;
       st.remotePeers.clear();
       registerTarget(nodeId, st.targetPub);
