@@ -163,8 +163,9 @@ class DiscoveryClient extends EventHub {
     this.sc = null;
     this._hbTimer = null;
 
-    this.presenceSubject = `hydra.${this.room}.presence`;
-    this.dmSubject = (pub) => `hydra.${this.room}.dm.${pub}`;
+    // Use unified 'discovery.' prefix to be compatible with NoClip
+    this.presenceSubject = `discovery.${this.room}.presence`;
+    this.dmSubject = (pub) => `discovery.${this.room}.dm.${pub}`;
   }
 
   get peers() {

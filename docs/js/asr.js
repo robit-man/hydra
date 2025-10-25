@@ -298,6 +298,8 @@ function createASR({
     _api: '',
     _relay: '',
     _viaNkn: false,
+    _externalVisBuf: null,
+    _externalVisIdx: 0,
     _relayStatus(state, message) {
       if (!this.ownerId || !this._viaNkn || !this._relay) return;
       setRelayState(this.ownerId, { state, message });
@@ -747,6 +749,108 @@ function createASR({
       }
     },
 
+    async startExternalMode(nodeId) {
+      if (this.running && this.ownerId === nodeId) {
+        return; // Already running
+      }
+      if (this.running && this.ownerId && this.ownerId !== nodeId) {
+        await this.stop();
+      }
+
+      const rec = NodeStore.ensure(nodeId, 'ASR');
+      let cfg = rec.config || {};
+      cfg = await ensureModelConfigured(nodeId, cfg);
+      this.ownerId = nodeId;
+      this._rate = cfg.rate | 0 || 16000;
+      this._chunk = cfg.chunk | 0 || 120;
+      this._live = !!cfg.live;
+      const endpoint = resolveEndpointConfig(cfg);
+      this._base = endpoint.base;
+      this._relay = endpoint.relay;
+      this._viaNkn = endpoint.viaNkn;
+      this._api = endpoint.api;
+      this._relayStatus('warn', 'Receiving external audio');
+      this._sawSpeech = false;
+      this.finalizing = false;
+      this._uplinkOn = false;
+      this._tailDeadline = 0;
+      this._sawPartialForUplink = false;
+      this._lastPartialAt = 0;
+      this._lastPostAt = 0;
+      this._ignorePartials = false;
+      this._silenceSince = 0;
+      this._preInit(this._rate);
+      this._lastFinal = { text: '', at: 0 };
+      this.resetAggr();
+      this._rmsTh = parseFloat(cfg.rms) || 0.2;
+      this._setRms(0, 0, nodeId);
+      this._lastPartialSeq = -1;
+      emitActive(nodeId, false);
+      this._applyMute(muteRequests.get(nodeId) === true);
+
+      try {
+        // Create audio context and analyser for visualization WITHOUT microphone
+        this.ac = new (window.AudioContext || window.webkitAudioContext)();
+
+        // Create analyser node for waveform visualization
+        this.an = this.ac.createAnalyser();
+        this.an.fftSize = 2048;
+        this.an.smoothingTimeConstant = 0.85;
+
+        // Create a buffer to hold external audio for visualization
+        this._externalVisBuf = new Float32Array(2048);
+        this._externalVisIdx = 0;
+
+        // Create a ScriptProcessor to feed external audio data to analyser
+        this.node = (this.ac.createScriptProcessor
+          ? this.ac.createScriptProcessor(2048, 1, 1)
+          : new window.ScriptProcessorNode(this.ac, { bufferSize: 2048, numberOfInputChannels: 1, numberOfOutputChannels: 1 }));
+
+        // Connect node to analyser for visualization
+        this.node.connect(this.an);
+        this.node.connect(this.ac.destination);
+
+        // Feed external audio buffer into the audio processing for visualization
+        this.node.onaudioprocess = (ev) => {
+          const output = ev.outputBuffer.getChannelData(0);
+          // Copy from external buffer to output for analyser
+          for (let i = 0; i < output.length; i++) {
+            output[i] = this._externalVisBuf[i] || 0;
+          }
+          // Clear the buffer after reading
+          this._externalVisBuf.fill(0);
+        };
+
+        // Start visualization
+        this._startVis(nodeId);
+
+        clearInterval(this._vadWatch);
+        if (this._live) {
+          this._vadWatch = setInterval(() => {
+            if (!this.sid || this.finalizing || !this._uplinkOn) return;
+            const now = performance.now();
+            if (this.vad.state !== 'silence') return;
+            if (now <= this._tailDeadline) return;
+            const postQuiet = (now - this._lastPostAt) >= this._lingerMs;
+            const partialQuiet = (!this._sawPartialForUplink) || ((now - this._lastPartialAt) >= this._lingerMs);
+            const hardQuiet = (now - Math.max(this._lastPostAt, this._lastPartialAt || 0)) >= this._forceQuietMaxMs;
+            if ((postQuiet && partialQuiet) || hardQuiet) this._closeUplinkAndMaybeFinalize();
+          }, Math.max(50, Math.min(200, this._chunk)));
+        }
+      } catch (err) {
+        log('[asr] startExternalMode ' + err.message);
+        return;
+      }
+
+      this._setPartial('');
+      this._setPartialStatus('idle');
+      const finalBox = this._nodeEl()?.querySelector('[data-asr-final]');
+      if (finalBox) finalBox.textContent = '';
+      this.running = true;
+
+      log('[asr] Started in external audio mode - no microphone');
+    },
+
     async start(nodeId) {
       if (this.running && this.ownerId === nodeId) {
         setBadge('ASR already running');
@@ -953,6 +1057,8 @@ function createASR({
       this.media = null;
       this.ac = null;
       this.an = null;
+      this._externalVisBuf = null;
+      this._externalVisIdx = 0;
 
       try {
         if (node) {
@@ -1227,13 +1333,10 @@ function createASR({
   ASR.onAudio = async (nodeId, payload) => {
     if (!nodeId || !payload) return;
 
-    // Only process if this ASR node is the active owner
+    // Auto-start ASR in external mode if not running
     if (ASR.ownerId !== nodeId) {
-      // Auto-start ASR if not running and receiving external audio
       try {
-        const rec = NodeStore.ensure(nodeId, 'ASR');
-        const cfg = rec?.config || {};
-        await ASR.start(nodeId, cfg);
+        await ASR.startExternalMode(nodeId);
       } catch (err) {
         log(`[asr] Failed to auto-start for external audio: ${err?.message || err}`);
         return;
@@ -1278,7 +1381,16 @@ function createASR({
       // This will be picked up by the normal processing loop
       ASR.pushF32(f32);
 
-      // Update visualization if active
+      // Feed audio into visualization buffer for waveform display
+      if (ASR._externalVisBuf && f32.length > 0) {
+        // Take up to 2048 samples for visualization
+        const visSamples = Math.min(f32.length, ASR._externalVisBuf.length);
+        for (let i = 0; i < visSamples; i++) {
+          ASR._externalVisBuf[i] = f32[i];
+        }
+      }
+
+      // Calculate RMS for display
       const now = performance.now();
       let sum = 0;
       for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
@@ -1286,6 +1398,18 @@ function createASR({
 
       // Update RMS display
       ASR._setRms(rmsCur, rmsCur, nodeId);
+
+      // Trigger session if we have audio activity
+      const cfg = NodeStore.ensure(nodeId, 'ASR')?.config || {};
+      if (rmsCur > (ASR._rmsTh || 0.2)) {
+        ASR._sawSpeech = true;
+        ASR._ensureLiveSession(cfg).then(() => {
+          if (ASR.sid && !ASR._uplinkOn) {
+            const tailMs = Math.max(ASR._minTailMs, (cfg.silence | 0) || 900);
+            ASR._openUplink(now, tailMs, null);
+          }
+        }).catch(() => {});
+      }
 
     } catch (err) {
       log(`[asr] Error processing external audio: ${err?.message || err}`);

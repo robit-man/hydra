@@ -461,7 +461,63 @@ function init() {
   // Initialize Smart Object Invite system
   initSmartObjectInvite({ NodeStore, Net, setBadge });
 
+  // Handle URL parameters for NoClip Smart Object invites
+  handleInviteUrlParams();
+
   setBadge('Ready');
+}
+
+/**
+ * Handle URL parameters for NoClip Smart Object invites
+ * Supports: ?noclip=noclip.<hex>&object=<uuid>
+ */
+function handleInviteUrlParams() {
+  try {
+    const url = new URL(window.location.href);
+
+    // Check for noclip parameter (from NoClip Smart Object)
+    const noclipParam = url.searchParams.get('noclip');
+    const objectParam = url.searchParams.get('object');
+
+    if (noclipParam) {
+      // Parse NoClip address: noclip.<hex> or just <hex>
+      const parts = noclipParam.split('.');
+      const noclipPub = parts.length === 2 ? parts[1] : noclipParam;
+
+      console.log('[Hydra] NoClip invite detected:', { noclipPub, objectParam });
+
+      // Show notification
+      setTimeout(() => {
+        const message = objectParam
+          ? `Ready to connect to NoClip Smart Object!\n\nObject ID: ${objectParam}\nNoClip Peer: ${noclipPub}\n\nCreate or select a NoClipBridge node to establish the connection.`
+          : `Ready to connect to NoClip peer: ${noclipPub}\n\nCreate a NoClipBridge node to establish the connection.`;
+
+        setBadge('NoClip invite detected', true);
+        alert(message);
+      }, 1000);
+
+      // Store invite info for later use
+      window.pendingNoClipInvite = {
+        noclipPub,
+        objectUuid: objectParam,
+        timestamp: Date.now()
+      };
+
+      // Clean up URL
+      url.searchParams.delete('noclip');
+      url.searchParams.delete('object');
+      const newUrl = url.pathname + (url.searchParams.toString() ? `?${url.searchParams.toString()}` : '') + url.hash;
+
+      try {
+        window.history.replaceState({}, document.title, newUrl);
+      } catch (err) {
+        // ignore history failures
+      }
+    }
+
+  } catch (err) {
+    console.error('[Hydra] Failed to parse invite URL parameters:', err);
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
