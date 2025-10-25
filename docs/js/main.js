@@ -26,6 +26,7 @@ import { createPeerDiscovery } from './peerDiscovery.js';
 import { createPayments } from './payments.js';
 import { createWebScraper } from './webScraper.js';
 import { createNoClipBridge } from './noclipBridge.js';
+import { initSmartObjectInvite } from './smartObjectInvite.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -456,6 +457,10 @@ function init() {
   WorkspaceSync.init();
   PeerDiscovery.init();
   bindGlobalDrop();
+
+  // Initialize Smart Object Invite system
+  initSmartObjectInvite({ NodeStore, Net, setBadge });
+
   setBadge('Ready');
 }
 
