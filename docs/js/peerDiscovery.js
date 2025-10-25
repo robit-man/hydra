@@ -2105,21 +2105,52 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     if (!client) return;
     client.on('peer', (peer) => {
       if (!peer?.nknPub) return;
-      const last = typeof peer.last === 'number' ? peer.last : nowSeconds();
-      const result = upsertPeer(
-        {
-          ...peer,
-          last,
-          lastSeenAt: last * 1000
-        },
-        { online: true, probing: false }
-      );
-      if (peer?.nknPub) state.pendingPings.delete(normalizePubKey(peer.nknPub));
-      clearStatusOverride();
-      scheduleRender();
-      if (result.added) {
-        broadcastDirectory(peer.nknPub);
-        scheduleDirectoryBroadcast();
+
+      // Determine peer network based on addr/nknPub prefix
+      const addr = peer.addr || peer.nknPub || '';
+      const isNoclipPeer = addr.toLowerCase().startsWith('noclip.');
+      const isHydraPeer = addr.toLowerCase().startsWith('hydra.') || addr.toLowerCase().startsWith('graph.');
+
+      // If no recognizable prefix, default to hydra for backward compatibility
+      const shouldAddToHydra = isHydraPeer || (!isNoclipPeer && !isHydraPeer);
+
+      if (isNoclipPeer) {
+        // Route noclip peers to the noclip peer store
+        const normalized = normalizePeerEntry(peer);
+        if (normalized) {
+          const key = normalizePubKey(normalized.nknPub || normalized.addr);
+          if (key) {
+            state.noclip.peers.set(key, {
+              ...normalized,
+              source: 'noclip',
+              online: true,
+              last: typeof peer.last === 'number' ? peer.last : nowSeconds(),
+              lastSeenAt: (typeof peer.last === 'number' ? peer.last : nowSeconds()) * 1000
+            });
+            if (state.layout.activeNetwork === 'noclip') scheduleRender();
+          }
+        }
+        return; // Don't add to hydra peers
+      }
+
+      // Add hydra peers to main peer store
+      if (shouldAddToHydra) {
+        const last = typeof peer.last === 'number' ? peer.last : nowSeconds();
+        const result = upsertPeer(
+          {
+            ...peer,
+            last,
+            lastSeenAt: last * 1000
+          },
+          { online: true, probing: false }
+        );
+        if (peer?.nknPub) state.pendingPings.delete(normalizePubKey(peer.nknPub));
+        clearStatusOverride();
+        scheduleRender();
+        if (result.added) {
+          broadcastDirectory(peer.nknPub);
+          scheduleDirectoryBroadcast();
+        }
       }
     });
     client.on('status', (info) => {
