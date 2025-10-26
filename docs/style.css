@@ -1637,6 +1637,7 @@ button.danger {
 
 .node.selected {
   z-index: 4;
+  outline: none!important;
 }
 
 .node.selected .body::after {

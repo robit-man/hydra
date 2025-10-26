@@ -1916,7 +1916,24 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
     const now = nowSeconds();
     const peersMap = isHydra ? state.peers : state.noclip.peers;
-    let peers = Array.from(peersMap.values()).filter((peer) => peer?.nknPub);
+    let peers = Array.from(peersMap.values()).filter((peer) => {
+      if (!peer?.nknPub) return false;
+
+      // Additional prefix filtering to ensure correct tab displays correct peers
+      const addr = peer.addr || peer.nknPub || '';
+      const addrLower = addr.toLowerCase();
+
+      if (isHydra) {
+        // Hydra tab: ONLY show hydra./graph. peers, exclude noclip. peers
+        const isNoclipPeer = addrLower.startsWith('noclip.');
+        return !isNoclipPeer; // Show everything except noclip. peers
+      } else {
+        // NoClip tab: ONLY show noclip. peers, exclude hydra./graph. peers
+        const isNoclipPeer = addrLower.startsWith('noclip.');
+        return isNoclipPeer; // Show only noclip. peers
+      }
+    });
+
     if (isHydra && state.filters.onlyFavorites) {
       peers = peers.filter((peer) => state.chat.favorites.has(normalizePeerKey(peer)));
     }
