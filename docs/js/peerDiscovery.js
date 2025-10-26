@@ -351,9 +351,9 @@ class DiscoveryClient extends EventHub {
 }
 
 function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
-  const derivedRoom = sanitizeRoomName(
-    `${window.location.host || 'local'}${(window.location.pathname || '').replace(/\//g, '-')}`
-  );
+  // Use 'nexus' as the shared discovery room for cross-application peer discovery
+  // This enables Hydra (hydra.nexus) and NoClip (noclip.nexus) to discover each other
+  const derivedRoom = 'nexus';
   const sharedStore = new Store(derivedRoom);
   const state = {
     discovery: null,
@@ -1010,7 +1010,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     return {
       graphId: CFG.graphId || '',
       origin: window.location.origin || '',
-      username: sanitizeUsername(state.username || '')
+      username: sanitizeUsername(state.username || ''),
+      network: 'hydra'  // Identify as Hydra peer for cross-app discovery
     };
   }
 
