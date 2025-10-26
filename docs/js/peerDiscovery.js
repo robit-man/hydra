@@ -2607,9 +2607,28 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
   }
 
+  /**
+   * Send a DM to a peer (proxy to discovery)
+   */
+  async function sendDm(pub, payload) {
+    if (!state.discovery) {
+      // Try to ensure discovery is ready
+      await ensureDiscovery().catch(() => {
+        throw new Error('Discovery not available');
+      });
+    }
+
+    if (state.discovery && state.discovery.dm) {
+      state.discovery.dm(pub, payload);
+    } else {
+      throw new Error('Discovery DM not available');
+    }
+  }
+
   return {
     init,
-    registerDmHandler
+    registerDmHandler,
+    sendDm
   };
 
 }

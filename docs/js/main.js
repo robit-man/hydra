@@ -241,7 +241,22 @@ const NoClipBridgeSync = createNoClipBridgeSync({
   setBadge,
   log
 });
-NoClipBridgeSync.init();
+
+// Register DM handler with PeerDiscovery
+PeerDiscovery.registerDmHandler((event) => {
+  const { from, msg } = event || {};
+  if (!msg || !msg.type) return;
+
+  if (msg.type === 'noclip-bridge-sync-request') {
+    NoClipBridgeSync.handleSyncRequest(from, msg);
+  } else if (msg.type === 'noclip-bridge-sync-accepted') {
+    // NoClip acknowledging our approval (optional)
+    console.log('[NoClipBridgeSync] Sync acknowledged by NoClip:', from);
+  } else if (msg.type === 'noclip-bridge-sync-rejected') {
+    // NoClip rejected our approval (optional)
+    console.log('[NoClipBridgeSync] Sync rejected by NoClip:', from);
+  }
+});
 
 const graphDropEls = {
   modal: qs('#graphDropModal'),

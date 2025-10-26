@@ -231,8 +231,8 @@ function createNoClipBridgeSync({
       state.approvedConnections.set(noclipPub, nodeId);
 
       // Send approval response back to NoClip
-      if (PeerDiscovery) {
-        await PeerDiscovery.dm(noclipPub, {
+      if (PeerDiscovery && PeerDiscovery.sendDm) {
+        await PeerDiscovery.sendDm(noclipPub, {
           type: 'noclip-bridge-sync-accepted',
           bridgeNodeId: nodeId,
           timestamp: Date.now()
@@ -263,8 +263,8 @@ function createNoClipBridgeSync({
 
     try {
       // Send rejection response
-      if (PeerDiscovery) {
-        await PeerDiscovery.dm(noclipPub, {
+      if (PeerDiscovery && PeerDiscovery.sendDm) {
+        await PeerDiscovery.sendDm(noclipPub, {
           type: 'noclip-bridge-sync-rejected',
           reason,
           timestamp: Date.now()
