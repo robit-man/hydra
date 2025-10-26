@@ -2309,6 +2309,15 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       await client.startHeartbeat(meta);
 
       state.discovery = client;
+
+      // Attach any external DM handlers that were registered
+      if (state.externalDmHandlers && state.externalDmHandlers.length > 0) {
+        state.externalDmHandlers.forEach(handler => {
+          client.on('dm', handler);
+        });
+        console.log(`[PeerDiscovery] Attached ${state.externalDmHandlers.length} external DM handler(s)`);
+      }
+
       await ensureNknFirst;
       await waitForNknClient().catch(() => null);
       updateDiscoveryMeta();
@@ -2577,8 +2586,30 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
   }
 
+  /**
+   * Register an external DM handler
+   * This allows other modules to listen for DM messages
+   */
+  function registerDmHandler(handler) {
+    if (typeof handler !== 'function') {
+      console.warn('[PeerDiscovery] registerDmHandler requires a function');
+      return;
+    }
+
+    // Store the handler to be attached when discovery is ready
+    state.externalDmHandlers = state.externalDmHandlers || [];
+    state.externalDmHandlers.push(handler);
+
+    // If discovery is already active, attach immediately
+    if (state.discovery) {
+      state.discovery.on('dm', handler);
+      console.log('[PeerDiscovery] External DM handler attached to active discovery');
+    }
+  }
+
   return {
-    init
+    init,
+    registerDmHandler
   };
 
 }

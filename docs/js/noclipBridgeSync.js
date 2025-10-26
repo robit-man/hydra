@@ -19,29 +19,43 @@ function createNoClipBridgeSync({
   };
 
   /**
-   * Initialize - attach listener to peer discovery
+   * Initialize - register message handler
+   * Note: This needs to be called with the actual discovery instance once it's created
    */
-  function init() {
-    if (!PeerDiscovery) {
-      console.warn('[NoClipBridgeSync] PeerDiscovery not available');
-      return;
+  function init(discoveryInstance = null) {
+    if (discoveryInstance) {
+      // Direct attachment if discovery instance is provided
+      discoveryInstance.on('dm', handleDiscoveryDm);
+      console.log('[NoClipBridgeSync] Attached to discovery instance');
+    } else {
+      // Store handler for later attachment
+      console.log('[NoClipBridgeSync] Handler registered, waiting for discovery');
     }
+  }
 
-    // Listen for incoming messages from Hydra discovery (NATS)
-    PeerDiscovery.on('dm', (event) => {
-      const { from, msg } = event;
-      if (!msg || !msg.type) return;
+  /**
+   * Handle discovery DM messages
+   */
+  function handleDiscoveryDm(event) {
+    const { from, msg } = event || {};
+    if (!msg || !msg.type) return;
 
-      if (msg.type === 'noclip-bridge-sync-request') {
-        handleSyncRequest(from, msg);
-      } else if (msg.type === 'noclip-bridge-sync-accepted') {
-        handleSyncAccepted(from, msg);
-      } else if (msg.type === 'noclip-bridge-sync-rejected') {
-        handleSyncRejected(from, msg);
-      }
-    });
+    if (msg.type === 'noclip-bridge-sync-request') {
+      handleSyncRequest(from, msg);
+    } else if (msg.type === 'noclip-bridge-sync-accepted') {
+      handleSyncAccepted(from, msg);
+    } else if (msg.type === 'noclip-bridge-sync-rejected') {
+      handleSyncRejected(from, msg);
+    }
+  }
 
-    console.log('[NoClipBridgeSync] Initialized');
+  /**
+   * Attach to an existing discovery instance
+   */
+  function attachToDiscovery(discoveryInstance) {
+    if (!discoveryInstance) return;
+    discoveryInstance.on('dm', handleDiscoveryDm);
+    console.log('[NoClipBridgeSync] Attached to discovery');
   }
 
   /**
@@ -291,10 +305,12 @@ function createNoClipBridgeSync({
 
   return {
     init,
+    attachToDiscovery,
     handleSyncRequest,
     approveSyncRequest,
     rejectSyncRequest,
-    getBridgeNodeId
+    getBridgeNodeId,
+    state // Expose state for debugging
   };
 }
 
