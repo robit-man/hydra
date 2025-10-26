@@ -27,6 +27,7 @@ import { createPayments } from './payments.js';
 import { createWebScraper } from './webScraper.js';
 import { createNoClipBridge } from './noclipBridge.js';
 import { initSmartObjectInvite } from './smartObjectInvite.js';
+import { createNoClipBridgeSync } from './noclipBridgeSync.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -232,6 +233,15 @@ const PeerDiscovery = createPeerDiscovery({
   setBadge,
   log
 });
+
+// Initialize NoClip Bridge Sync - note: Graph is defined earlier in the file
+const NoClipBridgeSync = createNoClipBridgeSync({
+  Graph,
+  PeerDiscovery,
+  setBadge,
+  log
+});
+NoClipBridgeSync.init();
 
 const graphDropEls = {
   modal: qs('#graphDropModal'),
