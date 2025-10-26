@@ -969,6 +969,7 @@ function refreshNodeResolution(force = false) {
     }
     if (node.type === 'ASR') {
       if (portName === 'mute') return ASR.onMute?.(node.id, payload);
+      if (portName === 'audio') return ASR.onAudio?.(node.id, payload);
       return;
     }
     if (node.type === 'TTS') {
@@ -985,6 +986,7 @@ function refreshNodeResolution(force = false) {
       if (portName === 'pose') return NoClip?.onPose?.(node.id, payload);
       if (portName === 'resource') return NoClip?.onResource?.(node.id, payload);
       if (portName === 'command') return NoClip?.onCommand?.(node.id, payload);
+      if (portName === 'audioOutput') return NoClip?.onAudioOutput?.(node.id, payload);
       return;
     }
     if (node.type === 'WebSerial') {

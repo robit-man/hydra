@@ -893,6 +893,18 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
           let f32 = f32FromI16(i16);
           if (st.sr !== 22050) f32 = resampleLinear(f32, 22050, st.sr);
           enqueue(st, f32);
+
+          // Emit audio packet to 'audio' output port for Smart Objects
+          if (Router?.sendFrom) {
+            const audioPacket = {
+              format: 'pcm16',
+              sampleRate: st.sr || 22050,
+              channels: 1,
+              data: Array.from(i16), // Convert Int16Array to regular array for serialization
+              timestamp: Date.now()
+            };
+            Router.sendFrom(nodeId, 'audio', audioPacket);
+          }
         };
 
         try {
