@@ -573,6 +573,73 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return success;
   }
 
+  /**
+   * Log a message to the NoClipBridge node's UI log
+   */
+  function logToNode(nodeId, message, type = 'info') {
+    const node = NodeStore?.get?.(nodeId);
+    if (!node || !node.el) return;
+
+    const logEl = node.el.querySelector('[data-noclip-log]');
+    if (!logEl) return;
+
+    const entry = document.createElement('div');
+    entry.className = `log-entry log-${type}`;
+
+    const timestamp = new Date().toLocaleTimeString();
+    entry.innerHTML = `<span style="color:#666;">[${timestamp}]</span> ${message}`;
+
+    logEl.appendChild(entry);
+
+    // Auto-scroll to bottom
+    logEl.scrollTop = logEl.scrollHeight;
+
+    // Limit to 50 entries
+    const entries = logEl.querySelectorAll('.log-entry');
+    if (entries.length > 50) {
+      entries[0].remove();
+    }
+  }
+
+  /**
+   * Get list of discovered NoClip peers
+   */
+  function getDiscoveredNoClipPeers() {
+    return Array.from(NOCLIP_PEERS.values());
+  }
+
+  /**
+   * Refresh the peer dropdown for a node
+   */
+  function refreshPeerDropdown(nodeId) {
+    const node = NodeStore?.get?.(nodeId);
+    if (!node || !node.el) return;
+
+    const selectEl = node.el.querySelector('[data-noclip-peer-select]');
+    if (!selectEl) return;
+
+    const currentValue = selectEl.value;
+    const peers = getDiscoveredNoClipPeers();
+
+    // Clear and rebuild options
+    selectEl.innerHTML = '<option value="">-- Select NoClip Peer --</option>';
+
+    peers.forEach(peer => {
+      const option = document.createElement('option');
+      option.value = peer.nknPub;
+      const label = peer.meta?.username || `NoClip ${peer.nknPub.slice(0, 8)}...`;
+      option.textContent = `${label} (noclip.${peer.nknPub.slice(0, 8)})`;
+      selectEl.appendChild(option);
+    });
+
+    // Restore selection if it still exists
+    if (currentValue && Array.from(selectEl.options).some(opt => opt.value === currentValue)) {
+      selectEl.value = currentValue;
+    }
+
+    logToNode(nodeId, `Found ${peers.length} NoClip peer(s)`, 'info');
+  }
+
   return {
     init(nodeId) {
       const st = ensureNodeState(nodeId);
@@ -580,6 +647,9 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (normalizeBoolean(st.cfg?.autoConnect, true)) {
         ensureHandshake(nodeId, st);
       }
+
+      // Log init
+      logToNode(nodeId, 'NoClipBridge initialized', 'info');
     },
 
     refresh(nodeId) {
@@ -686,6 +756,11 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         }
       });
       if (ok) maybeBadge(st, `Resource sent to ${targets?.length || 1} peer${targets?.length === 1 ? '' : 's'}`);
+
+      // Log resource data
+      const resType = resource.type || 'unknown';
+      const resLabel = resource.label || 'unlabeled';
+      logToNode(nodeId, `📤 Resource out: ${resType} "${resLabel}" → ${targets?.length || 0} peer(s)`, 'success');
     },
 
     async onCommand(nodeId, payload) {
@@ -714,6 +789,10 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       };
 
       await sendBridgePayload(nodeId, st, packet);
+
+      // Log audio data
+      const dataSize = payload.data?.length || 0;
+      logToNode(nodeId, `📤 Audio out: ${dataSize} samples @ ${payload.sampleRate || 'unknown'}Hz`, 'success');
     },
 
     async onAudioInput(nodeId, payload) {
@@ -745,7 +824,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const st = NODE_STATE.get(key);
       if (st?.targetPub) unregisterTarget(key, st.targetPub);
       NODE_STATE.delete(key);
-    }
+    },
+
+    // UI helper methods
+    logToNode,
+    refreshPeerDropdown,
+    getDiscoveredNoClipPeers
   };
 }
 

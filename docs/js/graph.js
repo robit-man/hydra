@@ -1880,6 +1880,19 @@ function refreshNodeResolution(force = false) {
             </div>
           </div>
         ` : ''}
+        ${node.type === 'NoClipBridge' ? `
+          <div class="noclip-bridge-node" data-noclip-root style="pointer-events:auto;">
+            <div class="muted" style="pointer-events:auto;margin-bottom:6px;">Discovered NoClip Peers</div>
+            <div style="display:flex;gap:6px;margin-bottom:8px;">
+              <select data-noclip-peer-select style="flex:1;pointer-events:auto;" autocomplete="off">
+                <option value="">-- Select NoClip Peer --</option>
+              </select>
+              <button type="button" data-noclip-peer-refresh title="Refresh peers">🔄</button>
+            </div>
+            <div class="muted" style="pointer-events:auto;margin-top:12px;">Connection Log</div>
+            <div class="code noclip-bridge-log" data-noclip-log style="min-height:100px;max-height:200px;overflow:auto;font-size:11px;line-height:1.4;"></div>
+          </div>
+        ` : ''}
         ${node.type === 'WebSerial' ? `
           <div class="webserial-node" data-webserial-root style="pointer-events:auto;">
             <div class="mesh-header" style="pointer-events:auto;">
@@ -5313,6 +5326,40 @@ function refreshNodeResolution(force = false) {
     if (!node._noclipInit) {
       NoClip?.init?.(node.id);
       node._noclipInit = true;
+    }
+
+    // Wire up peer dropdown
+    const selectEl = node.el?.querySelector('[data-noclip-peer-select]');
+    if (selectEl && !selectEl._noclipBound) {
+      selectEl.addEventListener('change', (e) => {
+        const selectedPub = e.target.value;
+        if (!selectedPub) return;
+
+        // Update node config with selected peer
+        const record = NodeStore.ensure(node.id, 'NoClipBridge');
+        if (record && record.config) {
+          record.config.targetPub = selectedPub;
+          record.config.targetAddr = `noclip.${selectedPub}`;
+          NodeStore.save();
+          NoClip?.refresh?.(node.id);
+          NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
+        }
+      });
+      selectEl._noclipBound = true;
+    }
+
+    // Wire up refresh button
+    const refreshBtn = node.el?.querySelector('[data-noclip-peer-refresh]');
+    if (refreshBtn && !refreshBtn._noclipBound) {
+      refreshBtn.addEventListener('click', () => {
+        NoClip?.refreshPeerDropdown?.(node.id);
+      });
+      refreshBtn._noclipBound = true;
+    }
+
+    // Initial peer list population
+    if (NoClip?.refreshPeerDropdown) {
+      setTimeout(() => NoClip.refreshPeerDropdown(node.id), 500);
     }
   }
 
