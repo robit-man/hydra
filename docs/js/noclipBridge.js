@@ -671,7 +671,10 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const summaries = sessions.map((session) => {
       const label = session.objectLabel || session.objectUuid || session.sessionId;
       const status = (session.status || 'pending').replace(/[_-]/g, ' ');
-      return `${label}: ${status}`;
+      const coords = session.position && Number.isFinite(session.position.lat) && Number.isFinite(session.position.lon)
+        ? ` @ ${session.position.lat.toFixed(4)}, ${session.position.lon.toFixed(4)}`
+        : '';
+      return `${label}: ${status}${coords}`;
     });
     statusEl.textContent = summaries.join(' • ');
     statusEl.style.color = 'var(--accent)';
@@ -692,6 +695,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       noclipPub: normalizedPub,
       updatedAt: nowMs()
     };
+    if (session.position && typeof session.position === 'object') {
+      record.position = { ...session.position };
+    }
+    if (session.geo && typeof session.geo === 'object') {
+      record.geo = { ...session.geo };
+    }
     st.sessions.set(sessionId, record);
     if (normalizedPub) {
       if (!st.sessionIndex.has(normalizedPub)) st.sessionIndex.set(normalizedPub, new Set());
@@ -713,6 +722,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         ...updates,
         updatedAt: nowMs()
       };
+      if (updates.position && typeof updates.position === 'object') {
+        merged.position = { ...(existing.position || {}), ...updates.position };
+      }
+      if (updates.geo && typeof updates.geo === 'object') {
+        merged.geo = { ...(existing.geo || {}), ...updates.geo };
+      }
       st.sessions.set(sessionId, merged);
       list.push(merged);
     }

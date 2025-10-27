@@ -99,6 +99,8 @@ function createNoClipBridgeSync({
     const noclipPub = normalizeHex64(input.noclipPub || input.noclipAddr || '');
     if (!sessionId || !objectUuid || !noclipPub) return null;
     const stamp = nowMs();
+    const position = input.position && typeof input.position === 'object' ? { ...input.position } : null;
+    const geo = input.geo && typeof input.geo === 'object' ? { ...input.geo } : null;
     return {
       sessionId,
       objectUuid,
@@ -112,7 +114,9 @@ function createNoClipBridgeSync({
       bridgeNodeId: typeof input.bridgeNodeId === 'string' ? input.bridgeNodeId : '',
       status: typeof input.status === 'string' ? input.status : 'pending-handshake',
       createdAt: Number.isFinite(input.createdAt) ? input.createdAt : stamp,
-      updatedAt: Number.isFinite(input.updatedAt) ? input.updatedAt : stamp
+      updatedAt: Number.isFinite(input.updatedAt) ? input.updatedAt : stamp,
+      ...(position ? { position } : {}),
+      ...(geo ? { geo } : {})
     };
   };
 
@@ -232,7 +236,9 @@ function createNoClipBridgeSync({
       noclipAddr,
       objectId,
       objectLabel,
-      position: msg.objectConfig?.position,
+      position: msg.objectConfig?.position && typeof msg.objectConfig.position === 'object'
+        ? { ...msg.objectConfig.position }
+        : null,
       receivedAt: Date.now()
     });
 
@@ -389,6 +395,20 @@ function createNoClipBridgeSync({
       state.approvedConnections.set(noclipPub, nodeId);
 
       const hydraIdentity = getHydraIdentity();
+      const positionData = request.objectConfig?.position && typeof request.objectConfig.position === 'object'
+        ? { ...request.objectConfig.position }
+        : null;
+      let geoData = null;
+      if (positionData && Number.isFinite(positionData.lat) && Number.isFinite(positionData.lon)) {
+        geoData = {
+          lat: positionData.lat,
+          lon: positionData.lon
+        };
+        if (Number.isFinite(positionData.ground)) geoData.ground = positionData.ground;
+        if (Number.isFinite(positionData.alt)) geoData.alt = positionData.alt;
+        const geohash = positionData.gh || positionData.geohash;
+        if (typeof geohash === 'string') geoData.gh = geohash;
+      }
       const session = upsertSession({
         sessionId: generateSessionId(),
         objectUuid: request.objectId,
@@ -400,7 +420,9 @@ function createNoClipBridgeSync({
         hydraPub: hydraIdentity.pub,
         hydraAddr: hydraIdentity.addr,
         bridgeNodeId: nodeId,
-        status: 'pending-handshake'
+        status: 'pending-handshake',
+        position: positionData,
+        geo: geoData
       });
 
       // Send approval response back to NoClip
