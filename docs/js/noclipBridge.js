@@ -321,7 +321,9 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         if (!normalized) return;
 
         // Track NoClip peers (identified by network: 'noclip' in metadata)
-        if (peer.meta?.network === 'noclip') {
+        const addr = (peer.addr || peer.nknPub || '').toLowerCase();
+        const isNoClip = peer.meta?.network === 'noclip' || addr.startsWith('noclip.');
+        if (isNoClip) {
           NOCLIP_PEERS.set(normalized, {
             pub: normalized,
             addr: peer.addr || `noclip.${normalized}`,
