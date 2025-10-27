@@ -238,6 +238,8 @@ const PeerDiscovery = createPeerDiscovery({
 const NoClipBridgeSync = createNoClipBridgeSync({
   Graph,
   PeerDiscovery,
+  Net,
+  CFG,
   setBadge,
   log
 });
