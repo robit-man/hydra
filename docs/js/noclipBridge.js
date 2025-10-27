@@ -40,6 +40,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const NODE_STATE = new Map();
   const TARGET_INDEX = new Map();
   const NOCLIP_PEERS = new Map(); // Track discovered NoClip peers
+  let syncAdapter = null;
   let discovery = null;
   let discoveryInit = null;
   let overrideRoom = null;
@@ -143,6 +144,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         targetPub: sanitizePubKey(cfg.targetPub),
         targetAddr: sanitizeAddr(cfg.targetAddr) || null,
         remotePeers: new Map(),
+        sessions: new Map(),
+        sessionIndex: new Map(),
         sessionId: '',
         lastHandshakeAt: 0,
         lastState: null,
@@ -430,6 +433,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       for (const nodeId of watchers) {
         const st = ensureNodeState(nodeId);
         if (!st) continue;
+        st.lastHandshakeAt = nowMs();
 
         // Send handshake event to node
         Router.sendFrom(nodeId, 'handshake', {
@@ -449,6 +453,17 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           nodeId,
           ts: nowMs()
         });
+        if (syncAdapter && typeof syncAdapter.updateSessionStatus === 'function') {
+          syncAdapter.updateSessionStatus({
+            noclipPub: from,
+            hydraBridgeNodeId: nodeId,
+            status: 'connected',
+            lastHandshakeAt: st.lastHandshakeAt
+          });
+        } else {
+          updateSessionsByPub(nodeId, from, { status: 'connected', lastHandshakeAt: st.lastHandshakeAt });
+        }
+        refreshSessionStatus(nodeId);
       }
     } else if (type === 'smart-object-audio') {
       // Handle audio packets from NoClip Smart Objects for ASR
@@ -638,6 +653,78 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
 
     logToNode(nodeId, `Found ${peers.length} NoClip peer(s)`, 'info');
+    refreshSessionStatus(nodeId);
+  }
+
+  const refreshSessionStatus = (nodeId) => {
+    const node = NodeStore?.get?.(nodeId);
+    if (!node?.el) return;
+    const statusEl = node.el.querySelector('[data-noclip-session-status]');
+    if (!statusEl) return;
+    const st = NODE_STATE.get(nodeId);
+    if (!st || !st.sessions || !st.sessions.size) {
+      statusEl.textContent = 'No active sessions';
+      statusEl.style.color = 'var(--muted)';
+      return;
+    }
+    const sessions = Array.from(st.sessions.values());
+    const summaries = sessions.map((session) => {
+      const label = session.objectLabel || session.objectUuid || session.sessionId;
+      const status = (session.status || 'pending').replace(/[_-]/g, ' ');
+      return `${label}: ${status}`;
+    });
+    statusEl.textContent = summaries.join(' • ');
+    statusEl.style.color = 'var(--accent)';
+  };
+
+  const storeSessionForNode = (nodeId, session) => {
+    if (!session) return null;
+    const st = ensureNodeState(nodeId);
+    if (!st) return null;
+    if (!st.sessions) st.sessions = new Map();
+    if (!st.sessionIndex) st.sessionIndex = new Map();
+    const normalizedPub = sanitizePubKey(session.noclipPub || session.noclipAddr || '');
+    const sessionId = String(session.sessionId || `${normalizedPub || 'session'}-${nowMs().toString(36)}`);
+    const record = {
+      ...st.sessions.get(sessionId),
+      ...session,
+      sessionId,
+      noclipPub: normalizedPub,
+      updatedAt: nowMs()
+    };
+    st.sessions.set(sessionId, record);
+    if (normalizedPub) {
+      if (!st.sessionIndex.has(normalizedPub)) st.sessionIndex.set(normalizedPub, new Set());
+      st.sessionIndex.get(normalizedPub).add(sessionId);
+    }
+    refreshSessionStatus(nodeId);
+    return record;
+  };
+
+  const updateSessionsByPub = (nodeId, pub, updates = {}) => {
+    const st = NODE_STATE.get(nodeId);
+    if (!st?.sessions?.size) return [];
+    const normalized = sanitizePubKey(pub);
+    const list = [];
+    for (const [sessionId, existing] of st.sessions.entries()) {
+      if (normalized && existing.noclipPub !== normalized) continue;
+      const merged = {
+        ...existing,
+        ...updates,
+        updatedAt: nowMs()
+      };
+      st.sessions.set(sessionId, merged);
+      list.push(merged);
+    }
+    if (list.length) refreshSessionStatus(nodeId);
+    return list;
+  };
+
+  const handleSessionUpdate = (session) => {
+    if (!session) return;
+    const nodeId = session.hydraBridgeNodeId || session.bridgeNodeId || session.nodeId;
+    if (!nodeId) return;
+    storeSessionForNode(nodeId, session);
   }
 
   return {
@@ -650,6 +737,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
       // Log init
       logToNode(nodeId, 'NoClipBridge initialized', 'info');
+      refreshSessionStatus(nodeId);
     },
 
     refresh(nodeId) {
@@ -682,6 +770,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (normalizeBoolean(cfg.autoConnect, true) && st.targetPub) {
         ensureHandshake(nodeId, st);
       }
+      refreshSessionStatus(nodeId);
     },
 
     async onPose(nodeId, payload) {
@@ -823,7 +912,17 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (!key) return;
       const st = NODE_STATE.get(key);
       if (st?.targetPub) unregisterTarget(key, st.targetPub);
+      st?.sessions?.clear?.();
+      st?.sessionIndex?.clear?.();
       NODE_STATE.delete(key);
+    },
+
+    registerSyncAdapter(adapter) {
+      syncAdapter = adapter;
+    },
+
+    onSessionUpdate(session) {
+      handleSessionUpdate(session);
     },
 
     // UI helper methods

@@ -244,6 +244,10 @@ const NoClipBridgeSync = createNoClipBridgeSync({
   log
 });
 
+// Link bridge modules for session coordination
+NoClipBridge?.registerSyncAdapter?.(NoClipBridgeSync);
+NoClipBridgeSync?.registerBridgeAdapter?.(NoClipBridge);
+
 // Register DM handler with PeerDiscovery
 PeerDiscovery.registerDmHandler((event) => {
   const { from, msg } = event || {};

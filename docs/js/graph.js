@@ -1889,6 +1889,10 @@ function refreshNodeResolution(force = false) {
               </select>
               <button type="button" data-noclip-peer-refresh title="Refresh peers">🔄</button>
             </div>
+            <div class="muted" style="pointer-events:auto;margin-top:6px;">Session Status</div>
+            <div data-noclip-session-status style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.4;color:var(--muted);">
+              No active sessions
+            </div>
             <div class="muted" style="pointer-events:auto;margin-top:12px;">Connection Log</div>
             <div class="code noclip-bridge-log" data-noclip-log style="min-height:100px;max-height:200px;overflow:auto;font-size:11px;line-height:1.4;"></div>
           </div>

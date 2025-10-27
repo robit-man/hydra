@@ -18,7 +18,8 @@ function createNoClipBridgeSync({
     pendingRequests: new Map(), // noclipPub -> request data
     approvedConnections: new Map(), // noclipPub -> bridgeNodeId
     sessions: new Map(), // sessionId -> session record
-    modal: null
+    modal: null,
+    bridgeAdapter: null
   };
   const SESSION_STORAGE_KEY = 'hydra.noclip.sessions.v1';
   let sessionsLoaded = false;
@@ -29,6 +30,15 @@ function createNoClipBridgeSync({
     if (typeof value !== 'string') return '';
     const match = value.match(/([0-9a-f]{64})$/i);
     return match ? match[1].toLowerCase() : '';
+  };
+
+  const notifyBridge = (session) => {
+    if (!session) return;
+    try {
+      state.bridgeAdapter?.onSessionUpdate?.(session);
+    } catch (err) {
+      console.warn('[NoClipBridgeSync] Bridge adapter notification failed:', err);
+    }
   };
 
   const ensureSessionsLoaded = () => {
@@ -44,6 +54,9 @@ function createNoClipBridgeSync({
         const normalized = normalizeSession(entry);
         if (normalized) state.sessions.set(normalized.sessionId, normalized);
       });
+      if (state.bridgeAdapter?.onSessionUpdate) {
+        state.sessions.forEach((session) => notifyBridge(session));
+      }
     } catch (err) {
       console.warn('[NoClipBridgeSync] Failed to load sessions:', err);
     }
@@ -114,6 +127,7 @@ function createNoClipBridgeSync({
     };
     state.sessions.set(merged.sessionId, merged);
     persistSessions();
+    notifyBridge(merged);
     return merged;
   };
 
@@ -121,6 +135,43 @@ function createNoClipBridgeSync({
     const normalized = normalizeHex64(pub);
     if (!normalized) return [];
     return Array.from(state.sessions.values()).filter((session) => session.noclipPub === normalized);
+  };
+
+  const findSessionById = (sessionId) => {
+    if (!sessionId) return null;
+    return state.sessions.get(sessionId) || null;
+  };
+
+  const findSessionsByNode = (nodeId) => {
+    if (!nodeId) return [];
+    return Array.from(state.sessions.values()).filter((session) => session.hydraBridgeNodeId === nodeId || session.bridgeNodeId === nodeId);
+  };
+
+  const updateSessionStatus = ({ sessionId, noclipPub, hydraBridgeNodeId, status, rejectionReason, lastHandshakeAt }) => {
+    ensureSessionsLoaded();
+    const targets = [];
+    if (sessionId) {
+      const direct = findSessionById(sessionId);
+      if (direct) targets.push(direct);
+    }
+    if (!targets.length && noclipPub) {
+      targets.push(...findSessionsByNoclipPub(noclipPub));
+    }
+    if (!targets.length && hydraBridgeNodeId) {
+      targets.push(...findSessionsByNode(hydraBridgeNodeId));
+    }
+    if (!targets.length) return 0;
+    targets.forEach((session) => {
+      const next = {
+        ...session
+      };
+      if (status) next.status = status;
+      if (rejectionReason !== undefined) next.rejectionReason = rejectionReason;
+      if (hydraBridgeNodeId) next.hydraBridgeNodeId = hydraBridgeNodeId;
+      if (lastHandshakeAt) next.lastHandshakeAt = lastHandshakeAt;
+      upsertSession(next);
+    });
+    return targets.length;
   };
 
   /**
@@ -408,27 +459,24 @@ function createNoClipBridgeSync({
    */
   function handleSyncAccepted(from, msg) {
     ensureSessionsLoaded();
-    let updated = false;
-    if (msg?.session && msg.session.sessionId) {
-      const payload = {
-        ...msg.session,
-        noclipPub: msg.session.noclipPub || from,
-        status: msg.session.status || 'acknowledged'
+    const payload = msg?.session;
+    let updatedCount = 0;
+    if (payload && payload.sessionId) {
+      const normalized = {
+        ...payload,
+        noclipPub: payload.noclipPub || from,
+        status: payload.status || 'acknowledged'
       };
-      upsertSession(payload);
-      updated = true;
+      upsertSession(normalized);
+      updatedCount = 1;
     } else {
-      const matches = findSessionsByNoclipPub(from);
-      matches.forEach((session) => {
-        upsertSession({
-          ...session,
-          status: 'acknowledged'
-        });
+      updatedCount = updateSessionStatus({
+        noclipPub: from,
+        status: 'acknowledged'
       });
-      updated = matches.length > 0;
     }
     console.log('[NoClipBridgeSync] Sync accepted by NoClip:', from);
-    const suffix = updated ? '' : ' (session pending)';
+    const suffix = updatedCount ? '' : ' (session pending)';
     setBadge?.(`✓ NoClip ${from.slice(0, 8)}... acknowledged bridge connection${suffix}`);
   }
 
@@ -438,14 +486,11 @@ function createNoClipBridgeSync({
   function handleSyncRejected(from, msg) {
     ensureSessionsLoaded();
     const reason = msg?.reason || 'Unknown';
-    const matches = findSessionsByNoclipPub(from);
-    matches.forEach((session) => {
-      upsertSession({
-        ...session,
-        status: 'rejected',
-        rejectionReason: reason,
-        updatedAt: nowMs()
-      });
+    updateSessionStatus({
+      sessionId: msg?.session?.sessionId,
+      noclipPub: from,
+      status: 'rejected',
+      rejectionReason: reason
     });
     console.log('[NoClipBridgeSync] Sync rejected by NoClip:', from, msg.reason);
     setBadge?.(`✗ NoClip ${from.slice(0, 8)}... rejected: ${reason}`);
@@ -458,6 +503,14 @@ function createNoClipBridgeSync({
     return state.approvedConnections.get(noclipPub);
   }
 
+  function registerBridgeAdapter(adapter) {
+    state.bridgeAdapter = adapter || null;
+    if (state.bridgeAdapter?.onSessionUpdate) {
+      ensureSessionsLoaded();
+      state.sessions.forEach((session) => notifyBridge(session));
+    }
+  }
+
   return {
     init,
     attachToDiscovery,
@@ -465,6 +518,8 @@ function createNoClipBridgeSync({
     approveSyncRequest,
     rejectSyncRequest,
     getBridgeNodeId,
+    registerBridgeAdapter,
+    updateSessionStatus,
     state // Expose state for debugging
   };
 }
