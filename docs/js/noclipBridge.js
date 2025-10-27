@@ -2,6 +2,7 @@ import { createDiscovery as createNatsDiscovery } from './nats.js';
 
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const CONNECT_TIMEOUT_MS = 12000;
+const MESSAGE_ACK_TIMEOUT_MS = 10000;
 const EARTH_RADIUS_M = 6371000;
 
 const toRadians = (deg) => (deg * Math.PI) / 180;
@@ -149,7 +150,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         sessionId: '',
         lastHandshakeAt: 0,
         lastState: null,
-        badgeLimiter: 0
+        badgeLimiter: 0,
+        pendingAcks: new Map()
       });
       registerTarget(key, sanitizePubKey(cfg.targetPub));
     }
@@ -476,6 +478,15 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           ts: msg.ts || nowMs()
         });
       }
+    } else if (type === 'hybrid-bridge-ack') {
+      const messageId = msg.inReplyTo || msg.messageId;
+      const status = (msg.status || 'ok').toLowerCase();
+      const detail = msg.detail || msg.error || '';
+      for (const nodeId of watchers) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+        resolvePendingAck(st, messageId, { status, detail });
+      }
     }
   }
 
@@ -587,6 +598,58 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (!success) maybeBadge(state, 'Bridge send failed', false);
     return success;
   }
+
+  const createMessageId = () => `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const registerPendingAck = (state, messageId, info) => {
+    if (!state || !messageId) return;
+    if (!state.pendingAcks) state.pendingAcks = new Map();
+    const timer = setTimeout(() => {
+      state.pendingAcks.delete(messageId);
+      if (info?.nodeId) {
+        logToNode(info.nodeId, `⚠️ Awaiting ack for ${info.type || 'message'} (${messageId.slice(0, 8)})`, 'warn');
+      }
+    }, MESSAGE_ACK_TIMEOUT_MS);
+    state.pendingAcks.set(messageId, { ...info, timer });
+  };
+
+  const resolvePendingAck = (state, messageId, ack = {}) => {
+    if (!state?.pendingAcks || !state.pendingAcks.size || !messageId) return;
+    const entry = state.pendingAcks.get(messageId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    state.pendingAcks.delete(messageId);
+    const status = ack.status || 'ok';
+    const detail = ack.detail || ack.error || '';
+    if (entry.nodeId) {
+      const prefix = status === 'ok' ? '✅' : '⚠️';
+      const logType = status === 'ok' ? 'success' : 'error';
+      const label = entry.type || 'message';
+      const logMessage = `${prefix} ${label} ${status}${detail ? ` • ${detail}` : ''}`;
+      logToNode(entry.nodeId, logMessage, logType);
+    }
+  };
+
+  const sendTypedBridgeMessage = async (nodeId, state, message, { expectAck = true, targets = undefined } = {}) => {
+    if (!state) return { ok: false, messageId: null };
+    const messageId = message.messageId || createMessageId();
+    const packet = {
+      ...message,
+      nodeId,
+      messageId,
+      ts: nowMs()
+    };
+    const ok = await sendBridgePayload(nodeId, state, packet, { targets });
+    if (ok && expectAck && messageId) {
+      registerPendingAck(state, messageId, {
+        nodeId,
+        type: packet.type,
+        sessionId: packet.sessionId,
+        objectUuid: packet.objectUuid
+      });
+    }
+    return { ok, messageId };
+  };
 
   /**
    * Log a message to the NoClipBridge node's UI log
@@ -929,6 +992,10 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (st?.targetPub) unregisterTarget(key, st.targetPub);
       st?.sessions?.clear?.();
       st?.sessionIndex?.clear?.();
+      if (st?.pendingAcks) {
+        st.pendingAcks.forEach((entry) => clearTimeout(entry.timer));
+        st.pendingAcks.clear();
+      }
       NODE_STATE.delete(key);
     },
 
@@ -938,6 +1005,80 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
     onSessionUpdate(session) {
       handleSessionUpdate(session);
+    },
+
+    async sendSmartObjectState(nodeId, data = {}) {
+      const st = ensureNodeState(nodeId);
+      if (!st) return { ok: false, messageId: null };
+      const packet = {
+        type: 'smart-object-state',
+        sessionId: data.sessionId || data.session?.sessionId || '',
+        objectUuid: data.objectUuid || data.objectId || '',
+        objectId: data.objectUuid || data.objectId || '',
+        position: data.position || null,
+        state: data.state || null,
+        capabilities: data.capabilities || null,
+        metadata: data.metadata || null
+      };
+      return sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: data.expectAck !== false,
+        targets: data.targets
+      });
+    },
+
+    async sendDecisionResult(nodeId, data = {}) {
+      const st = ensureNodeState(nodeId);
+      if (!st) return { ok: false, messageId: null };
+      const packet = {
+        type: 'decision-result',
+        sessionId: data.sessionId || data.session?.sessionId || '',
+        objectUuid: data.objectUuid || data.objectId || '',
+        objectId: data.objectUuid || data.objectId || '',
+        result: data.result || null,
+        decision: data.decision || null,
+        summary: data.summary || null,
+        metadata: data.metadata || null
+      };
+      return sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: data.expectAck !== false,
+        targets: data.targets
+      });
+    },
+
+    async sendGraphQuery(nodeId, data = {}) {
+      const st = ensureNodeState(nodeId);
+      if (!st) return { ok: false, messageId: null };
+      const packet = {
+        type: 'graph-query',
+        sessionId: data.sessionId || '',
+        objectUuid: data.objectUuid || '',
+        queryId: data.queryId || data.query?.id || null,
+        query: data.query || null,
+        variables: data.variables || null,
+        metadata: data.metadata || null
+      };
+      return sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: data.expectAck !== false,
+        targets: data.targets
+      });
+    },
+
+    async sendGraphResponse(nodeId, data = {}) {
+      const st = ensureNodeState(nodeId);
+      if (!st) return { ok: false, messageId: null };
+      const packet = {
+        type: 'graph-response',
+        sessionId: data.sessionId || '',
+        objectUuid: data.objectUuid || '',
+        queryId: data.queryId || '',
+        result: data.result || null,
+        errors: data.errors || null,
+        metadata: data.metadata || null
+      };
+      return sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: data.expectAck === true,
+        targets: data.targets
+      });
     },
 
     // UI helper methods
