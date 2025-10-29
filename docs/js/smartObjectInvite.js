@@ -153,14 +153,19 @@ export function initSmartObjectInvite({ NodeStore, Net, setBadge }) {
       }
 
       // Extract pub key (remove hydra. prefix if present)
-      const hydraPub = hydraAddr.replace(/^hydra\./, '');
+      const hydraPub = hydraAddr.replace(/^hydra\./, '').toLowerCase();
+
+      if (!/^[0-9a-f]{64}$/.test(hydraPub)) {
+        setBadge?.('Hydra address invalid', false);
+        return;
+      }
 
       // Generate URL
       const baseUrl = network === 'noclip'
         ? 'https://noclip.nexus/'
         : 'https://hydras.nexus/';
 
-      const url = `${baseUrl}?hydra=hydra.${hydraPub}&node=${encodeURIComponent(nodeId)}`;
+      const url = `${baseUrl}?hydra=hydra.${hydraPub}&node=${encodeURIComponent(nodeId)}&kind=smart-object`;
 
       // Check if QRCode library is available
       if (typeof window.QRCode === 'undefined' || typeof window.QRCode.toCanvas !== 'function') {

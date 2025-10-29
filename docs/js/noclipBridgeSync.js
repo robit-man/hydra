@@ -225,28 +225,35 @@ function createNoClipBridgeSync({
   function handleSyncRequest(from, msg) {
     console.log('[NoClipBridgeSync] Received sync request from:', from, msg);
 
-    const noclipPub = msg.from || from;
-    const noclipAddr = msg.noclipAddr || `noclip.${noclipPub}`;
+    const rawSender = msg.from || from || '';
+    const normalizedPub = normalizeHex64(rawSender) || normalizeHex64(msg.noclipAddr);
+    const requestKey = normalizedPub || rawSender;
+    const noclipAddr = msg.noclipAddr || (normalizedPub ? `noclip.${normalizedPub}` : rawSender);
     const objectId = msg.objectId;
     const objectLabel = msg.objectConfig?.label || 'Smart Object';
+    const position = msg.objectConfig?.position && typeof msg.objectConfig.position === 'object'
+      ? { ...msg.objectConfig.position }
+      : null;
 
     // Store pending request
-    state.pendingRequests.set(noclipPub, {
-      noclipPub,
+    state.pendingRequests.set(requestKey, {
+      key: requestKey,
+      noclipPub: normalizedPub || '',
+      dmTarget: normalizedPub || rawSender,
       noclipAddr,
       objectId,
       objectLabel,
-      position: msg.objectConfig?.position && typeof msg.objectConfig.position === 'object'
-        ? { ...msg.objectConfig.position }
-        : null,
+      position,
+      objectConfig: msg.objectConfig && typeof msg.objectConfig === 'object' ? { ...msg.objectConfig } : null,
       receivedAt: Date.now()
     });
 
     // Show approval modal
-    showSyncRequestModal(noclipPub, noclipAddr, objectLabel);
+    showSyncRequestModal(requestKey, noclipAddr, objectLabel);
 
     // Also show toast notification
-    setBadge?.(`NoClip sync request from ${noclipPub.slice(0, 8)}...`);
+    const toastPub = (normalizedPub || rawSender || '').slice(0, 8);
+    setBadge?.(`NoClip sync request from ${toastPub}...`);
   }
 
   /**
@@ -367,7 +374,10 @@ function createNoClipBridgeSync({
    */
   async function approveSyncRequest(noclipPub) {
     ensureSessionsLoaded();
-    const request = state.pendingRequests.get(noclipPub);
+    const key = state.pendingRequests.has(noclipPub)
+      ? noclipPub
+      : (normalizeHex64(noclipPub) || noclipPub);
+    const request = state.pendingRequests.get(key);
     if (!request) {
       console.error('[NoClipBridgeSync] No pending request found for', noclipPub);
       return;
@@ -375,7 +385,9 @@ function createNoClipBridgeSync({
 
     try {
       // Create NoClipBridge node
-      const nodeId = `noclip-bridge-${noclipPub.slice(0, 8)}`;
+      const targetPub = request.noclipPub || normalizeHex64(noclipPub) || normalizeHex64(key) || '';
+      const displayKey = (targetPub && targetPub.length) ? targetPub : (normalizeHex64(key) || key || 'noclip');
+      const nodeId = `noclip-bridge-${String(displayKey).slice(0, 8)}`;
       const position = { x: Math.random() * 400 - 200, y: Math.random() * 300 - 150 };
 
       const bridgeNode = await Graph.createNode({
@@ -383,7 +395,7 @@ function createNoClipBridgeSync({
         type: 'NoClipBridge',
         position,
         config: {
-          targetPub: noclipPub,
+          targetPub: targetPub,
           targetAddr: request.noclipAddr,
           autoConnect: 'true'
         }
@@ -392,12 +404,13 @@ function createNoClipBridgeSync({
       console.log('[NoClipBridgeSync] Created NoClipBridge node:', nodeId);
 
       // Store approved connection
-      state.approvedConnections.set(noclipPub, nodeId);
+      state.approvedConnections.set(displayKey, nodeId);
+      if (displayKey !== key) {
+        state.approvedConnections.set(key, nodeId);
+      }
 
       const hydraIdentity = getHydraIdentity();
-      const positionData = request.objectConfig?.position && typeof request.objectConfig.position === 'object'
-        ? { ...request.objectConfig.position }
-        : null;
+      const positionData = request.position ? { ...request.position } : null;
       let geoData = null;
       if (positionData && Number.isFinite(positionData.lat) && Number.isFinite(positionData.lon)) {
         geoData = {
@@ -427,10 +440,12 @@ function createNoClipBridgeSync({
 
       // Send approval response back to NoClip
       if (PeerDiscovery && PeerDiscovery.sendDm) {
-        await PeerDiscovery.sendDm(noclipPub, {
+        await PeerDiscovery.sendDm(request.dmTarget || displayKey || key, {
           type: 'noclip-bridge-sync-accepted',
           bridgeNodeId: nodeId,
           session,
+          objectId: request.objectId,
+          objectLabel: request.objectLabel,
           timestamp: Date.now()
         });
       }
@@ -439,14 +454,14 @@ function createNoClipBridgeSync({
       log?.(`[noclip-sync] Created bridge node ${nodeId} for ${request.noclipAddr}`);
 
       // Remove from pending
-      state.pendingRequests.delete(noclipPub);
+      state.pendingRequests.delete(key);
 
     } catch (err) {
       console.error('[NoClipBridgeSync] Failed to approve sync:', err);
       setBadge?.(`✗ Failed to create NoClip bridge: ${err.message}`);
 
       // Send rejection instead
-      rejectSyncRequest(noclipPub, err.message);
+      rejectSyncRequest(key, err.message);
     }
   }
 
@@ -454,14 +469,19 @@ function createNoClipBridgeSync({
    * Reject sync request
    */
   async function rejectSyncRequest(noclipPub, reason = 'User rejected') {
-    const request = state.pendingRequests.get(noclipPub);
+    const key = state.pendingRequests.has(noclipPub)
+      ? noclipPub
+      : (normalizeHex64(noclipPub) || noclipPub);
+    const request = state.pendingRequests.get(key);
     if (!request) return;
 
     try {
       // Send rejection response
       if (PeerDiscovery && PeerDiscovery.sendDm) {
-        await PeerDiscovery.sendDm(noclipPub, {
+        await PeerDiscovery.sendDm(request.dmTarget || request.noclipPub || key, {
           type: 'noclip-bridge-sync-rejected',
+          objectId: request.objectId,
+          objectLabel: request.objectLabel,
           reason,
           timestamp: Date.now()
         });
@@ -473,7 +493,7 @@ function createNoClipBridgeSync({
     }
 
     // Remove from pending
-    state.pendingRequests.delete(noclipPub);
+    state.pendingRequests.delete(key);
   }
 
   /**
