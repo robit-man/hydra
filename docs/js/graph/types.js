@@ -306,7 +306,7 @@ const GraphTypes = {
     schema: [
       { key: 'targetPub', label: 'Target NKN Pub', type: 'text', placeholder: 'hex64 peer id' },
       { key: 'targetAddr', label: 'Target Address', type: 'text', placeholder: 'noclip.<hex64>' },
-      { key: 'room', label: 'Discovery Room (override)', type: 'text', placeholder: '(auto from url)' },
+      { key: 'room', label: 'Discovery Room (override)', type: 'text', placeholder: '(auto from url)', def: 'auto' },
       { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' }
     ]
   },

@@ -65,14 +65,34 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   };
 
   const sanitizeRoomName = (value) => {
-    const raw = String(value || 'default');
-    return raw.replace(/[^a-zA-Z0-9_.-]+/g, '_');
+    const raw = String(value || 'default').trim().toLowerCase();
+    const cleaned = raw.replace(/[^a-z0-9_.-]+/g, '_');
+    return cleaned || 'default';
   };
 
-  const deriveRoom = () => {
-    const host = window.location?.host || 'local';
-    const path = window.location?.pathname || '';
-    return sanitizeRoomName(`${host}${path.replace(/\//g, '-')}`);
+  const deriveAutoRoom = () => {
+    if (typeof window === 'undefined' || !window.location) return 'mesh-default';
+    const host = (window.location.hostname || 'local').toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const pathBits = (window.location.pathname || '')
+      .split('/')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((seg) => seg.toLowerCase().replace(/[^a-z0-9-]/g, '-'))
+      .filter(Boolean)
+      .join('-');
+    const slug = [host, pathBits].filter(Boolean).join('-').replace(/-+/g, '-') || 'mesh';
+    return sanitizeRoomName(`mesh-${slug}`);
+  };
+
+  const resolveRoomName = (value) => {
+    const raw = (value || '').trim();
+    if (!raw) return deriveAutoRoom();
+    const lowered = raw.toLowerCase();
+    if (lowered === 'auto' || lowered === 'default' || lowered === 'hybrid-bridge') {
+      return deriveAutoRoom();
+    }
+    const sanitized = sanitizeRoomName(raw);
+    return sanitized || deriveAutoRoom();
   };
 
   const consumePeerParam = () => {
@@ -115,6 +135,29 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
   };
 
+  const formatLastSeen = (ts) => {
+    if (!Number.isFinite(ts)) return '';
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    const delta = Math.max(0, Date.now() - ms);
+    const sec = Math.floor(delta / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.floor(hr / 24);
+    return `${day}d ago`;
+  };
+
+  let dropdownRefreshTimer = null;
+  const schedulePeerDropdownRefresh = () => {
+    if (dropdownRefreshTimer) return;
+    dropdownRefreshTimer = setTimeout(() => {
+      dropdownRefreshTimer = null;
+      NODE_STATE.forEach((_, nodeId) => refreshPeerDropdown(nodeId, { silent: true }));
+    }, 200);
+  };
+
   const updateNoclipBadge = () => {
     try {
       const badge = document.querySelector('#noclipPeerBadge');
@@ -130,6 +173,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     } catch (err) {
       // Silently fail if badge element doesn't exist
     }
+    schedulePeerDropdownRefresh();
   };
 
   const ensureNodeState = (nodeId) => {
@@ -142,6 +186,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         nodeId: key,
         graphId: CFG?.graphId || '',
         cfg,
+        resolvedRoom: resolveRoomName(cfg.room),
         targetPub: sanitizePubKey(cfg.targetPub),
         targetAddr: sanitizeAddr(cfg.targetAddr) || null,
         remotePeers: new Map(),
@@ -151,7 +196,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         lastHandshakeAt: 0,
         lastState: null,
         badgeLimiter: 0,
-        pendingAcks: new Map()
+        pendingAcks: new Map(),
+        rootEl: null
       });
       registerTarget(key, sanitizePubKey(cfg.targetPub));
     }
@@ -305,9 +351,9 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       }
       const pub = sanitizePubKey(client?.getPublicKey?.());
       const addr = client?.addr || Net.nkn?.addr || '';
-      const room = overrideRoom || sanitizeRoomName(NodeStore?.defaultsByType?.NoClipBridge?.room || 'hybrid-bridge');
+      const resolvedRoom = resolveRoomName(overrideRoom ?? NodeStore?.defaultsByType?.NoClipBridge?.room ?? '');
       const discoveryClient = await createNatsDiscovery({
-        room,
+        room: resolvedRoom,
         servers: DEFAULT_SERVERS,
         me: {
           nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
@@ -697,15 +743,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   /**
    * Refresh the peer dropdown for a node
    */
-  function refreshPeerDropdown(nodeId) {
-    const node = NodeStore?.get?.(nodeId);
-    if (!node || !node.el) return;
+  function refreshPeerDropdown(nodeId, { silent = false } = {}) {
+    const state = ensureNodeState(nodeId);
+    const rootEl = state?.rootEl;
+    if (!rootEl) return;
 
-    const selectEl = node.el.querySelector('[data-noclip-peer-select]');
+    const selectEl = rootEl.querySelector('[data-noclip-peer-select]');
     if (!selectEl) return;
 
     const currentValue = selectEl.value;
-    const peers = getDiscoveredNoClipPeers();
+    const peers = getDiscoveredNoClipPeers().sort((a, b) => (b.last || 0) - (a.last || 0));
 
     // Clear and rebuild options
     selectEl.innerHTML = '<option value="">-- Select NoClip Peer --</option>';
@@ -713,8 +760,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     peers.forEach(peer => {
       const option = document.createElement('option');
       option.value = peer.nknPub;
-      const label = peer.meta?.username || `NoClip ${peer.nknPub.slice(0, 8)}...`;
-      option.textContent = `${label} (noclip.${peer.nknPub.slice(0, 8)})`;
+      const alias = peer.meta?.username || peer.meta?.name || peer.meta?.alias || `NoClip ${peer.nknPub.slice(0, 6)}…`;
+      const shortPub = `${peer.nknPub.slice(0, 6)}…${peer.nknPub.slice(-4)}`;
+      const lastSeen = formatLastSeen(peer.last);
+      const parts = [alias, shortPub];
+      if (lastSeen) parts.push(lastSeen);
+      if (peer.geo && Number.isFinite(peer.geo.lat) && Number.isFinite(peer.geo.lon)) {
+        parts.push(`${Number(peer.geo.lat).toFixed(2)}, ${Number(peer.geo.lon).toFixed(2)}`);
+      }
+      option.textContent = parts.join(' • ');
+      option.title = `noclip.${peer.nknPub}`;
       selectEl.appendChild(option);
     });
 
@@ -723,15 +778,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       selectEl.value = currentValue;
     }
 
-    logToNode(nodeId, `Found ${peers.length} NoClip peer(s)`, 'info');
+    if (!silent) logToNode(nodeId, `Found ${peers.length} NoClip peer(s)`, 'info');
     refreshSessionStatus(nodeId);
   }
 
   const refreshSessionStatus = (nodeId) => {
-    const node = NodeStore?.get?.(nodeId);
-    if (!node?.el) return;
-    const statusEl = node.el.querySelector('[data-noclip-session-status]');
-    const listEl = node.el.querySelector('[data-noclip-session-list]');
+    const state = NODE_STATE.get(nodeId);
+    const rootEl = state?.rootEl;
+    if (!rootEl) return;
+    const statusEl = rootEl.querySelector('[data-noclip-session-status]');
+    const listEl = rootEl.querySelector('[data-noclip-session-list]');
     if (!statusEl) return;
     const st = NODE_STATE.get(nodeId);
     if (!st || !st.sessions || !st.sessions.size) {
@@ -873,7 +929,22 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const cfg = record?.config || {};
       st.cfg = cfg;
       st.graphId = CFG?.graphId || st.graphId;
-      overrideRoom = sanitizeRoomName(cfg.room || overrideRoom || 'hybrid-bridge');
+      const rawRoom = (cfg.room ?? '').trim();
+      const loweredRoom = rawRoom.toLowerCase();
+      let explicitRoom = null;
+      if (rawRoom && loweredRoom !== 'auto' && loweredRoom !== 'default' && loweredRoom !== 'hybrid-bridge') {
+        explicitRoom = sanitizeRoomName(rawRoom);
+      } else {
+        if (rawRoom && loweredRoom === 'hybrid-bridge') {
+          const updated = NodeStore.update(nodeId, { type: 'NoClipBridge', room: 'auto' });
+          if (updated && typeof updated === 'object') cfg.room = updated.room;
+        }
+      }
+      overrideRoom = explicitRoom;
+      const resolvedRoom = resolveRoomName(explicitRoom || cfg.room || '');
+      st.resolvedRoom = resolvedRoom;
+      const roomEl = node.el?.querySelector('[data-noclip-room]');
+      if (roomEl) roomEl.textContent = resolvedRoom;
 
       // Check for ?peer= URL parameter and use it if no targetPub configured
       let targetPub = sanitizePubKey(cfg.targetPub);
@@ -896,6 +967,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (normalizeBoolean(cfg.autoConnect, true) && st.targetPub) {
         ensureHandshake(nodeId, st);
       }
+      schedulePeerDropdownRefresh();
       refreshSessionStatus(nodeId);
     },
 
@@ -1130,10 +1202,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     },
 
     // UI helper methods
+    attachNodeElement(nodeId, el) {
+      const state = ensureNodeState(nodeId);
+      if (!state) return;
+      state.rootEl = el || null;
+    },
     logToNode,
     refreshPeerDropdown,
     getDiscoveredNoClipPeers,
-    listSessions
+    listSessions,
+    resolveRoomName
   };
 }
 

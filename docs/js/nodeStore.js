@@ -172,7 +172,7 @@ const NodeStore = {
     NoClipBridge: {
       targetPub: '',
       targetAddr: '',
-      room: 'hybrid-bridge',
+      room: 'auto',
       autoConnect: true
     },
     MCP: {

@@ -1886,6 +1886,9 @@ function refreshNodeResolution(force = false) {
             <div class="muted" style="pointer-events:auto;margin-bottom:6px;">
               Hydra Address: <code data-noclip-self style="font-size:11px;color:var(--accent);">—</code>
             </div>
+            <div class="muted" style="pointer-events:auto;margin-bottom:6px;">
+              Discovery Room: <code data-noclip-room style="font-size:11px;color:var(--accent);">—</code>
+            </div>
             <div class="muted" style="pointer-events:auto;margin-bottom:6px;">Discovered NoClip Peers</div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select data-noclip-peer-select style="flex:1;pointer-events:auto;" autocomplete="off">
@@ -5337,7 +5340,9 @@ function refreshNodeResolution(force = false) {
 
   function initNoClipNode(node) {
     if (!node || node.type !== 'NoClipBridge') return;
+    NoClip?.attachNodeElement?.(node.id, node.el);
     const identityEl = node.el?.querySelector('[data-noclip-self]');
+    const roomEl = node.el?.querySelector('[data-noclip-room]');
     const updateIdentity = () => {
       if (!identityEl) return;
       try {
@@ -5348,7 +5353,20 @@ function refreshNodeResolution(force = false) {
         identityEl.textContent = '—';
       }
     };
+    const updateRoomDisplay = () => {
+      if (!roomEl) return;
+      try {
+        const record = NodeStore.ensure(node.id, 'NoClipBridge');
+        const raw = record?.config?.room ?? '';
+        const resolved = NoClip?.resolveRoomName?.(raw) || raw || '—';
+        roomEl.textContent = resolved;
+      } catch (_) {
+        roomEl.textContent = '—';
+      }
+    };
     updateIdentity();
+    updateRoomDisplay();
+    NoClip?.refreshPeerDropdown?.(node.id, { silent: true });
 
     NoClip?.refresh?.(node.id);
     if (!node._noclipInit) {
@@ -5359,6 +5377,7 @@ function refreshNodeResolution(force = false) {
     const syncListEl = node.el?.querySelector('[data-noclip-sync-list]');
     const renderPendingRequests = () => {
       updateIdentity();
+      updateRoomDisplay();
       if (!syncListEl) return;
       const requests = NoClipBridgeSync?.listPendingRequests?.() || [];
       syncListEl.innerHTML = '';
@@ -5504,7 +5523,7 @@ function refreshNodeResolution(force = false) {
 
     // Initial peer list population
     if (NoClip?.refreshPeerDropdown) {
-      setTimeout(() => NoClip.refreshPeerDropdown(node.id), 500);
+      setTimeout(() => NoClip.refreshPeerDropdown(node.id, { silent: true }), 500);
     }
   }
 
@@ -6767,7 +6786,12 @@ function refreshNodeResolution(force = false) {
       fields._boolToggleObserver = observer;
     }
     form.dataset.nodeId = nodeId;
-    help.textContent = `${GraphTypes[node.type].title} • ${nodeId}`;
+    if (node.type === 'NoClipBridge') {
+      const resolvedRoom = NoClip?.resolveRoomName?.(cfg.room) || 'auto';
+      help.innerHTML = `${GraphTypes[node.type].title} • ${nodeId}<br><span class="muted">Auto room resolves to <code>${resolvedRoom}</code>. Set an override to join a different discovery room.</span>`;
+    } else {
+      help.textContent = `${GraphTypes[node.type].title} • ${nodeId}`;
+    }
     if (node.type === 'MCP') {
       const testRow = document.createElement('div');
       testRow.className = 'row';
@@ -7212,6 +7236,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
         delete node._noclipSyncUnsub;
       }
       NoClip?.dispose?.(nodeId);
+      NoClip?.attachNodeElement?.(nodeId, null);
     }
     if (node.type === 'MCP') {
       MCP.dispose(nodeId);

@@ -583,7 +583,7 @@ function createWorkspaceSync({
       // Configure the bridge to connect to the NoClip peer
       record.config.targetPub = noclipHex;
       record.config.autoConnect = true;
-      record.config.room = 'hybrid-bridge'; // Use default hybrid bridge room
+      record.config.room = 'auto'; // Use auto room derivation by default
 
       // Save the configuration
       NodeStore.save();
