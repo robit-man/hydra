@@ -719,6 +719,62 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return success;
   }
 
+  const requestSync = async (nodeId, targetPub, options = {}) => {
+    const state = nodeId ? ensureNodeState(nodeId) : null;
+    const badgeState = state || {};
+    const record = nodeId ? NodeStore.ensure(nodeId, 'NoClipBridge') : null;
+    const config = record?.config || {};
+    const normalized = sanitizePubKey(targetPub || state?.targetPub || config.targetPub || '');
+    if (!normalized) {
+      maybeBadge(badgeState, 'Select a NoClip peer first', false);
+      throw new Error('NoClip peer not selected');
+    }
+
+    const resolvedRoom = resolveRoomName(config.room || state?.room || '');
+    const hydraAddr = Net?.nkn?.addr || Net?.nkn?.client?.addr || '';
+    const hydraPub = sanitizePubKey(Net?.nkn?.client?.getPublicKey?.() || hydraAddr);
+    const payload = {
+      type: 'noclip-bridge-sync-request',
+      hydraAddr: hydraAddr || (hydraPub ? `hydra.${hydraPub}` : ''),
+      hydraPub,
+      hydraGraphId: CFG?.graphId || '',
+      bridgeNodeId: nodeId,
+      discoveryRoom: resolvedRoom,
+      timestamp: Date.now()
+    };
+    if (options.objectId) payload.objectId = options.objectId;
+    if (options.objectLabel) payload.objectLabel = options.objectLabel;
+    if (options.objectConfig && typeof options.objectConfig === 'object') {
+      payload.objectConfig = { ...options.objectConfig };
+    }
+
+    try {
+      if (sharedPeerDiscovery?.sendDm) {
+        await sharedPeerDiscovery.sendDm(normalized, payload);
+      } else {
+        const disco = await ensureDiscovery();
+        if (!disco?.dm) throw new Error('Discovery channel unavailable');
+        await disco.dm(normalized, payload);
+      }
+      if (nodeId) {
+        logToNode(nodeId, `→ Sync request sent to noclip.${normalized.slice(0, 8)}…`, 'info');
+      }
+      maybeBadge(badgeState, `Sync request sent to noclip.${normalized.slice(0, 8)}…`);
+      if (!nodeId) {
+        setBadge?.(`Sync request sent to noclip.${normalized.slice(0, 8)}…`);
+      }
+    } catch (err) {
+      if (nodeId) {
+        logToNode(nodeId, `✗ Sync request failed: ${err?.message || err}`, 'error');
+      }
+      maybeBadge(badgeState, `Sync request failed: ${err?.message || err}`, false);
+      if (!nodeId) {
+        setBadge?.(`Sync request failed: ${err?.message || err}`, false);
+      }
+      throw err;
+    }
+  };
+
   const createMessageId = () => `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   const registerPendingAck = (state, messageId, info) => {
@@ -1291,6 +1347,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     },
     logToNode,
     refreshPeerDropdown,
+    requestSync,
     getDiscoveredNoClipPeers,
     listSessions,
     resolveRoomName

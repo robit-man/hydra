@@ -350,7 +350,7 @@ class DiscoveryClient extends EventHub {
   }
 }
 
-function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
+function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip }) {
   // Use 'nexus' as the shared discovery room for cross-application peer discovery
   // This enables Hydra (hydra.nexus) and NoClip (noclip.nexus) to discover each other
   const derivedRoom = 'nexus';
@@ -2094,6 +2094,32 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         });
         actions.appendChild(chatBtn);
       } else {
+        if (NoClip?.requestSync) {
+          const syncBtn = document.createElement('button');
+          syncBtn.className = 'secondary';
+          syncBtn.textContent = 'Sync';
+          syncBtn.title = 'Send bridge sync request';
+          syncBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const normalized = normalizePubKey(peer?.nknPub || peer?.addr || peer?.originalPub);
+            if (!normalized) {
+              setBadge?.('No peer identifier available', false);
+              return;
+            }
+            syncBtn.disabled = true;
+            syncBtn.dataset.busy = 'true';
+            try {
+              await NoClip.requestSync(null, normalized);
+            } catch (err) {
+              console.error('[peers] sync request failed', err);
+              setBadge?.(`Sync request failed: ${err?.message || err}`, false);
+            } finally {
+              delete syncBtn.dataset.busy;
+              syncBtn.disabled = false;
+            }
+          });
+          actions.appendChild(syncBtn);
+        }
         const bridgeBtn = document.createElement('button');
         bridgeBtn.className = 'ghost';
         bridgeBtn.textContent = 'Bridge';

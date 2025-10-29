@@ -1895,6 +1895,7 @@ function refreshNodeResolution(force = false) {
                 <option value="">-- Select NoClip Peer --</option>
               </select>
               <button type="button" data-noclip-peer-refresh title="Refresh peers">🔄</button>
+              <button type="button" data-noclip-peer-sync title="Send sync request" aria-label="Send sync request">🤝</button>
             </div>
             <div class="muted" style="pointer-events:auto;margin-top:6px;">Pending Sync Requests</div>
             <div data-noclip-sync-list style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.4;color:var(--muted);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;max-height:140px;overflow:auto;">
@@ -5494,6 +5495,13 @@ function refreshNodeResolution(force = false) {
 
     // Wire up peer dropdown
     const selectEl = node.el?.querySelector('[data-noclip-peer-select]');
+    const syncBtn = node.el?.querySelector('[data-noclip-peer-sync]');
+    const updateSyncButtonState = () => {
+      if (!syncBtn) return;
+      const record = NodeStore.ensure(node.id, 'NoClipBridge');
+      const current = (selectEl?.value || record?.config?.targetPub || '').trim();
+      syncBtn.disabled = !current;
+    };
     if (selectEl && !selectEl._noclipBound) {
       selectEl.addEventListener('change', (e) => {
         const selectedPub = e.target.value;
@@ -5508,6 +5516,7 @@ function refreshNodeResolution(force = false) {
           NoClip?.refresh?.(node.id);
           NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
         }
+        updateSyncButtonState();
       });
       selectEl._noclipBound = true;
     }
@@ -5517,14 +5526,40 @@ function refreshNodeResolution(force = false) {
     if (refreshBtn && !refreshBtn._noclipBound) {
       refreshBtn.addEventListener('click', () => {
         NoClip?.refreshPeerDropdown?.(node.id);
+        updateSyncButtonState();
       });
       refreshBtn._noclipBound = true;
+    }
+
+    if (syncBtn && !syncBtn._noclipBound) {
+      syncBtn.addEventListener('click', async () => {
+        const record = NodeStore.ensure(node.id, 'NoClipBridge');
+        const selectedPub = (selectEl?.value || record?.config?.targetPub || '').trim();
+        if (!selectedPub) {
+          setBadge?.('Select a NoClip peer first', false);
+          updateSyncButtonState();
+          return;
+        }
+        syncBtn.disabled = true;
+        syncBtn.dataset.busy = 'true';
+        try {
+          await NoClip?.requestSync?.(node.id, selectedPub);
+        } catch (err) {
+          console.error('[Graph][NoClip] sync request failed', err);
+          setBadge?.(`Sync request failed: ${err?.message || err}`, false);
+        } finally {
+          delete syncBtn.dataset.busy;
+          updateSyncButtonState();
+        }
+      });
+      syncBtn._noclipBound = true;
     }
 
     // Initial peer list population
     if (NoClip?.refreshPeerDropdown) {
       setTimeout(() => NoClip.refreshPeerDropdown(node.id, { silent: true }), 500);
     }
+    updateSyncButtonState();
   }
 
   function openSettings(nodeId) {

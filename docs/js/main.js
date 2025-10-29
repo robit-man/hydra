@@ -255,7 +255,8 @@ const PeerDiscovery = createPeerDiscovery({
   CFG,
   WorkspaceSync,
   setBadge,
-  log
+  log,
+  NoClip: NoClipBridge
 });
 
 NoClipBridge?.attachPeerDiscovery?.(PeerDiscovery);
