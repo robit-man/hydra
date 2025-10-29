@@ -5509,13 +5509,14 @@ function refreshNodeResolution(force = false) {
 
         // Update node config with selected peer
         const record = NodeStore.ensure(node.id, 'NoClipBridge');
-        if (record && record.config) {
-          record.config.targetPub = selectedPub;
-          record.config.targetAddr = `noclip.${selectedPub}`;
-          NodeStore.save();
-          NoClip?.refresh?.(node.id);
-          NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
-        }
+        const nextCfg = {
+          ...(record?.config || {}),
+          targetPub: selectedPub,
+          targetAddr: `noclip.${selectedPub}`
+        };
+        NodeStore.saveCfg(node.id, 'NoClipBridge', nextCfg);
+        NoClip?.refresh?.(node.id);
+        NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
         updateSyncButtonState();
       });
       selectEl._noclipBound = true;
