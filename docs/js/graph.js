@@ -5504,19 +5504,14 @@ function refreshNodeResolution(force = false) {
     };
     if (selectEl && !selectEl._noclipBound) {
       selectEl.addEventListener('change', (e) => {
-        const selectedPub = e.target.value;
-        if (!selectedPub) return;
-
-        // Update node config with selected peer
-        const record = NodeStore.ensure(node.id, 'NoClipBridge');
-        const nextCfg = {
-          ...(record?.config || {}),
-          targetPub: selectedPub,
-          targetAddr: `noclip.${selectedPub}`
-        };
-        NodeStore.saveCfg(node.id, 'NoClipBridge', nextCfg);
-        NoClip?.refresh?.(node.id);
-        NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
+        const selectedPub = (e.target.value || '').trim();
+        NoClip?.setTargetPeer?.(node.id, selectedPub);
+        if (selectedPub) {
+          NoClip?.refresh?.(node.id);
+          NoClip?.logToNode?.(node.id, `✓ Selected peer: noclip.${selectedPub.slice(0, 8)}...`, 'success');
+        } else {
+          NoClip?.logToNode?.(node.id, '⟲ Cleared target peer selection', 'info');
+        }
         updateSyncButtonState();
       });
       selectEl._noclipBound = true;

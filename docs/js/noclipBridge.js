@@ -730,6 +730,10 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       throw new Error('NoClip peer not selected');
     }
 
+    if (nodeId && state && state.targetPub !== normalized) {
+      setTargetPeer(nodeId, normalized);
+    }
+
     const resolvedRoom = resolveRoomName(config.room || state?.room || '');
     const hydraAddr = Net?.nkn?.addr || Net?.nkn?.client?.addr || '';
     const hydraPub = sanitizePubKey(Net?.nkn?.client?.getPublicKey?.() || hydraAddr);
@@ -773,6 +777,29 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       }
       throw err;
     }
+  };
+
+  const setTargetPeer = (nodeId, pub) => {
+    const st = ensureNodeState(nodeId);
+    if (!st) return;
+    const normalized = sanitizePubKey(pub);
+    if (st.targetPub && st.targetPub !== normalized) {
+      unregisterTarget(nodeId, st.targetPub);
+    }
+    if (normalized) registerTarget(nodeId, normalized);
+    st.targetPub = normalized || '';
+    st.targetAddr = normalized ? `noclip.${normalized}` : '';
+
+    const record = NodeStore.ensure(nodeId, 'NoClipBridge');
+    const nextCfg = {
+      ...(record?.config || {}),
+      targetPub: st.targetPub,
+      targetAddr: st.targetAddr
+    };
+    NodeStore.saveCfg(nodeId, 'NoClipBridge', nextCfg);
+    if (record) record.config = nextCfg;
+    st.cfg = nextCfg;
+    refreshPeerDropdown(nodeId, { silent: true });
   };
 
   const createMessageId = () => `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -879,7 +906,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const selectEl = rootEl.querySelector('[data-noclip-peer-select]');
     if (!selectEl) return;
 
-    const currentValue = selectEl.value;
+    const currentValue = (selectEl.value || state?.targetPub || state?.cfg?.targetPub || '').trim();
     const peers = getDiscoveredNoClipPeers().sort((a, b) => (b.last || 0) - (a.last || 0));
 
     // Clear and rebuild options
@@ -907,6 +934,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     // Restore selection if it still exists
     if (currentValue && Array.from(selectEl.options).some(opt => opt.value === currentValue)) {
       selectEl.value = currentValue;
+    } else if (!selectEl.value && state?.targetPub) {
+      selectEl.value = state.targetPub;
     }
 
     if (!silent) logToNode(nodeId, `Found ${peers.length} NoClip peer(s)`, 'info');
@@ -1348,6 +1377,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     logToNode,
     refreshPeerDropdown,
     requestSync,
+    setTargetPeer,
     getDiscoveredNoClipPeers,
     listSessions,
     resolveRoomName
