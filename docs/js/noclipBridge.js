@@ -688,6 +688,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return Array.from(NOCLIP_PEERS.values());
   }
 
+  function listSessions(nodeId) {
+    const st = NODE_STATE.get(nodeId);
+    if (!st?.sessions?.size) return [];
+    return Array.from(st.sessions.values()).map((session) => ({ ...session }));
+  }
+
   /**
    * Refresh the peer dropdown for a node
    */
@@ -725,14 +731,19 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const node = NodeStore?.get?.(nodeId);
     if (!node?.el) return;
     const statusEl = node.el.querySelector('[data-noclip-session-status]');
+    const listEl = node.el.querySelector('[data-noclip-session-list]');
     if (!statusEl) return;
     const st = NODE_STATE.get(nodeId);
     if (!st || !st.sessions || !st.sessions.size) {
       statusEl.textContent = 'No active sessions';
       statusEl.style.color = 'var(--muted)';
+      if (listEl) {
+        listEl.innerHTML = '<div data-empty>Sessions will appear here after approval.</div>';
+      }
       return;
     }
     const sessions = Array.from(st.sessions.values());
+    const listFragments = document.createDocumentFragment();
     const summaries = sessions.map((session) => {
       const label = session.objectLabel || session.objectUuid || session.sessionId;
       const status = (session.status || 'pending').replace(/[_-]/g, ' ');
@@ -743,6 +754,41 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     });
     statusEl.textContent = summaries.join(' • ');
     statusEl.style.color = 'var(--accent)';
+    if (listEl) {
+      listEl.innerHTML = '';
+      const formatDelta = (ts) => {
+        if (!Number.isFinite(ts)) return '';
+        const diff = Math.max(0, nowMs() - ts);
+        const sec = Math.floor(diff / 1000);
+        if (sec < 60) return `${sec}s ago`;
+        const min = Math.floor(sec / 60);
+        if (min < 60) return `${min}m ago`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return `${hr}h ago`;
+        const day = Math.floor(hr / 24);
+        return `${day}d ago`;
+      };
+      sessions.forEach((session) => {
+        const row = document.createElement('div');
+        row.className = 'noclip-session-row';
+        row.style.marginBottom = '6px';
+        const status = (session.status || 'pending').replace(/[_-]/g, ' ');
+        const label = session.objectLabel || session.objectUuid || session.sessionId;
+        const geoParts = [];
+        if (session.position && Number.isFinite(session.position.lat) && Number.isFinite(session.position.lon)) {
+          geoParts.push(`${session.position.lat.toFixed(4)}, ${session.position.lon.toFixed(4)}`);
+        } else if (session.geo && Number.isFinite(session.geo.lat) && Number.isFinite(session.geo.lon)) {
+          geoParts.push(`${session.geo.lat.toFixed(4)}, ${session.geo.lon.toFixed(4)}`);
+        }
+        if (Number.isFinite(session.position?.alt)) geoParts.push(`${Number(session.position.alt).toFixed(1)}m`);
+        const geoText = geoParts.length ? ` • ${geoParts.join(' • ')}` : '';
+        const bridge = session.hydraBridgeNodeId ? ` • bridge ${session.hydraBridgeNodeId}` : '';
+        const last = formatDelta(session.updatedAt);
+        row.innerHTML = `<strong>${label}</strong> • ${status}${geoText}${bridge}${last ? ` • ${last}` : ''}`;
+        listFragments.appendChild(row);
+      });
+      listEl.appendChild(listFragments);
+    }
   };
 
   const storeSessionForNode = (nodeId, session) => {
@@ -1086,7 +1132,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     // UI helper methods
     logToNode,
     refreshPeerDropdown,
-    getDiscoveredNoClipPeers
+    getDiscoveredNoClipPeers,
+    listSessions
   };
 }
 

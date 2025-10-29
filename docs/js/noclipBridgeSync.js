@@ -12,7 +12,8 @@ function createNoClipBridgeSync({
   Net,
   CFG,
   setBadge,
-  log
+  log,
+  NoClip
 }) {
   const state = {
     pendingRequests: new Map(), // noclipPub -> request data
@@ -23,8 +24,19 @@ function createNoClipBridgeSync({
   };
   const SESSION_STORAGE_KEY = 'hydra.noclip.sessions.v1';
   let sessionsLoaded = false;
+  const listeners = new Set();
 
   const nowMs = () => Date.now();
+
+  const emitChange = () => {
+    listeners.forEach((fn) => {
+      try {
+        fn(state);
+      } catch (err) {
+        console.warn('[NoClipBridgeSync] listener error:', err);
+      }
+    });
+  };
 
   const normalizeHex64 = (value) => {
     if (typeof value !== 'string') return '';
@@ -132,6 +144,7 @@ function createNoClipBridgeSync({
     state.sessions.set(merged.sessionId, merged);
     persistSessions();
     notifyBridge(merged);
+    emitChange();
     return merged;
   };
 
@@ -176,6 +189,14 @@ function createNoClipBridgeSync({
       upsertSession(next);
     });
     return targets.length;
+  };
+
+  const listPendingRequests = () => Array.from(state.pendingRequests.values());
+
+  const subscribe = (listener) => {
+    if (typeof listener !== 'function') return () => {};
+    listeners.add(listener);
+    return () => listeners.delete(listener);
   };
 
   /**
@@ -247,6 +268,7 @@ function createNoClipBridgeSync({
       objectConfig: msg.objectConfig && typeof msg.objectConfig === 'object' ? { ...msg.objectConfig } : null,
       receivedAt: Date.now()
     });
+    emitChange();
 
     // Show approval modal
     showSyncRequestModal(requestKey, noclipAddr, objectLabel);
@@ -408,6 +430,7 @@ function createNoClipBridgeSync({
       if (displayKey !== key) {
         state.approvedConnections.set(key, nodeId);
       }
+      NoClip?.logToNode?.(nodeId, `✓ Bridge approved for ${request.objectLabel || request.noclipAddr}`, 'success');
 
       const hydraIdentity = getHydraIdentity();
       const positionData = request.position ? { ...request.position } : null;
@@ -455,6 +478,7 @@ function createNoClipBridgeSync({
 
       // Remove from pending
       state.pendingRequests.delete(key);
+      emitChange();
 
     } catch (err) {
       console.error('[NoClipBridgeSync] Failed to approve sync:', err);
@@ -488,12 +512,17 @@ function createNoClipBridgeSync({
       }
 
       log?.(`[noclip-sync] Rejected sync request from ${request.noclipAddr}: ${reason}`);
+      const bridgeNodeId = state.approvedConnections.get(request.key || request.noclipPub);
+      if (bridgeNodeId) {
+        NoClip?.logToNode?.(bridgeNodeId, `✗ Sync request rejected: ${reason}`, 'error');
+      }
     } catch (err) {
       console.error('[NoClipBridgeSync] Failed to send rejection:', err);
     }
 
     // Remove from pending
     state.pendingRequests.delete(key);
+    emitChange();
   }
 
   /**
@@ -520,6 +549,7 @@ function createNoClipBridgeSync({
     console.log('[NoClipBridgeSync] Sync accepted by NoClip:', from);
     const suffix = updatedCount ? '' : ' (session pending)';
     setBadge?.(`✓ NoClip ${from.slice(0, 8)}... acknowledged bridge connection${suffix}`);
+    emitChange();
   }
 
   /**
@@ -536,6 +566,7 @@ function createNoClipBridgeSync({
     });
     console.log('[NoClipBridgeSync] Sync rejected by NoClip:', from, msg.reason);
     setBadge?.(`✗ NoClip ${from.slice(0, 8)}... rejected: ${reason}`);
+    emitChange();
   }
 
   /**
@@ -551,6 +582,7 @@ function createNoClipBridgeSync({
       ensureSessionsLoaded();
       state.sessions.forEach((session) => notifyBridge(session));
     }
+    emitChange();
   }
 
   return {
@@ -562,6 +594,9 @@ function createNoClipBridgeSync({
     getBridgeNodeId,
     registerBridgeAdapter,
     updateSessionStatus,
+    getHydraIdentity,
+    listPendingRequests,
+    subscribe,
     state // Expose state for debugging
   };
 }

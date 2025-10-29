@@ -183,6 +183,29 @@ const NoClipBridge = createNoClipBridge({
   log
 });
 
+let NoClipBridgeSyncImpl = null;
+const NoClipBridgeSyncProxy = {
+  getHydraIdentity: (...args) => NoClipBridgeSyncImpl?.getHydraIdentity?.(...args) || {},
+  listPendingRequests: (...args) => NoClipBridgeSyncImpl?.listPendingRequests?.(...args) || [],
+  subscribe: (listener) => {
+    if (!NoClipBridgeSyncImpl?.subscribe) return () => {};
+    return NoClipBridgeSyncImpl.subscribe(listener);
+  },
+  approveSyncRequest: (...args) => {
+    if (!NoClipBridgeSyncImpl?.approveSyncRequest) {
+      return Promise.reject(new Error('NoClipBridgeSync not ready'));
+    }
+    return NoClipBridgeSyncImpl.approveSyncRequest(...args);
+  },
+  rejectSyncRequest: (...args) => {
+    if (!NoClipBridgeSyncImpl?.rejectSyncRequest) {
+      return Promise.reject(new Error('NoClipBridgeSync not ready'));
+    }
+    return NoClipBridgeSyncImpl.rejectSyncRequest(...args);
+  },
+  updateSessionStatus: (...args) => NoClipBridgeSyncImpl?.updateSessionStatus?.(...args)
+};
+
 const Graph = createGraph({
   Router,
   NodeStore,
@@ -201,6 +224,7 @@ const Graph = createGraph({
   WebScraper,
   Vision,
   NoClip: NoClipBridge,
+  NoClipBridgeSync: NoClipBridgeSyncProxy,
   Net,
   CFG,
   saveCFG,
@@ -241,8 +265,10 @@ const NoClipBridgeSync = createNoClipBridgeSync({
   Net,
   CFG,
   setBadge,
-  log
+  log,
+  NoClip: NoClipBridge
 });
+NoClipBridgeSyncImpl = NoClipBridgeSync;
 
 // Link bridge modules for session coordination
 NoClipBridge?.registerSyncAdapter?.(NoClipBridgeSync);

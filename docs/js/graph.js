@@ -30,6 +30,7 @@ function createGraph({
   WebScraper,
   Vision,
   NoClip,
+  NoClipBridgeSync,
   Net,
   CFG,
   saveCFG,
@@ -1882,6 +1883,9 @@ function refreshNodeResolution(force = false) {
         ` : ''}
         ${node.type === 'NoClipBridge' ? `
           <div class="noclip-bridge-node" data-noclip-root style="pointer-events:auto;">
+            <div class="muted" style="pointer-events:auto;margin-bottom:6px;">
+              Hydra Address: <code data-noclip-self style="font-size:11px;color:var(--accent);">—</code>
+            </div>
             <div class="muted" style="pointer-events:auto;margin-bottom:6px;">Discovered NoClip Peers</div>
             <div style="display:flex;gap:6px;margin-bottom:8px;">
               <select data-noclip-peer-select style="flex:1;pointer-events:auto;" autocomplete="off">
@@ -1889,9 +1893,16 @@ function refreshNodeResolution(force = false) {
               </select>
               <button type="button" data-noclip-peer-refresh title="Refresh peers">🔄</button>
             </div>
+            <div class="muted" style="pointer-events:auto;margin-top:6px;">Pending Sync Requests</div>
+            <div data-noclip-sync-list style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.4;color:var(--muted);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;max-height:140px;overflow:auto;">
+              <div data-empty>None pending</div>
+            </div>
             <div class="muted" style="pointer-events:auto;margin-top:6px;">Session Status</div>
-            <div data-noclip-session-status style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.4;color:var(--muted);">
+            <div data-noclip-session-status style="pointer-events:auto;margin-bottom:6px;font-size:12px;line-height:1.4;color:var(--muted);">
               No active sessions
+            </div>
+            <div data-noclip-session-list style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.5;color:var(--muted);max-height:140px;overflow:auto;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;">
+              <div data-empty>Sessions will appear here after approval.</div>
             </div>
             <div class="muted" style="pointer-events:auto;margin-top:12px;">Connection Log</div>
             <div class="code noclip-bridge-log" data-noclip-log style="min-height:100px;max-height:200px;overflow:auto;font-size:11px;line-height:1.4;"></div>
@@ -5326,11 +5337,141 @@ function refreshNodeResolution(force = false) {
 
   function initNoClipNode(node) {
     if (!node || node.type !== 'NoClipBridge') return;
+    const identityEl = node.el?.querySelector('[data-noclip-self]');
+    const updateIdentity = () => {
+      if (!identityEl) return;
+      try {
+        const identity = NoClipBridgeSync?.getHydraIdentity?.() || {};
+        const text = identity.addr || (identity.pub ? `hydra.${identity.pub}` : '—');
+        identityEl.textContent = text;
+      } catch (_) {
+        identityEl.textContent = '—';
+      }
+    };
+    updateIdentity();
+
     NoClip?.refresh?.(node.id);
     if (!node._noclipInit) {
       NoClip?.init?.(node.id);
       node._noclipInit = true;
     }
+
+    const syncListEl = node.el?.querySelector('[data-noclip-sync-list]');
+    const renderPendingRequests = () => {
+      updateIdentity();
+      if (!syncListEl) return;
+      const requests = NoClipBridgeSync?.listPendingRequests?.() || [];
+      syncListEl.innerHTML = '';
+      if (!requests.length) {
+        const empty = document.createElement('div');
+        empty.dataset.empty = 'true';
+        empty.textContent = 'None pending';
+        syncListEl.appendChild(empty);
+        return;
+      }
+      const formatDelta = (ts) => {
+        if (!Number.isFinite(ts)) return '';
+        const diff = Math.max(0, Date.now() - ts);
+        const sec = Math.floor(diff / 1000);
+        if (sec < 60) return `${sec}s ago`;
+        const min = Math.floor(sec / 60);
+        if (min < 60) return `${min}m ago`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24) return `${hr}h ago`;
+        const day = Math.floor(hr / 24);
+        return `${day}d ago`;
+      };
+      requests.forEach((request) => {
+        const item = document.createElement('div');
+        item.className = 'noclip-sync-request';
+        item.style.marginBottom = '8px';
+        const title = document.createElement('div');
+        title.innerHTML = `<strong>${request.objectLabel || request.objectId || 'Smart Object'}</strong> • ${request.noclipAddr || request.key}`;
+        const meta = document.createElement('div');
+        meta.style.fontSize = '11px';
+        meta.style.color = 'var(--muted)';
+        const when = formatDelta(request.receivedAt);
+        const position = request.position && Number.isFinite(request.position.lat) && Number.isFinite(request.position.lon)
+          ? `${request.position.lat.toFixed(4)}, ${request.position.lon.toFixed(4)}`
+          : '';
+        const bits = [];
+        if (position) bits.push(position);
+        if (when) bits.push(when);
+        meta.textContent = bits.join(' • ');
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '6px';
+        actions.style.marginTop = '4px';
+
+        const approveBtn = document.createElement('button');
+        approveBtn.type = 'button';
+        approveBtn.textContent = 'Approve';
+        approveBtn.className = 'btn btn-xs';
+
+        const rejectBtn = document.createElement('button');
+        rejectBtn.type = 'button';
+        rejectBtn.textContent = 'Reject';
+        rejectBtn.className = 'btn btn-xs btn-secondary';
+
+        const setBusy = (busy) => {
+          approveBtn.disabled = busy;
+          rejectBtn.disabled = busy;
+          approveBtn.dataset.busy = busy ? 'true' : 'false';
+          rejectBtn.dataset.busy = busy ? 'true' : 'false';
+        };
+
+        approveBtn.addEventListener('click', async () => {
+          if (!request.key) return;
+          setBusy(true);
+          try {
+            await NoClipBridgeSync?.approveSyncRequest?.(request.key);
+            setBadge('Sync approved');
+          } catch (err) {
+            console.error('[Graph][NoClip] approve failed', err);
+            setBadge(`Approve failed: ${err?.message || err}`, false);
+          } finally {
+            setBusy(false);
+            renderPendingRequests();
+          }
+        });
+
+        rejectBtn.addEventListener('click', async () => {
+          if (!request.key) return;
+          setBusy(true);
+          try {
+            await NoClipBridgeSync?.rejectSyncRequest?.(request.key, 'Rejected via graph');
+            setBadge('Sync rejected');
+          } catch (err) {
+            console.error('[Graph][NoClip] reject failed', err);
+            setBadge(`Reject failed: ${err?.message || err}`, false);
+          } finally {
+            setBusy(false);
+            renderPendingRequests();
+          }
+        });
+
+        actions.appendChild(approveBtn);
+        actions.appendChild(rejectBtn);
+
+        item.appendChild(title);
+        item.appendChild(meta);
+        item.appendChild(actions);
+        syncListEl.appendChild(item);
+      });
+    };
+
+    if (node._noclipSyncUnsub) {
+      try { node._noclipSyncUnsub(); } catch (_) { /* ignore */ }
+      node._noclipSyncUnsub = null;
+    }
+    if (NoClipBridgeSync?.subscribe) {
+      node._noclipSyncUnsub = NoClipBridgeSync.subscribe(() => {
+        renderPendingRequests();
+      });
+    }
+    renderPendingRequests();
+    NoClip?.refreshSessionStatus?.(node.id);
 
     // Wire up peer dropdown
     const selectEl = node.el?.querySelector('[data-noclip-peer-select]');
@@ -7066,6 +7207,10 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       NknDM.dispose(nodeId);
     }
     if (node.type === 'NoClipBridge') {
+      if (typeof node._noclipSyncUnsub === 'function') {
+        try { node._noclipSyncUnsub(); } catch (err) { /* ignore */ }
+        delete node._noclipSyncUnsub;
+      }
       NoClip?.dispose?.(nodeId);
     }
     if (node.type === 'MCP') {
