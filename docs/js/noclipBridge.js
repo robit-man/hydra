@@ -45,13 +45,17 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   let discovery = null;
   let discoveryInit = null;
   let overrideRoom = null;
+  let sharedPeerDiscovery = null;
+  let sharedPeerUnsub = null;
+  let sharedDmRegistered = false;
 
   const nowMs = () => Date.now();
 
   const sanitizePubKey = (value) => {
     if (!value) return '';
     const text = String(value).trim().toLowerCase();
-    return /^[0-9a-f]{64}$/.test(text) ? text : '';
+    const match = text.match(/([0-9a-f]{64})$/);
+    return match ? match[1] : '';
   };
 
   const sanitizeAddr = (value) => {
@@ -70,19 +74,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return cleaned || 'default';
   };
 
-  const deriveAutoRoom = () => {
-    if (typeof window === 'undefined' || !window.location) return 'mesh-default';
-    const host = (window.location.hostname || 'local').toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const pathBits = (window.location.pathname || '')
-      .split('/')
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((seg) => seg.toLowerCase().replace(/[^a-z0-9-]/g, '-'))
-      .filter(Boolean)
-      .join('-');
-    const slug = [host, pathBits].filter(Boolean).join('-').replace(/-+/g, '-') || 'mesh';
-    return sanitizeRoomName(`mesh-${slug}`);
-  };
+  const deriveAutoRoom = () => 'nexus';
 
   const resolveRoomName = (value) => {
     const raw = (value || '').trim();
@@ -174,6 +166,81 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       // Silently fail if badge element doesn't exist
     }
     schedulePeerDropdownRefresh();
+  };
+
+  const syncPeersFromShared = (list = []) => {
+    const staleKeys = new Set(NOCLIP_PEERS.keys());
+    const snapshot = Array.isArray(list) ? list : [];
+    snapshot.forEach((peer) => {
+      const pub = sanitizePubKey(peer?.nknPub || peer?.pub || peer?.addr || '');
+      if (!pub) return;
+      staleKeys.delete(pub);
+      NOCLIP_PEERS.set(pub, {
+        pub,
+        addr: peer.addr || `noclip.${pub}`,
+        meta: peer.meta || {},
+        last: peer.last || nowMs()
+      });
+      const watchers = TARGET_INDEX.get(pub);
+      if (watchers && watchers.size) {
+        const updates = {
+          addr: peer.addr || '',
+          meta: peer.meta || {},
+          lastTs: peer.last || nowMs()
+        };
+        watchers.forEach((nodeId) => {
+          const st = ensureNodeState(nodeId);
+          if (!st) return;
+          upsertRemotePeer(st, pub, updates);
+          Router.sendFrom(nodeId, 'peers', {
+            nodeId,
+            peers: peersForOutput(st)
+          });
+        });
+      }
+    });
+    staleKeys.forEach((key) => {
+      NOCLIP_PEERS.delete(key);
+      const watchers = TARGET_INDEX.get(key);
+      if (watchers && watchers.size) {
+        watchers.forEach((nodeId) => {
+          const st = ensureNodeState(nodeId);
+          if (!st) return;
+          if (st.remotePeers?.has?.(key)) st.remotePeers.delete(key);
+          Router.sendFrom(nodeId, 'peers', {
+            nodeId,
+            peers: peersForOutput(st)
+          });
+        });
+      }
+    });
+    updateNoclipBadge();
+  };
+
+  const bindPeerDiscovery = (api) => {
+    if (sharedPeerDiscovery === api) return;
+    if (sharedPeerUnsub) {
+      try { sharedPeerUnsub(); } catch (_) { /* ignore */ }
+      sharedPeerUnsub = null;
+    }
+    sharedPeerDiscovery = api || null;
+    if (!sharedPeerDiscovery) return;
+    if (!sharedDmRegistered && typeof sharedPeerDiscovery.registerDmHandler === 'function') {
+      sharedPeerDiscovery.registerDmHandler((evt) => handleDiscoveryDm(evt));
+      sharedDmRegistered = true;
+    }
+    if (typeof sharedPeerDiscovery.getNoclipPeers === 'function') {
+      try {
+        syncPeersFromShared(sharedPeerDiscovery.getNoclipPeers());
+      } catch (err) {
+        console.warn('[NoClipBridge] getNoclipPeers failed:', err);
+      }
+    }
+    if (typeof sharedPeerDiscovery.subscribeNoclipPeers === 'function') {
+      sharedPeerUnsub = sharedPeerDiscovery.subscribeNoclipPeers((peers) => {
+        syncPeersFromShared(peers || []);
+      });
+    }
   };
 
   const ensureNodeState = (nodeId) => {
@@ -335,6 +402,11 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     });
 
   async function ensureDiscovery() {
+    if (sharedPeerDiscovery?.sendDm) {
+      return {
+        dm: (pub, payload) => sharedPeerDiscovery.sendDm(pub, payload)
+      };
+    }
     if (discovery) return discovery;
     if (discoveryInit) return discoveryInit;
     discoveryInit = (async () => {
@@ -758,10 +830,13 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     selectEl.innerHTML = '<option value="">-- Select NoClip Peer --</option>';
 
     peers.forEach(peer => {
+      const rawPub = peer?.nknPub || peer?.pub || peer?.addr || '';
+      const cleanPub = sanitizePubKey(rawPub);
+      if (!cleanPub) return;
       const option = document.createElement('option');
-      option.value = peer.nknPub;
-      const alias = peer.meta?.username || peer.meta?.name || peer.meta?.alias || `NoClip ${peer.nknPub.slice(0, 6)}…`;
-      const shortPub = `${peer.nknPub.slice(0, 6)}…${peer.nknPub.slice(-4)}`;
+      option.value = cleanPub;
+      const alias = peer.meta?.username || peer.meta?.name || peer.meta?.alias || `NoClip ${cleanPub.slice(0, 6)}…`;
+      const shortPub = `${cleanPub.slice(0, 6)}…${cleanPub.slice(-4)}`;
       const lastSeen = formatLastSeen(peer.last);
       const parts = [alias, shortPub];
       if (lastSeen) parts.push(lastSeen);
@@ -769,7 +844,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         parts.push(`${Number(peer.geo.lat).toFixed(2)}, ${Number(peer.geo.lon).toFixed(2)}`);
       }
       option.textContent = parts.join(' • ');
-      option.title = `noclip.${peer.nknPub}`;
+      option.title = `noclip.${cleanPub}`;
       selectEl.appendChild(option);
     });
 
@@ -943,8 +1018,11 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       overrideRoom = explicitRoom;
       const resolvedRoom = resolveRoomName(explicitRoom || cfg.room || '');
       st.resolvedRoom = resolvedRoom;
-      const roomEl = node.el?.querySelector('[data-noclip-room]');
-      if (roomEl) roomEl.textContent = resolvedRoom;
+      const rootEl = st.rootEl;
+      if (rootEl) {
+        const roomEl = rootEl.querySelector('[data-noclip-room]');
+        if (roomEl) roomEl.textContent = resolvedRoom;
+      }
 
       // Check for ?peer= URL parameter and use it if no targetPub configured
       let targetPub = sanitizePubKey(cfg.targetPub);
@@ -1109,6 +1187,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const key = String(nodeId || '').trim();
       if (!key) return;
       const st = NODE_STATE.get(key);
+      if (st) st.rootEl = null;
       if (st?.targetPub) unregisterTarget(key, st.targetPub);
       st?.sessions?.clear?.();
       st?.sessionIndex?.clear?.();
@@ -1206,6 +1285,9 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const state = ensureNodeState(nodeId);
       if (!state) return;
       state.rootEl = el || null;
+    },
+    attachPeerDiscovery(api) {
+      bindPeerDiscovery(api);
     },
     logToNode,
     refreshPeerDropdown,

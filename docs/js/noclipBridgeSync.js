@@ -252,6 +252,7 @@ function createNoClipBridgeSync({
     const noclipAddr = msg.noclipAddr || (normalizedPub ? `noclip.${normalizedPub}` : rawSender);
     const objectId = msg.objectId;
     const objectLabel = msg.objectConfig?.label || 'Smart Object';
+    const discoveryRoom = typeof msg.discoveryRoom === 'string' ? msg.discoveryRoom : '';
     const position = msg.objectConfig?.position && typeof msg.objectConfig.position === 'object'
       ? { ...msg.objectConfig.position }
       : null;
@@ -264,6 +265,7 @@ function createNoClipBridgeSync({
       noclipAddr,
       objectId,
       objectLabel,
+      discoveryRoom,
       position,
       objectConfig: msg.objectConfig && typeof msg.objectConfig === 'object' ? { ...msg.objectConfig } : null,
       receivedAt: Date.now()
@@ -412,6 +414,8 @@ function createNoClipBridgeSync({
       const nodeId = `noclip-bridge-${String(displayKey).slice(0, 8)}`;
       const position = { x: Math.random() * 400 - 200, y: Math.random() * 300 - 150 };
 
+      const resolvedRoom = NoClip?.resolveRoomName?.(request.discoveryRoom || request.room || '') || 'auto';
+
       const bridgeNode = await Graph.createNode({
         id: nodeId,
         type: 'NoClipBridge',
@@ -419,6 +423,7 @@ function createNoClipBridgeSync({
         config: {
           targetPub: targetPub,
           targetAddr: request.noclipAddr,
+          room: resolvedRoom,
           autoConnect: 'true'
         }
       });
@@ -456,6 +461,7 @@ function createNoClipBridgeSync({
         hydraPub: hydraIdentity.pub,
         hydraAddr: hydraIdentity.addr,
         bridgeNodeId: nodeId,
+        discoveryRoom: resolvedRoom,
         status: 'pending-handshake',
         position: positionData,
         geo: geoData
@@ -467,6 +473,7 @@ function createNoClipBridgeSync({
           type: 'noclip-bridge-sync-accepted',
           bridgeNodeId: nodeId,
           session,
+          discoveryRoom: resolvedRoom,
           objectId: request.objectId,
           objectLabel: request.objectLabel,
           timestamp: Date.now()

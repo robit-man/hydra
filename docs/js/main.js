@@ -258,6 +258,8 @@ const PeerDiscovery = createPeerDiscovery({
   log
 });
 
+NoClipBridge?.attachPeerDiscovery?.(PeerDiscovery);
+
 // Initialize NoClip Bridge Sync - note: Graph is defined earlier in the file
 const NoClipBridgeSync = createNoClipBridgeSync({
   Graph,

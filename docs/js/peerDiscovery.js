@@ -355,6 +355,18 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log }) {
   // This enables Hydra (hydra.nexus) and NoClip (noclip.nexus) to discover each other
   const derivedRoom = 'nexus';
   const sharedStore = new Store(derivedRoom);
+  const noclipPeerListeners = new Set();
+  const notifyNoclipListeners = () => {
+    const snapshot = Array.from(state.noclip.peers.values());
+    noclipPeerListeners.forEach((fn) => {
+      try {
+        fn(snapshot);
+      } catch (err) {
+        console.warn('[PeerDiscovery] noclip listener error:', err);
+      }
+    });
+  };
+
   const state = {
     discovery: null,
     connecting: null,
@@ -1057,6 +1069,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     els.nameApply = qs('#peerUsernameApply');
     els.nameBadge = qs('#peerSelfName');
     els.badgeCount = qs('#peerOnlineBadge');
+    els.noclipBadge = qs('#noclipPeerBadge');
     els.chatWrap = qs('#chatWrap');
     els.chatName = qs('#chatPeerName');
     els.chatStatus = qs('#chatStatus');
@@ -1141,13 +1154,24 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
   }
 
   function updateBadge() {
-    if (!els.badgeCount) return;
-    const online = Array.from(state.peers.values()).filter((peer) => peer?.online).length;
-    if (online > 0) {
-      els.badgeCount.textContent = String(online);
-      els.badgeCount.classList.remove('hidden');
-    } else {
-      els.badgeCount.classList.add('hidden');
+    if (els.badgeCount) {
+      const hydraOnline = Array.from(state.peers.values()).filter((peer) => peer?.online).length;
+      if (hydraOnline > 0) {
+        els.badgeCount.textContent = String(hydraOnline);
+        els.badgeCount.classList.remove('hidden');
+      } else {
+        els.badgeCount.classList.add('hidden');
+      }
+    }
+
+    if (els.noclipBadge) {
+      const noclipCount = state.noclip.peers.size;
+      if (noclipCount > 0) {
+        els.noclipBadge.textContent = String(noclipCount);
+        els.noclipBadge.classList.remove('hidden');
+      } else {
+        els.noclipBadge.classList.add('hidden');
+      }
     }
   }
 
@@ -2356,6 +2380,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     };
     state.noclip.peers.set(from, merged);
     if (state.layout.activeNetwork === 'noclip') scheduleRender();
+    updateBadge();
+    notifyNoclipListeners();
   }
 
   async function ensureNoclipDiscovery() {
@@ -2369,9 +2395,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       }
       const addr = state.meAddr || Net.nkn?.addr || '';
       const pub = normalizePubKey(state.mePub || addr);
-      const roomName = sanitizeRoomName(
-        `${window.location.host || 'local'}${(window.location.pathname || '').replace(/\//g, '-')}`
-      );
+      const roomName = 'nexus';
       const discovery = await createNoClipDiscovery({
         room: roomName,
         servers: DEFAULT_SERVERS,
@@ -2388,6 +2412,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         if (!key) return;
         state.noclip.peers.set(key, { ...normalized, source: 'noclip' });
         if (state.layout.activeNetwork === 'noclip') scheduleRender();
+        updateBadge();
+        notifyNoclipListeners();
       });
       discovery.on('dm', (evt) => handleNoclipDm(evt));
       discovery.on('status', (ev) => {
@@ -2626,10 +2652,30 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
   }
 
+  function getNoclipPeers() {
+    return Array.from(state.noclip.peers.values());
+  }
+
+  function subscribeNoclipPeers(listener) {
+    if (typeof listener !== 'function') return () => {};
+    noclipPeerListeners.add(listener);
+    try {
+      listener(getNoclipPeers());
+    } catch (err) {
+      console.warn('[PeerDiscovery] initial noclip listener error:', err);
+    }
+    ensureNoclipDiscovery().catch(() => {});
+    return () => {
+      noclipPeerListeners.delete(listener);
+    };
+  }
+
   return {
     init,
     registerDmHandler,
-    sendDm
+    sendDm,
+    getNoclipPeers,
+    subscribeNoclipPeers
   };
 
 }
