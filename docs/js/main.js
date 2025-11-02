@@ -277,19 +277,15 @@ NoClipBridgeSyncImpl = NoClipBridgeSync;
 NoClipBridge?.registerSyncAdapter?.(NoClipBridgeSync);
 NoClipBridgeSync?.registerBridgeAdapter?.(NoClipBridge);
 
-// Register DM handler with PeerDiscovery
+// Register DM handler with PeerDiscovery for NoClip Bridge Sync messages
+// This routes all sync-related DMs to the NoClipBridgeSync module
 PeerDiscovery.registerDmHandler((event) => {
   const { from, msg } = event || {};
   if (!msg || !msg.type) return;
 
-  if (msg.type === 'noclip-bridge-sync-request') {
-    NoClipBridgeSync.handleSyncRequest(from, msg);
-  } else if (msg.type === 'noclip-bridge-sync-accepted') {
-    // NoClip acknowledging our approval (optional)
-    console.log('[NoClipBridgeSync] Sync acknowledged by NoClip:', from);
-  } else if (msg.type === 'noclip-bridge-sync-rejected') {
-    // NoClip rejected our approval (optional)
-    console.log('[NoClipBridgeSync] Sync rejected by NoClip:', from);
+  // Route all noclip-bridge-sync-* messages to NoClipBridgeSync
+  if (msg.type.startsWith('noclip-bridge-sync-')) {
+    NoClipBridgeSync.handleDiscoveryDm(event);
   }
 });
 
@@ -516,6 +512,10 @@ function init() {
   if (CFG.transport === 'nkn') Net.ensureNkn();
   WorkspaceSync.init();
   PeerDiscovery.init();
+
+  // Initialize NoClip Bridge Sync system
+  NoClipBridgeSync.init();
+
   bindGlobalDrop();
 
   // Initialize Smart Object Invite system

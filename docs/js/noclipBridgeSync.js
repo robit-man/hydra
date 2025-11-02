@@ -297,10 +297,20 @@ function createNoClipBridgeSync({
     // Update message
     if (message) {
       message.innerHTML = `
-        <p><strong>NoClip Bridge Sync Request</strong></p>
-        <p>From: <code>${noclipAddr}</code></p>
-        <p>Smart Object: <strong>${objectLabel}</strong></p>
-        <p>Accept this request to create a NoClipBridge node and connect to this NoClip scene?</p>
+        <div class="help" style="margin-bottom:12px;">
+          <strong>NoClip Smart Object Sync Request</strong>
+        </div>
+        <div style="margin-bottom:8px;">
+          <div class="muted" style="font-size:12px;margin-bottom:4px;">From:</div>
+          <code style="font-size:13px;">${noclipAddr}</code>
+        </div>
+        <div style="margin-bottom:12px;">
+          <div class="muted" style="font-size:12px;margin-bottom:4px;">Smart Object:</div>
+          <strong>${objectLabel}</strong>
+        </div>
+        <div class="help" style="margin-top:12px;">
+          Accept this request to create a NoClipBridge node and connect to this NoClip scene?
+        </div>
       `;
     }
 
@@ -352,17 +362,17 @@ function createNoClipBridgeSync({
 
     modal.innerHTML = `
       <div class="modal-backdrop noclip-sync-backdrop"></div>
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2>NoClip Bridge Sync Request</h2>
-          <button class="modal-close noclip-sync-close" aria-label="Close">&times;</button>
+      <div class="modal-panel" style="max-width:480px;">
+        <div class="modal-head">
+          <div class="modal-title">NoClip Bridge Sync Request</div>
+          <button class="ghost noclip-sync-close" aria-label="Close">✕</button>
         </div>
         <div class="modal-body noclip-sync-message">
           <p>Loading...</p>
         </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary noclip-sync-reject">Reject</button>
-          <button class="btn btn-primary noclip-sync-approve">Approve & Create Bridge</button>
+        <div class="row" style="margin-top:16px;gap:8px;">
+          <button class="secondary noclip-sync-approve">Approve & Create Bridge</button>
+          <button class="ghost noclip-sync-reject">Reject</button>
         </div>
       </div>
     `;
@@ -595,6 +605,7 @@ function createNoClipBridgeSync({
   return {
     init,
     attachToDiscovery,
+    handleDiscoveryDm,
     handleSyncRequest,
     approveSyncRequest,
     rejectSyncRequest,
