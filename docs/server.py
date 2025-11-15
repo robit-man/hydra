@@ -459,14 +459,25 @@ def ensure_certificates(cert_mode, cfg, args):
     raise SystemExit(f"Unknown cert mode: {cert_mode}")
 
 # ─── Signals / Cleanup ───────────────────────────────────────────────────────
-def _cleanup():
+def _shutdown_httpd(httpd, *, wait=True, timeout=3.0):
+    # Run shutdown off-thread so signal handlers don't deadlock serve_forever().
+    def _do_shutdown():
+        try: httpd.shutdown()
+        except Exception: pass
+        try: httpd.server_close()
+        except Exception: pass
+
+    t = threading.Thread(target=_do_shutdown, daemon=True)
+    t.start()
+    if wait:
+        t.join(timeout)
+
+def _cleanup(*, wait_httpd=True):
     global _active_httpd, _child_proc
-    if _active_httpd is not None:
-        try: _active_httpd.shutdown()
-        except Exception: pass
-        try: _active_httpd.server_close()
-        except Exception: pass
-        _active_httpd = None
+    httpd = _active_httpd
+    _active_httpd = None
+    if httpd is not None:
+        _shutdown_httpd(httpd, wait=wait_httpd)
     if _child_proc is not None:
         try: _child_proc.terminate()
         except Exception: pass
@@ -477,7 +488,7 @@ def _cleanup():
 atexit.register(_cleanup)
 
 def _signal_handler(signum, frame):
-    _cleanup()
+    _cleanup(wait_httpd=False)
     if signum == getattr(signal, "SIGTSTP", None):
         try:
             signal.signal(signal.SIGTSTP, signal.SIG_DFL)
