@@ -979,7 +979,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     let cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
     const wasmEnabled = isWasmMode(cfg);
     if (!wasmEnabled) {
-      await ensureLocalNetworkAccess({ requireGesture: true });
+      await ensureLocalNetworkAccess({ requireGesture: false });
       cfg = await ensureModelConfigured(nodeId, cfg);
     }
     const endpoint = wasmEnabled ? { base: '', api: '', relay: '', viaNkn: false } : resolveEndpointConfig(cfg);

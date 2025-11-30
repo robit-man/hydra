@@ -1637,7 +1637,7 @@ button.danger {
 
 .node.selected {
   z-index: 4;
-  outline: none!important;
+  outline: none !important;
 }
 
 .node.selected .body::after {
@@ -1874,10 +1874,12 @@ button.danger {
 
 .node .titleRow {
   display: flex;
-  flex-flow: wrap;
+  flex-flow: row;
   align-items: center;
   gap: 8px;
   max-width: 6rem;
+  margin-bottom: auto;
+  padding: 0.25rem;
 }
 
 .node .node-transport {
@@ -2660,8 +2662,8 @@ button.danger {
   gap: 12px;
   min-height: 520px;
   max-height: 72vh;
-    position: relative;
-    display: flex;
+  position: relative;
+  display: flex;
 }
 
 .docs-sidebar {
@@ -2707,7 +2709,7 @@ button.danger {
   padding: 16px;
   overflow: auto;
   flex: 1;
-  max-height:100%;
+  max-height: 100%;
 }
 
 #docsContent h1,
@@ -2750,7 +2752,7 @@ button.danger {
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  padding:6px;
+  padding: 6px;
   justify-content: center;
   line-height: 1;
   transition: opacity 0.15s ease;
@@ -2833,10 +2835,10 @@ audio {
   height: 32px
 }
 
-.peer-network-tabs{
-  display:flex;
-  flex-flow:wrap;
-  gap:8px;
+.peer-network-tabs {
+  display: flex;
+  flex-flow: wrap;
+  gap: 8px;
 }
 
 .peer-modal-body {
@@ -3378,7 +3380,7 @@ audio {
 #settingsForm {
   height: auto;
   overflow: auto;
-  border-radius:0.25rem;
+  border-radius: 0.25rem;
 }
 
 #peerListButton.poke-notice::after {
@@ -3712,10 +3714,13 @@ button.ghost.danger:disabled {
 }
 
 @keyframes audio-pulse {
-  0%, 100% {
+
+  0%,
+  100% {
     opacity: 1;
     transform: scale(1);
   }
+
   50% {
     opacity: 0.7;
     transform: scale(1.1);
