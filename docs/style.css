@@ -2609,7 +2609,7 @@ button.danger {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 1
+  z-index: 2;
 }
 
 .modal-backdrop {
@@ -2779,6 +2779,22 @@ button.danger {
 .wasm-custom-voice input[type="url"],
 .wasm-custom-voice input[type="number"] {
   width: 100%;
+}
+
+.wasm-custom-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wasm-custom-buttons button[data-state="loading"] {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.wasm-custom-buttons button[data-state="done"]::after {
+  content: ' ✓';
+  color: #5ee59f;
 }
 
 .modal-head {

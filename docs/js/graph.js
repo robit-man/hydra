@@ -6241,7 +6241,7 @@ function refreshNodeResolution(force = false) {
             const options = TTS.getWasmVoiceOptions?.(cfg) || [];
             if (!options.length) addOption('', '— no voices —');
             options.forEach((opt) => {
-              addOption(opt.id, opt.source === 'custom' ? `Custom: ${opt.label}` : opt.label);
+              addOption(opt.id, opt.label || opt.id);
             });
             const desired = cfg.wasmVoicePreset || options[0]?.id || '';
             select.value = desired;
@@ -6309,6 +6309,64 @@ function refreshNodeResolution(force = false) {
 
           wrapper.appendChild(select);
           wrapper.appendChild(customWrap);
+          const customButtons = document.createElement('div');
+          customButtons.className = 'wasm-custom-buttons model-picker-buttons';
+          const renderCustomButtons = () => {
+            customButtons.innerHTML = '';
+            const options = TTS.getWasmVoiceOptions?.(cfg) || [];
+            const customs = options.filter((o) => o.source === 'custom');
+            if (!customs.length) return;
+            customs.forEach((voice) => {
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.className = 'model-picker-button';
+              btn.textContent = voice.label;
+              const syncSelected = () => {
+                const isActive = select.value === voice.id;
+                btn.classList.toggle('selected', isActive);
+              };
+              syncSelected();
+              btn.addEventListener('click', async () => {
+                select.value = voice.id;
+                syncSelected();
+                customButtons.querySelectorAll('button').forEach((b) => {
+                  if (b !== btn) b.classList.remove('selected');
+                });
+                const modelInput = fields.querySelector('input[name="wasmPiperModelUrl"]');
+                const configInput = fields.querySelector('input[name="wasmPiperConfigUrl"]');
+                if (modelInput) modelInput.value = voice.modelUrl || '';
+                if (configInput) configInput.value = voice.configUrl || '';
+                const updated = NodeStore.update(node.id, {
+                  type: 'TTS',
+                  wasmVoicePreset: voice.id,
+                  wasmPiperModelUrl: voice.modelUrl,
+                  wasmPiperConfigUrl: voice.configUrl
+                });
+                cfg = updated || cfg;
+                btn.dataset.state = 'loading';
+                btn.disabled = true;
+                btn.textContent = `${voice.label} • pulling…`;
+                try {
+                  await TTS.listWasmVoices(node.id);
+                  btn.dataset.state = 'done';
+                  btn.textContent = `${voice.label} ✓`;
+                } catch (err) {
+                  btn.dataset.state = 'err';
+                  btn.textContent = `${voice.label} (retry)`;
+                  setBadge(err?.message || 'Failed to load voice', false);
+                } finally {
+                  btn.disabled = false;
+                }
+              });
+              customButtons.appendChild(btn);
+            });
+          };
+          renderCustomButtons();
+          const customLabel = document.createElement('label');
+          customLabel.textContent = 'Custom voices';
+          customLabel.classList.add('muted');
+          fields.appendChild(customLabel);
+          fields.appendChild(customButtons);
           fields.appendChild(label);
           fields.appendChild(wrapper);
           convertBooleanSelectsIn(wrapper);

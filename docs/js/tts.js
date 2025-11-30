@@ -13,6 +13,24 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   const lastActiveByNode = new Map();
   const DEFAULT_FILTER_TOKENS = ['#'];
   const DEFAULT_WASM_PRESET = 'piper_en_US_libritts_r_medium';
+  const PRESET_CUSTOM_VOICES = [
+    {
+      id: 'custom_overwatch',
+      label: 'Overwatch',
+      modelUrl: 'https://raw.githubusercontent.com/robit-man/combine_overwatch_onnx/main/overwatch.onnx',
+      configUrl: 'https://raw.githubusercontent.com/robit-man/combine_overwatch_onnx/main/overwatch.onnx.json',
+      sizeMB: 520,
+      source: 'custom'
+    },
+    {
+      id: 'custom_glados',
+      label: 'GLaDOS',
+      modelUrl: 'https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx',
+      configUrl: 'https://raw.githubusercontent.com/robit-man/EGG/main/voice/glados_piper_medium.onnx.json',
+      sizeMB: 480,
+      source: 'custom'
+    }
+  ];
   const DEFAULT_PIPER_MODELS = [
     {
       id: 'piper_en_US_libritts_r_medium',
@@ -59,17 +77,32 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   };
   const wasmVoicesCache = new Map();
   const getCustomVoices = (cfg) => {
-    if (!cfg || !Array.isArray(cfg.wasmCustomVoices)) return [];
-    return cfg.wasmCustomVoices
-      .map((v, idx) => {
-        const id = v.id || v.key || `custom_${idx}`;
-        const label = v.label || v.name || id;
-        const modelUrl = v.modelUrl || v.model || '';
-        const configUrl = v.configUrl || v.config || '';
-        const sizeMB = Number(v.sizeMB);
-        return { id, label, modelUrl, configUrl, sizeMB: Number.isFinite(sizeMB) ? sizeMB : undefined, source: 'custom' };
-      })
-      .filter((v) => v.modelUrl && v.configUrl);
+    const list = [];
+    const push = (v, idx = 0) => {
+      const id = v.id || v.key || `custom_${idx}`;
+      const label = v.label || v.name || id;
+      const modelUrl = v.modelUrl || v.model || '';
+      const configUrl = v.configUrl || v.config || '';
+      const sizeMB = Number(v.sizeMB);
+      if (!modelUrl || !configUrl) return;
+      list.push({
+        id,
+        label,
+        modelUrl,
+        configUrl,
+        sizeMB: Number.isFinite(sizeMB) ? sizeMB : undefined,
+        source: v.source || 'custom'
+      });
+    };
+    PRESET_CUSTOM_VOICES.forEach(push);
+    if (cfg && Array.isArray(cfg.wasmCustomVoices)) {
+      cfg.wasmCustomVoices.forEach((v, idx) => push(v, idx));
+    }
+    const dedup = new Map();
+    list.forEach((v) => {
+      if (!dedup.has(v.id)) dedup.set(v.id, v);
+    });
+    return Array.from(dedup.values());
   };
 
   const getWasmVoiceOptions = (cfg) => {
@@ -1184,8 +1217,14 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const key = `${modelUrl}|${configUrl}|${threads}`;
     if (wasmVoicesCache.has(key)) return wasmVoicesCache.get(key);
     const voices = await wasm.listSpeakers({ modelUrl, configUrl, threads });
-    wasmVoicesCache.set(key, voices);
-    return voices;
+    const normalized = Array.isArray(voices)
+      ? voices.map((v, idx) => {
+          const name = v?.name || (voices.length === 1 ? voice.label || 'Voice 1' : `Voice ${idx + 1}`);
+          return { ...v, name };
+        })
+      : voices;
+    wasmVoicesCache.set(key, normalized);
+    return normalized;
   }
 
   function onMute(nodeId, payload) {
