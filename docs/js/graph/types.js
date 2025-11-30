@@ -71,6 +71,7 @@ const GraphTypes = {
     ],
     schema: [
       { key: 'wasm', label: 'Run In Browser (WASM)', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'wasmVoicePreset', label: 'WASM Voice Model', type: 'select', options: [] },
       { key: 'wasmPiperModelUrl', label: 'WASM Piper Model URL', type: 'text', placeholder: 'https://…/en_US-libritts_r-medium.onnx' },
       { key: 'wasmPiperConfigUrl', label: 'WASM Piper Config URL', type: 'text', placeholder: 'https://…/en_US-libritts_r-medium.onnx.json' },
       { key: 'wasmSpeakerId', label: 'WASM Speaker', type: 'select', options: [] },

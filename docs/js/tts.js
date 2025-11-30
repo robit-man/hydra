@@ -12,6 +12,45 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   const muteRequests = new Map();
   const lastActiveByNode = new Map();
   const DEFAULT_FILTER_TOKENS = ['#'];
+  const DEFAULT_WASM_PRESET = 'piper_en_US_libritts_r_medium';
+  const DEFAULT_PIPER_MODELS = [
+    {
+      id: 'piper_en_US_libritts_r_medium',
+      label: 'English (US) • LibriTTS R Medium',
+      modelUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx',
+      configUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json',
+      sizeMB: 420
+    },
+    {
+      id: 'piper_en_US_ljspeech_medium',
+      label: 'English (US) • LJSpeech Medium',
+      modelUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx',
+      configUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json',
+      sizeMB: 380
+    },
+    {
+      id: 'piper_en_GB_cori_high',
+      label: 'English (UK) • Cori High',
+      modelUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.onnx',
+      configUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.onnx.json',
+      sizeMB: 510
+    },
+    {
+      id: 'piper_es_ES_ana_medium',
+      label: 'Spanish (ES) • Ana Medium',
+      modelUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/ana/medium/es_ES-ana-medium.onnx',
+      configUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/ana/medium/es_ES-ana-medium.onnx.json',
+      sizeMB: 400
+    }
+  ];
   const isWasmMode = (cfg) => cfg && (cfg.wasm === true || String(cfg.wasm).toLowerCase() === 'true');
   let wasmModulePromise = null;
   const loadWasmModule = async () => {
@@ -19,6 +58,53 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     return wasmModulePromise;
   };
   const wasmVoicesCache = new Map();
+  const getCustomVoices = (cfg) => {
+    if (!cfg || !Array.isArray(cfg.wasmCustomVoices)) return [];
+    return cfg.wasmCustomVoices
+      .map((v, idx) => {
+        const id = v.id || v.key || `custom_${idx}`;
+        const label = v.label || v.name || id;
+        const modelUrl = v.modelUrl || v.model || '';
+        const configUrl = v.configUrl || v.config || '';
+        const sizeMB = Number(v.sizeMB);
+        return { id, label, modelUrl, configUrl, sizeMB: Number.isFinite(sizeMB) ? sizeMB : undefined, source: 'custom' };
+      })
+      .filter((v) => v.modelUrl && v.configUrl);
+  };
+
+  const getWasmVoiceOptions = (cfg) => {
+    const custom = getCustomVoices(cfg);
+    const defaults = DEFAULT_PIPER_MODELS.map((v) => ({ ...v, source: 'default' }));
+    return [...custom, ...defaults];
+  };
+
+  const resolveWasmVoice = (cfg) => {
+    const options = getWasmVoiceOptions(cfg);
+    const presetId = cfg?.wasmVoicePreset || DEFAULT_WASM_PRESET;
+    const found = options.find((o) => o.id === presetId);
+    const voice = found || options[0] || {
+      id: DEFAULT_WASM_PRESET,
+      label: 'Default Piper Voice',
+      modelUrl: cfg?.wasmPiperModelUrl,
+      configUrl: cfg?.wasmPiperConfigUrl,
+      sizeMB: 400,
+      source: 'fallback'
+    };
+    const modelUrl = voice.modelUrl || cfg?.wasmPiperModelUrl;
+    const configUrl = voice.configUrl || cfg?.wasmPiperConfigUrl;
+    return { ...voice, modelUrl, configUrl };
+  };
+
+  const checkMemoryForVoice = (voice) => {
+    const devMem = typeof navigator !== 'undefined' ? Number(navigator.deviceMemory || 0) : 0;
+    const estMB = Number(voice?.sizeMB || 0) || 600;
+    if (!devMem) return true;
+    const budget = devMem * 700; // rough usable MB
+    if (estMB > budget) {
+      throw new Error(`Voice model (~${Math.round(estMB)} MB) may exceed device memory (${devMem} GB). Use remote TTS or smaller model.`);
+    }
+    return true;
+  };
   const stripEmoji = (() => {
     try {
       const propertyRegex = new RegExp('[\\p{Extended_Pictographic}\\p{Emoji_Presentation}]', 'gu');
@@ -890,8 +976,10 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
         showStreamUI(st);
         enqueue(st, new Float32Array(Math.round((st.sr || 22050) * 0.04)));
         const wasm = await loadWasmModule();
-        const modelUrl = (cfg.wasmPiperModelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
-        const configUrl = (cfg.wasmPiperConfigUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
+        const voice = resolveWasmVoice(cfg);
+        checkMemoryForVoice(voice);
+        const modelUrl = (voice.modelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
+        const configUrl = (voice.configUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
         const speakerIdRaw = cfg.wasmSpeakerId ?? 0;
         const speakerId = Number.isFinite(Number(speakerIdRaw)) ? Number(speakerIdRaw) : 0;
         const threads = cfg.wasmThreads;
@@ -1076,6 +1164,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     try {
       const rec = NodeStore.ensure(nodeId, 'TTS');
       const cfg = rec?.config || {};
+      if (!cfg.wasmVoicePreset) NodeStore.update(nodeId, { type: 'TTS', wasmVoicePreset: DEFAULT_WASM_PRESET });
       if (isWasmMode(cfg)) return;
       await ensureModels(nodeId);
       await ensureModelConfigured(nodeId, cfg);
@@ -1088,8 +1177,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const rec = NodeStore.ensure(nodeId, 'TTS');
     const cfg = rec?.config || {};
     const wasm = await loadWasmModule();
-    const modelUrl = (cfg.wasmPiperModelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
-    const configUrl = (cfg.wasmPiperConfigUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
+    const voice = resolveWasmVoice(cfg);
+    const modelUrl = (voice.modelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
+    const configUrl = (voice.configUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
     const threads = cfg.wasmThreads;
     const key = `${modelUrl}|${configUrl}|${threads}`;
     if (wasmVoicesCache.has(key)) return wasmVoicesCache.get(key);
@@ -1128,6 +1218,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     refreshUI,
     onText,
     ensureDefaults,
+    getWasmVoiceOptions,
+    resolveWasmVoice,
     ensureModels,
     listWasmVoices,
     listModels,

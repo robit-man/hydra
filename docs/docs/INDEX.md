@@ -19,6 +19,7 @@ Technical overview of how node data flows, payload shapes, and compatibility exp
 ## Compatibility Notes
 - **Wrapped vs raw text**: LLM/ASR/TTS accept both, but prefer `{ text }` objects for clarity. WebScraper actions and selectors should be objects with `text` when emitted from TextInput using action modes.  
 - **Audio**: Only ASR consumes audio input; TTS produces audio output. Do not feed TTS audio into ASR unless it is speech.  
+- **WASM custom voices**: TTS stores custom ONNX model/config URLs in the graph. They appear above default Piper presets and are re-pulled when the graph is shared. Devices with low `navigator.deviceMemory` may block large custom models to avoid crashes.  
 - **Binary/hex**: WebSerial can emit hex/raw; downstream nodes must understand encoding.  
 - **NKN/relay-only nodes**: MediaStream, NknDM, NoClipBridge rely on peer addresses; ensure `relay` set when endpointMode is `auto/remote`.  
 - **WASM modes**: ASR/TTS WASM bypass transport; relay controls are hidden. Models download via CDN and cache in IndexedDB.

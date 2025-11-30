@@ -2514,6 +2514,7 @@ function refreshNodeResolution(force = false) {
         const updated = NodeStore.update(node.id, patch);
         runNodeConfigSideEffects(node, updated, { quiet: false });
         applyWasmUi();
+        saveGraph();
         openSettings(node.id);
       });
     }
@@ -3025,7 +3026,11 @@ function refreshNodeResolution(force = false) {
       }
       if (data.nodeConfigs) {
         for (const [id, obj] of Object.entries(data.nodeConfigs)) {
-          if (obj && obj.type && obj.config) NodeStore.saveObj(id, obj);
+          if (!obj || !obj.type || !obj.config) continue;
+          const defaults = NodeStore?.defaultsByType?.[obj.type] || {};
+          const existing = NodeStore.load(id) || {};
+          const mergedCfg = deepClone({ ...defaults, ...(existing.config || {}), ...obj.config });
+          NodeStore.saveObj(id, { id, type: obj.type, config: mergedCfg });
         }
       }
       if (data.viewport && typeof data.viewport === 'object') {
@@ -6220,6 +6225,95 @@ function refreshNodeResolution(force = false) {
         continue;
       }
       if (field.type === 'select') {
+        if (node.type === 'TTS' && field.key === 'wasmVoicePreset') {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'wasm-voice-wrap';
+          const select = document.createElement('select');
+          select.name = field.key;
+          const addOption = (val, text = val) => {
+            const opt = document.createElement('option');
+            opt.value = String(val);
+            opt.textContent = String(text);
+            select.appendChild(opt);
+          };
+          const applyOptions = () => {
+            select.innerHTML = '';
+            const options = TTS.getWasmVoiceOptions?.(cfg) || [];
+            if (!options.length) addOption('', '— no voices —');
+            options.forEach((opt) => {
+              addOption(opt.id, opt.source === 'custom' ? `Custom: ${opt.label}` : opt.label);
+            });
+            const desired = cfg.wasmVoicePreset || options[0]?.id || '';
+            select.value = desired;
+          };
+          applyOptions();
+          select.addEventListener('change', () => {
+            const options = TTS.getWasmVoiceOptions?.(cfg) || [];
+            const chosen = options.find((o) => o.id === select.value);
+            const modelInput = fields.querySelector('input[name="wasmPiperModelUrl"]');
+            const configInput = fields.querySelector('input[name="wasmPiperConfigUrl"]');
+            if (chosen?.modelUrl && modelInput) modelInput.value = chosen.modelUrl;
+            if (chosen?.configUrl && configInput) configInput.value = chosen.configUrl;
+            cfg.wasmVoicePreset = select.value;
+          });
+
+          const customWrap = document.createElement('div');
+          customWrap.className = 'wasm-custom-voice';
+          customWrap.innerHTML = `
+            <div class="muted" style="font-size:11px;">Add custom ONNX voice (stored in this graph)</div>
+            <input type="text" data-wasm-custom-name placeholder="Voice label (e.g., My Voice)">
+            <input type="url" data-wasm-custom-model placeholder="Model URL (.onnx)">
+            <input type="url" data-wasm-custom-config placeholder="Config URL (.onnx.json)">
+            <input type="number" data-wasm-custom-size placeholder="Size MB (optional)" min="1" step="1">
+            <div class="row" style="gap:8px;flex-wrap:wrap;">
+              <button type="button" class="secondary" data-wasm-custom-add>Add custom voice</button>
+              <span class="muted" style="font-size:11px;">Custom voices are listed first.</span>
+            </div>
+          `;
+          const addBtn = customWrap.querySelector('[data-wasm-custom-add]');
+          addBtn?.addEventListener('click', () => {
+            const name = String(customWrap.querySelector('[data-wasm-custom-name]')?.value || '').trim();
+            const modelUrl = String(customWrap.querySelector('[data-wasm-custom-model]')?.value || '').trim();
+            const configUrl = String(customWrap.querySelector('[data-wasm-custom-config]')?.value || '').trim();
+            const sizeMbRaw = Number(customWrap.querySelector('[data-wasm-custom-size]')?.value || '');
+            if (!name || !modelUrl || !configUrl) {
+              setBadge('Enter name, model URL, and config URL', false);
+              return;
+            }
+            const sizeMB = Number.isFinite(sizeMbRaw) && sizeMbRaw > 0 ? sizeMbRaw : undefined;
+            const rec = NodeStore.ensure(node.id, 'TTS');
+            const current = Array.isArray(rec.config?.wasmCustomVoices) ? rec.config.wasmCustomVoices.slice() : [];
+            const idBase = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'custom_voice';
+            let id = idBase;
+            let suffix = 1;
+            while (current.some((v) => v.id === id)) {
+              id = `${idBase}_${suffix++}`;
+            }
+            current.push({ id, label: name, modelUrl, configUrl, sizeMB });
+            const updated = NodeStore.update(node.id, {
+              type: 'TTS',
+              wasmCustomVoices: current,
+              wasmVoicePreset: id,
+              wasmPiperModelUrl: modelUrl,
+              wasmPiperConfigUrl: configUrl
+            });
+            cfg = updated || cfg;
+            applyOptions();
+            select.value = id;
+            const modelInput = fields.querySelector('input[name="wasmPiperModelUrl"]');
+            const configInput = fields.querySelector('input[name="wasmPiperConfigUrl"]');
+            if (modelInput) modelInput.value = modelUrl;
+            if (configInput) configInput.value = configUrl;
+            setBadge('Custom voice saved');
+          });
+
+          wrapper.appendChild(select);
+          wrapper.appendChild(customWrap);
+          fields.appendChild(label);
+          fields.appendChild(wrapper);
+          convertBooleanSelectsIn(wrapper);
+          continue;
+        }
         if (node.type === 'TTS' && field.key === 'wasmSpeakerId') {
           const select = document.createElement('select');
           select.name = field.key;

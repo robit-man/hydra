@@ -15,7 +15,7 @@ Speech synthesis node that outputs audio streams for playback and routing. Suppo
 - Transport: `base`, `relay`, `api`, `endpointMode`, `model`, `mode` (stream/file).
 - Audio: `volume`, `filterTokens` (strip tokens before synthesis).
 - Signals: `muteSignalMode`, `activeSignalMode`.
-- WASM: `wasm`, `wasmPiperModelUrl`, `wasmPiperConfigUrl`, `wasmSpeakerId`, `wasmThreads`.
+- WASM: `wasm`, `wasmVoicePreset` (defaults + custom), `wasmPiperModelUrl`, `wasmPiperConfigUrl`, `wasmSpeakerId`, `wasmThreads`, `wasmCustomVoices`.
 
 ## Data Contracts
 - Inputs: `text` accepts string or `{ text, eos?, type? }`. `mute` accepts boolean-ish values.  
@@ -38,6 +38,7 @@ Speech synthesis node that outputs audio streams for playback and routing. Suppo
 - WASM speakers are discoverable in settings; set `wasmSpeakerId` per voice.  
 - The oscilloscope reflects actual output; `active` toggles off when the buffer drains.  
 - PCM16 packets include `sequence` and `timestamp` for downstream synchronization.
+- Custom WASM voices: add ONNX/model+config URLs in settings; they are stored with the graph. Custom entries appear above default Piper presets. A device-memory check prevents loading very large models on low-memory devices (e.g., phones); fall back to remote or smaller voices if blocked.
 
 ## Routing & Compatibility
 - Upstream: LLM/TextInput/Template outputs; supply strings or `{ text }`.  

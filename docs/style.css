@@ -2769,6 +2769,18 @@ button.danger {
   height: 100%;
 }
 
+.wasm-custom-voice {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wasm-custom-voice input[type="text"],
+.wasm-custom-voice input[type="url"],
+.wasm-custom-voice input[type="number"] {
+  width: 100%;
+}
+
 .modal-head {
   display: flex;
   align-items: center;
@@ -2790,7 +2802,9 @@ button.danger {
 .form-grid {
   display: grid;
   grid-template-columns: 100px 1fr;
-  gap: 8px
+  gap: 8px;
+  max-height: calc(100vh - 20rem);
+  overflow: auto;
 }
 
 .help {

@@ -83,12 +83,14 @@ const NodeStore = {
       mode: 'stream',
       volume: 1,
       wasm: false,
+      wasmVoicePreset: 'piper_en_US_libritts_r_medium',
       wasmPiperModelUrl:
         'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx',
       wasmPiperConfigUrl:
         'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json',
       wasmSpeakerId: 0,
       wasmThreads: 1,
+      wasmCustomVoices: [],
       filterTokens: ['#'],
       muteSignalMode: 'true/false',
       activeSignalMode: 'true/false'
