@@ -2634,6 +2634,138 @@ button.danger {
   flex-flow: column;
 }
 
+.docs-panel {
+  max-width: 960px;
+  width: 96vw;
+}
+
+.docs-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#docsSearch {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #243557;
+  background: #0f172a;
+  color: #d8e2ff;
+  min-width: 220px;
+}
+
+.docs-body {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 12px;
+  min-height: 520px;
+  max-height: 72vh;
+    position: relative;
+    display: flex;
+}
+
+.docs-sidebar {
+  background: #0f172a;
+  border: 1px solid #18203a;
+  border-radius: 10px;
+  overflow: hidden auto;
+  padding: 8px;
+}
+
+.docs-sidebar button {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #d8e2ff;
+  cursor: pointer;
+}
+
+.docs-sidebar button:hover {
+  background: #111a30;
+  border-color: #1c2a4a;
+}
+
+.docs-sidebar button.active {
+  background: linear-gradient(135deg, #1b2d4c, #223a63);
+  border-color: #2e4c7a;
+  box-shadow: 0 0 0 1px #2e4c7a;
+}
+
+.docs-content {
+  background: #0f172a;
+  border: 1px solid #18203a;
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#docsContent {
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+  max-height:100%;
+}
+
+#docsContent h1,
+#docsContent h2,
+#docsContent h3 {
+  color: #e8eeff;
+}
+
+#docsContent p,
+#docsContent li {
+  color: #cbd5f5;
+  line-height: 1.6;
+}
+
+#docsContent code {
+  background: #131d36;
+  border: 1px solid #1c2a4a;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.docs-actions {
+  padding: 12px 16px;
+  border-top: 1px solid #18203a;
+  background: #0c1325;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.docs-actions button {
+  min-width: 180px;
+}
+
+.info-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid #2e4c7a;
+  background: #0f172a;
+  color: #cbd5f5;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.info-btn:hover {
+  background: #13254a;
+  border-color: #3c5d93;
+}
+
+.info-btn:active {
+  transform: translateY(1px);
+}
+
 .modal-head {
   display: flex;
   align-items: center;

@@ -1727,6 +1727,7 @@ function refreshNodeResolution(force = false) {
         <div class="titleRow"><div class="title">${t.title}</div>${transportMarkup}</div>
         <div class="row" style="gap:6px;">
           <button class="gear" title="Settings">⚙</button>
+          <button class="info-btn docBtn" title="Open documentation" data-tooltip="Open documentation">i</button>
           ${node.type === 'ASR' ? `<button class="gear asrPlay" title="Start/Stop">▶</button>` : ''}
           ${node.type === 'MediaStream' ? `<button class="gear mediaToggle" title="Start/Stop">▶</button>` : ''}
           ${node.type === 'Orientation' ? `<button class="gear orientationToggle" title="Start/Stop">▶</button>` : ''}
@@ -2456,6 +2457,16 @@ function refreshNodeResolution(force = false) {
     const btnGear = gearButtons[0];
     const btnDel = gearButtons[gearButtons.length - 1];
     btnGear.addEventListener('click', () => openSettings(node.id));
+    const btnDoc = el.querySelector('.docBtn');
+    if (btnDoc) {
+      const openDoc = (e) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+        openDocs(node.type);
+      };
+      btnDoc.addEventListener('click', openDoc);
+      btnDoc.addEventListener('pointerdown', (e) => e.stopPropagation());
+    }
     const btnASR = el.querySelector('.asrPlay');
     if (btnASR) {
       const glyph = () => {
@@ -3187,6 +3198,148 @@ function refreshNodeResolution(force = false) {
   }
 
   const GraphTypes = graphTypes;
+  const DOC_ENTRIES = Object.keys(GraphTypes).map((type) => ({
+    type,
+    title: GraphTypes[type]?.title || type,
+    url: `docs/${type}.md`
+  }));
+  const docsCache = new Map();
+  let docsActiveType = DOC_ENTRIES[0]?.type || null;
+  const docEls = {
+    modal: qs('#docsModal'),
+    sidebar: qs('#docsSidebar'),
+    content: qs('#docsContent'),
+    search: qs('#docsSearch'),
+    close: qs('#docsClose'),
+    backdrop: qs('#docsBackdrop'),
+    insert: qs('#docsInsertBtn')
+  };
+
+  const markdownToHtml = (text) => {
+    try {
+      if (window.marked?.parse) return window.marked.parse(text);
+    } catch (err) {
+      // ignore parse issues
+    }
+    const safe = String(text || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return `<pre class="code" style="white-space:pre-wrap;">${safe}</pre>`;
+  };
+
+  async function fetchDocText(type) {
+    if (docsCache.has(type)) return docsCache.get(type);
+    const entry = DOC_ENTRIES.find((d) => d.type === type);
+    if (!entry) throw new Error(`Missing doc for ${type}`);
+    const res = await fetch(entry.url);
+    if (!res.ok) throw new Error(`Doc load failed (${res.status})`);
+    const text = await res.text();
+    docsCache.set(type, text);
+    return text;
+  }
+
+  function renderDocsSidebar(filter = '') {
+    if (!docEls.sidebar) return;
+    const q = filter.trim().toLowerCase();
+    docEls.sidebar.innerHTML = '';
+    const entries = DOC_ENTRIES.filter((e) => {
+      if (!q) return true;
+      return e.title.toLowerCase().includes(q) || e.type.toLowerCase().includes(q);
+    });
+    const fragment = document.createDocumentFragment();
+    entries.forEach((entry) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = `${entry.title} (${entry.type})`;
+      if (entry.type === docsActiveType) btn.classList.add('active');
+      btn.addEventListener('click', () => openDocs(entry.type));
+      fragment.appendChild(btn);
+    });
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.style.padding = '6px 8px';
+      empty.textContent = 'No matches';
+      fragment.appendChild(empty);
+    }
+    docEls.sidebar.appendChild(fragment);
+  }
+
+  async function renderDocContent(type) {
+    if (!docEls.content) return;
+    const entry = DOC_ENTRIES.find((d) => d.type === type);
+    if (!entry) {
+      docEls.content.innerHTML = '<p class="muted">No documentation available.</p>';
+      return;
+    }
+    docsActiveType = entry.type;
+    renderDocsSidebar(docEls.search?.value || '');
+    docEls.content.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      const text = await fetchDocText(type);
+      const html = markdownToHtml(text);
+      docEls.content.innerHTML = html;
+    } catch (err) {
+      docEls.content.innerHTML = `<p class="muted">Failed to load documentation: ${err?.message || err}</p>`;
+    }
+    if (docEls.insert) {
+      docEls.insert.dataset.nodeType = type;
+      docEls.insert.textContent = `Insert ${entry.title} node`;
+    }
+  }
+
+  function closeDocs() {
+    if (!docEls.modal) return;
+    docEls.modal.classList.add('hidden');
+    docEls.modal.setAttribute('aria-hidden', 'true');
+  }
+
+  function bindDocsModal() {
+    if (!docEls.modal || docEls.modal._docsBound) return;
+    docEls.modal._docsBound = true;
+    docEls.close?.addEventListener('click', (e) => {
+      e.preventDefault();
+      closeDocs();
+    });
+    docEls.backdrop?.addEventListener('click', closeDocs);
+    if (docEls.search) {
+      docEls.search.addEventListener('input', () => renderDocsSidebar(docEls.search.value));
+    }
+    if (docEls.insert) {
+      docEls.insert.addEventListener('click', (e) => {
+        e.preventDefault();
+        const type = docEls.insert.dataset.nodeType;
+        if (!type) return;
+        const center = currentViewCenter();
+        const node = addNode(type, Math.round(center.x), Math.round(center.y), { select: true });
+        if (node) {
+          positionNodeCentered(node, center);
+          saveGraph();
+          setBadge(`Inserted ${type}`);
+        }
+      });
+    }
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !docEls.modal.classList.contains('hidden')) {
+        closeDocs();
+      }
+    });
+  }
+
+  function openDocs(type) {
+    bindDocsModal();
+    if (!docEls.modal) return;
+    let chosen = type || docsActiveType || DOC_ENTRIES[0]?.type;
+    if (chosen && !DOC_ENTRIES.some((d) => d.type === chosen) && DOC_ENTRIES.length) {
+      chosen = DOC_ENTRIES[0].type;
+    }
+    if (docEls.search) docEls.search.value = '';
+    renderDocsSidebar('');
+    renderDocContent(chosen);
+    docEls.modal.classList.remove('hidden');
+    docEls.modal.setAttribute('aria-hidden', 'false');
+  }
 
   const TEMPLATE_VAR_RE = /\{([a-zA-Z0-9_]+)\}/g;
 
@@ -7941,7 +8094,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     openImportDialog: () => openGraphImportDialog(),
     saveAs: () => saveWorkspaceAsInteractive(),
     setFlowSaveHandler,
-    refreshMeshtasticPorts
+    refreshMeshtasticPorts,
+    openDocs
   };
 }
 
