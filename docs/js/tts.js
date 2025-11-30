@@ -12,6 +12,13 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   const muteRequests = new Map();
   const lastActiveByNode = new Map();
   const DEFAULT_FILTER_TOKENS = ['#'];
+  const isWasmMode = (cfg) => cfg && (cfg.wasm === true || String(cfg.wasm).toLowerCase() === 'true');
+  let wasmModulePromise = null;
+  const loadWasmModule = async () => {
+    if (!wasmModulePromise) wasmModulePromise = import('./wasm/ttsWasm.js');
+    return wasmModulePromise;
+  };
+  const wasmVoicesCache = new Map();
   const stripEmoji = (() => {
     try {
       const propertyRegex = new RegExp('[\\p{Extended_Pictographic}\\p{Emoji_Presentation}]', 'gu');
@@ -850,10 +857,13 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
   async function onText(nodeId, payload) {
     const node = getNode(nodeId);
     if (!node) return;
-    await ensureLocalNetworkAccess({ requireGesture: true });
     let cfg = NodeStore.ensure(nodeId, 'TTS').config || {};
-    cfg = await ensureModelConfigured(nodeId, cfg);
-    const endpoint = resolveEndpointConfig(cfg);
+    const wasmEnabled = isWasmMode(cfg);
+    if (!wasmEnabled) {
+      await ensureLocalNetworkAccess({ requireGesture: true });
+      cfg = await ensureModelConfigured(nodeId, cfg);
+    }
+    const endpoint = wasmEnabled ? { base: '', api: '', relay: '', viaNkn: false } : resolveEndpointConfig(cfg);
     const { base, api, relay, viaNkn } = endpoint;
     const model = (cfg.model || '').trim();
     const mode = cfg.mode || 'stream';
@@ -873,6 +883,27 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     if (!speakText) return;
 
     const st = ensure(nodeId);
+
+    const speakWasmOnce = async () => {
+      try {
+        await st.ac.resume();
+        showStreamUI(st);
+        enqueue(st, new Float32Array(Math.round((st.sr || 22050) * 0.04)));
+        const wasm = await loadWasmModule();
+        const modelUrl = (cfg.wasmPiperModelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
+        const configUrl = (cfg.wasmPiperConfigUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
+        const speakerIdRaw = cfg.wasmSpeakerId ?? 0;
+        const speakerId = Number.isFinite(Number(speakerIdRaw)) ? Number(speakerIdRaw) : 0;
+        const threads = cfg.wasmThreads;
+        const { audioData, sampleRate } = await wasm.synthesize(speakText, { modelUrl, configUrl, speakerId, threads });
+        let f32 = audioData;
+        if (st.sr !== sampleRate) f32 = resampleLinear(f32, sampleRate, st.sr);
+        enqueue(st, f32);
+        enqueue(st, new Float32Array(Math.round((st.sr || sampleRate) * 0.03)));
+      } catch (err) {
+        log(`[tts ${nodeId}] ${err?.message || err}`);
+      }
+    };
 
     const speakOnce = async () => {
       if (usingNkn) updateRelayState('warn', mode === 'stream' ? 'Awaiting audio stream' : 'Synthesizing audio');
@@ -1036,7 +1067,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       }
     };
 
-    st.chain = st.chain.then(speakOnce).catch((err) => log(`[tts ${nodeId}] ${err?.message || err}`));
+    const task = wasmEnabled ? speakWasmOnce : speakOnce;
+    st.chain = st.chain.then(task).catch((err) => log(`[tts ${nodeId}] ${err?.message || err}`));
     return st.chain;
   }
 
@@ -1044,11 +1076,26 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     try {
       const rec = NodeStore.ensure(nodeId, 'TTS');
       const cfg = rec?.config || {};
+      if (isWasmMode(cfg)) return;
       await ensureModels(nodeId);
       await ensureModelConfigured(nodeId, cfg);
     } catch (err) {
       // ignore background discovery failures
     }
+  }
+
+  async function listWasmVoices(nodeId) {
+    const rec = NodeStore.ensure(nodeId, 'TTS');
+    const cfg = rec?.config || {};
+    const wasm = await loadWasmModule();
+    const modelUrl = (cfg.wasmPiperModelUrl || wasm.DEFAULT_PIPER_MODEL_URL || '').trim() || wasm.DEFAULT_PIPER_MODEL_URL;
+    const configUrl = (cfg.wasmPiperConfigUrl || wasm.DEFAULT_PIPER_CONFIG_URL || '').trim() || wasm.DEFAULT_PIPER_CONFIG_URL;
+    const threads = cfg.wasmThreads;
+    const key = `${modelUrl}|${configUrl}|${threads}`;
+    if (wasmVoicesCache.has(key)) return wasmVoicesCache.get(key);
+    const voices = await wasm.listSpeakers({ modelUrl, configUrl, threads });
+    wasmVoicesCache.set(key, voices);
+    return voices;
   }
 
   function onMute(nodeId, payload) {
@@ -1082,6 +1129,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     onText,
     ensureDefaults,
     ensureModels,
+    listWasmVoices,
     listModels,
     getModelInfo,
     pullModel,

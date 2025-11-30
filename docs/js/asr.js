@@ -278,6 +278,13 @@ function createASR({
     }
   }
 
+  const isWasmMode = (cfg) => cfg && (cfg.wasm === true || String(cfg.wasm).toLowerCase() === 'true');
+  let wasmModulePromise = null;
+  const loadWasmModule = async () => {
+    if (!wasmModulePromise) wasmModulePromise = import('./wasm/asrWasm.js');
+    return wasmModulePromise;
+  };
+
   const ASR = {
     ownerId: null,
     running: false,
@@ -329,6 +336,8 @@ function createASR({
     _rmsTh: 0.2,
     _lastPartialSeq: -1,
     _muted: false,
+    _wasmMode: false,
+    _wasmTask: null,
 
     _nodeEl() {
       return this.ownerId ? getNode(this.ownerId)?.el : null;
@@ -488,6 +497,14 @@ function createASR({
     },
 
     _closeUplinkAndMaybeFinalize() {
+      if (!this._uplinkOn && !this._wasmMode) return;
+      if (this._wasmMode) {
+        if (this._uplinkOn) this._uplinkOn = false;
+        this._ignorePartials = true;
+        const cfg = (this.ownerId && NodeStore.ensure(this.ownerId, 'ASR')?.config) || {};
+        this._finalizeWasmBuffer(this._rate, cfg).catch((err) => log('[asr wasm] finalize ' + (err?.message || err)));
+        return;
+      }
       if (!this._uplinkOn) return;
       this._uplinkOn = false;
       this._ignorePartials = true;
@@ -670,6 +687,53 @@ function createASR({
       return shortGeneric && (sawNoSpeech || inSilence || lowConfidence);
     },
 
+    async _finalizeWasmBuffer(rate, cfg) {
+      if (!this._wasmMode) return;
+      if (this._wasmTask) return this._wasmTask;
+      if (!this.bufF32.length) return;
+      const samples = this.bufF32.slice(0);
+      this.bufF32 = new Float32Array(0);
+      const model = cfg?.wasmWhisperModel || cfg?.model || 'Xenova/whisper-tiny';
+      const threads = cfg?.wasmThreads;
+      const ownerId = this.ownerId;
+      const setStatus = (state, text) => {
+        this._setPartialStatus(state);
+        if (text) this._setPartial(text);
+      };
+      const progressCb = (info) => {
+        if (!info) return;
+        if (typeof info.progress === 'number') {
+          const pct = Math.round(info.progress * 100);
+          setStatus('loading', `Loading ${pct}%`);
+        }
+      };
+      const task = (async () => {
+        try {
+          setStatus('loading', 'Loading model…');
+          const wasm = await loadWasmModule();
+          const res = await wasm.transcribe(samples, rate || 16000, { model, threads, progressCb });
+          if (!this._wasmMode || ownerId !== this.ownerId) return;
+          const text = res?.text || '';
+          if (text) {
+            this._setPartial(text);
+            this._setPartialStatus('final');
+            this.handleFinalFlush(text);
+            this.appendFinal(text);
+          } else {
+            this._setPartialStatus('idle');
+          }
+        } catch (err) {
+          this._setPartialStatus('err');
+          log('[asr wasm] ' + (err?.message || err));
+        } finally {
+          this._wasmTask = null;
+          this._ignorePartials = false;
+        }
+      })();
+      this._wasmTask = task;
+      return task;
+    },
+
     async _ensureLiveSession(cfg) {
       if (!this._live || this.sid || this._startingSid || !this.running) return;
       this._startingSid = true;
@@ -718,6 +782,11 @@ function createASR({
     },
 
     async _drainAndEnd() {
+      if (this._wasmMode) {
+        const cfg = (this.ownerId && NodeStore.ensure(this.ownerId, 'ASR')?.config) || {};
+        await this._finalizeWasmBuffer(this._rate, cfg);
+        return;
+      }
       if (this.finalizing || !this.sid) return;
       this.finalizing = true;
       const oldSid = this.sid;
@@ -759,17 +828,27 @@ function createASR({
 
       const rec = NodeStore.ensure(nodeId, 'ASR');
       let cfg = rec.config || {};
-      cfg = await ensureModelConfigured(nodeId, cfg);
+      const wasmEnabled = isWasmMode(cfg);
+      if (!wasmEnabled) cfg = await ensureModelConfigured(nodeId, cfg);
+      this._wasmMode = wasmEnabled;
       this.ownerId = nodeId;
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
       this._live = !!cfg.live;
-      const endpoint = resolveEndpointConfig(cfg);
-      this._base = endpoint.base;
-      this._relay = endpoint.relay;
-      this._viaNkn = endpoint.viaNkn;
-      this._api = endpoint.api;
+      if (wasmEnabled) {
+        this._base = '';
+        this._relay = '';
+        this._viaNkn = false;
+        this._api = '';
+      } else {
+        const endpoint = resolveEndpointConfig(cfg);
+        this._base = endpoint.base;
+        this._relay = endpoint.relay;
+        this._viaNkn = endpoint.viaNkn;
+        this._api = endpoint.api;
+      }
       this._relayStatus('warn', 'Receiving external audio');
+      this._wasmTask = null;
       this._sawSpeech = false;
       this.finalizing = false;
       this._uplinkOn = false;
@@ -825,7 +904,7 @@ function createASR({
         this._startVis(nodeId);
 
         clearInterval(this._vadWatch);
-        if (this._live) {
+        if (this._live && !this._wasmMode) {
           this._vadWatch = setInterval(() => {
             if (!this.sid || this.finalizing || !this._uplinkOn) return;
             const now = performance.now();
@@ -859,20 +938,30 @@ function createASR({
       if (this.running && this.ownerId && this.ownerId !== nodeId) {
         await this.stop();
       }
-      await ensureLocalNetworkAccess({ requireGesture: true });
       const rec = NodeStore.ensure(nodeId, 'ASR');
       let cfg = rec.config || {};
-      cfg = await ensureModelConfigured(nodeId, cfg);
+      const wasmEnabled = isWasmMode(cfg);
+      if (!wasmEnabled) await ensureLocalNetworkAccess({ requireGesture: true });
+      if (!wasmEnabled) cfg = await ensureModelConfigured(nodeId, cfg);
+      this._wasmMode = wasmEnabled;
       this.ownerId = nodeId;
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
       this._live = !!cfg.live;
-      const endpoint = resolveEndpointConfig(cfg);
-      this._base = endpoint.base;
-      this._relay = endpoint.relay;
-      this._viaNkn = endpoint.viaNkn;
-      this._api = endpoint.api;
-      this._relayStatus('warn', 'Initializing session');
+      if (wasmEnabled) {
+        this._base = '';
+        this._relay = '';
+        this._viaNkn = false;
+        this._api = '';
+      } else {
+        const endpoint = resolveEndpointConfig(cfg);
+        this._base = endpoint.base;
+        this._relay = endpoint.relay;
+        this._viaNkn = endpoint.viaNkn;
+        this._api = endpoint.api;
+      }
+      this._relayStatus('warn', wasmEnabled ? 'WASM ready' : 'Initializing session');
+      this._wasmTask = null;
       this._sawSpeech = false;
       this.finalizing = false;
       this._uplinkOn = false;
@@ -952,9 +1041,13 @@ function createASR({
               this.vad.lastVoice = now;
               this._sawSpeech = true;
               this._ignorePartials = false;
-              this._ensureLiveSession(cfg).then(() => {
-                if (this.sid) this._openUplink(now, tailMs, f32);
-              });
+              if (this._wasmMode) {
+                this._openUplink(now, tailMs, f32);
+              } else {
+                this._ensureLiveSession(cfg).then(() => {
+                  if (this.sid) this._openUplink(now, tailMs, f32);
+                });
+              }
             } else if (this._uplinkOn && now > this._tailDeadline) {
               const postQuiet = (now - this._lastPostAt) >= this._lingerMs;
               const partialQuiet = (!this._sawPartialForUplink) || ((now - this._lastPartialAt) >= this._lingerMs);
@@ -1007,7 +1100,7 @@ function createASR({
         this.node.connect(this.ac.destination);
         this._startVis(nodeId);
         clearInterval(this._vadWatch);
-        if (this._live) {
+        if (this._live && !this._wasmMode) {
           this._vadWatch = setInterval(() => {
             if (!this.sid || this.finalizing || !this._uplinkOn) return;
             const now = performance.now();
@@ -1094,6 +1187,8 @@ function createASR({
       this._relayStatus('warn', 'Idle');
       if (visId) emitActive(visId, false);
       this._muted = false;
+      this._wasmTask = null;
+      this._wasmMode = false;
       this.ownerId = null;
 
       if (!endSid) return;
@@ -1105,6 +1200,11 @@ function createASR({
     },
 
     async finalizeOnce(rate) {
+      if (this._wasmMode) {
+        const cfg = (this.ownerId && NodeStore.ensure(this.ownerId, 'ASR')?.config) || {};
+        await this._finalizeWasmBuffer(rate || this._rate, cfg);
+        return;
+      }
       if (!this.bufF32.length) return;
       const pcm = this.bufF32;
       const buf = new ArrayBuffer(44 + pcm.length * 2);
@@ -1398,9 +1498,36 @@ function createASR({
 
       // Update RMS display
       ASR._setRms(rmsCur, rmsCur, nodeId);
+      const cfg = NodeStore.ensure(nodeId, 'ASR')?.config || {};
+
+      if (ASR._wasmMode) {
+        const onTh = ASR._rmsTh || 0.2;
+        const tailMs = Math.max(ASR._minTailMs, (cfg.silence | 0) || 900);
+        const holdMs = (cfg.hold | 0) || 250;
+        ASR._prePush(f32);
+        if (!ASR._uplinkOn && rmsCur >= onTh) {
+          ASR.vad.state = 'voice';
+          ASR.vad.lastVoice = now;
+          ASR._sawSpeech = true;
+          ASR._ignorePartials = false;
+          ASR._openUplink(now, tailMs, f32);
+        } else if (ASR._uplinkOn) {
+          const sinceVoice = now - (ASR.vad.lastVoice || now);
+          if (rmsCur >= onTh * 0.7) {
+            ASR.vad.lastVoice = now;
+            ASR._extendTail(now, tailMs);
+            ASR.pushF32(f32);
+          } else if (sinceVoice >= holdMs && now > ASR._tailDeadline) {
+            ASR._silenceSince = now;
+            ASR._closeUplinkAndMaybeFinalize();
+          } else {
+            ASR.pushF32(f32);
+          }
+        }
+        return;
+      }
 
       // Trigger session if we have audio activity
-      const cfg = NodeStore.ensure(nodeId, 'ASR')?.config || {};
       if (rmsCur > (ASR._rmsTh || 0.2)) {
         ASR._sawSpeech = true;
         ASR._ensureLiveSession(cfg).then(() => {
@@ -1421,6 +1548,17 @@ function createASR({
     const current = lastActiveByNode.get(nodeId) === true;
     lastActiveByNode.delete(nodeId);
     emitActive(nodeId, current);
+    const cfg = NodeStore.ensure(nodeId, 'ASR')?.config || {};
+    const desiredWasm = isWasmMode(cfg);
+    if (ASR.ownerId === nodeId && ASR._wasmMode !== desiredWasm) {
+      Promise.resolve(ASR.stop())
+        .catch(() => {})
+        .finally(() => {
+          ASR._wasmMode = desiredWasm;
+        });
+    } else {
+      ASR._wasmMode = desiredWasm;
+    }
     if (ASR.ownerId === nodeId) {
       ASR._applyMute(muteRequests.get(nodeId) === true);
     }
@@ -1430,6 +1568,7 @@ function createASR({
     try {
       const rec = NodeStore.ensure(nodeId, 'ASR');
       const cfg = rec?.config || {};
+      if (isWasmMode(cfg)) return;
       await ensureModels(nodeId);
       await ensureModelConfigured(nodeId, cfg);
     } catch (err) {

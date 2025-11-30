@@ -832,7 +832,7 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: center
+  align-items: center;
 }
 
 .node-menu {
@@ -1823,6 +1823,13 @@ button.danger {
 
 .node .head>.row {
   margin-bottom: auto;
+  max-width: 6rem;
+  justify-content: flex-end;
+}
+
+.node .head>.titleRow .title {
+  flex: 1 1 auto;
+  text-align: center;
 }
 
 .node .head>.row::before {

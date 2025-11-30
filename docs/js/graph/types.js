@@ -9,6 +9,15 @@ const GraphTypes = {
     ],
     outputs: [{ name: 'partial' }, { name: 'phrase' }, { name: 'final' }, { name: 'active', label: 'Active' }],
     schema: [
+      { key: 'wasm', label: 'Run In Browser (WASM)', type: 'select', options: ['false', 'true'], def: 'false' },
+      {
+        key: 'wasmWhisperModel',
+        label: 'WASM Whisper Model',
+        type: 'select',
+        options: ['Xenova/whisper-tiny', 'Xenova/whisper-base', 'Xenova/whisper-small', 'distil-whisper/distil-medium.en'],
+        def: 'Xenova/whisper-tiny'
+      },
+      { key: 'wasmThreads', label: 'WASM Threads', type: 'number', def: 1, min: 1, max: 8, step: 1 },
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8126' },
       { key: 'relay', label: 'NKN Relay', type: 'text' },
       { key: 'api', label: 'API Key', type: 'text' },
@@ -61,6 +70,11 @@ const GraphTypes = {
       { name: 'audio', label: 'Audio Stream', type: 'audio' }
     ],
     schema: [
+      { key: 'wasm', label: 'Run In Browser (WASM)', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'wasmPiperModelUrl', label: 'WASM Piper Model URL', type: 'text', placeholder: 'https://…/en_US-libritts_r-medium.onnx' },
+      { key: 'wasmPiperConfigUrl', label: 'WASM Piper Config URL', type: 'text', placeholder: 'https://…/en_US-libritts_r-medium.onnx.json' },
+      { key: 'wasmSpeakerId', label: 'WASM Speaker', type: 'select', options: [] },
+      { key: 'wasmThreads', label: 'WASM Threads', type: 'number', def: 1, min: 1, max: 8, step: 1 },
       { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://localhost:8123' },
       { key: 'relay', label: 'NKN Relay', type: 'text' },
       { key: 'api', label: 'API Key', type: 'text' },

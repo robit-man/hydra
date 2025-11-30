@@ -658,6 +658,16 @@ function refreshNodeResolution(force = false) {
       matches: (cap) => /tool|function/.test(cap)
     }
   ];
+  const WASM_TYPES = new Set(['ASR', 'TTS']);
+  const isTruthy = (value) => {
+    if (value === true || value === false) return value;
+    if (typeof value === 'string') return value.trim().toLowerCase() === 'true';
+    return Boolean(value);
+  };
+  const isWasmNode = (type, cfg) => {
+    if (!WASM_TYPES.has(type)) return false;
+    return isTruthy(cfg?.wasm);
+  };
 
   function initImageInputNode(node) {
     if (!node?.el || node.type !== 'ImageInput') return;
@@ -830,6 +840,7 @@ function refreshNodeResolution(force = false) {
     if (typeof run !== 'function') return;
     const rec = NodeStore.ensure(nodeId, nodeType);
     const cfg = rec?.config || {};
+    if (isWasmNode(nodeType, cfg)) return;
     const baseRaw = cfg.base;
     const base = typeof baseRaw === 'string'
       ? baseRaw.trim()
@@ -1348,6 +1359,8 @@ function refreshNodeResolution(force = false) {
 
   function getRelayValueFromConfig(cfg, info) {
     if (!info || !info.relayKey) return '';
+    if (isWasmNode(info?.title || info?.type || '', cfg) || isWasmNode(info?.nodeType || '', cfg)) return '';
+    if (isWasmNode('ASR', cfg) || isWasmNode('TTS', cfg)) return '';
     const mode = String(cfg?.endpointMode || 'auto').toLowerCase();
     if (mode === 'local') return '';
     const raw = cfg ? cfg[info.relayKey] : '';
@@ -1487,6 +1500,17 @@ function refreshNodeResolution(force = false) {
     if (!info?.supportsNkn) return;
     const btn = node.el?.querySelector('.node-transport');
     if (!btn) return;
+    const cfg = NodeStore.ensure(nodeId, node.type)?.config || {};
+    const wasmMode = isWasmNode(node.type, cfg);
+    btn.classList.toggle('hidden', wasmMode);
+    if (wasmMode) {
+      btn.setAttribute('aria-hidden', 'true');
+      btn.classList.remove('active');
+      btn.removeAttribute('data-relay-state');
+      btn.innerHTML = '';
+      return;
+    }
+    btn.removeAttribute('aria-hidden');
     btn.innerHTML = '';
     btn.classList.remove('active');
     btn.removeAttribute('data-relay-state');
@@ -1530,8 +1554,8 @@ function refreshNodeResolution(force = false) {
       return;
     }
     const rec = NodeStore.ensure(node.id, node.type);
-    const cfg = rec.config || {};
-    const relay = getRelayValueFromConfig(cfg, info);
+    const cfgr = rec.config || {};
+    const relay = getRelayValueFromConfig(cfgr, info);
     if (relay) {
       btn.classList.add('active');
       let entry = relayStates.get(node.id);
@@ -1693,6 +1717,9 @@ function refreshNodeResolution(force = false) {
     const transportMarkup = t.supportsNkn
       ? '<button type="button" class="node-transport" title="Toggle NKN relay">NKN</button>'
       : '';
+    const wasmToggleMarkup = (node.type === 'ASR' || node.type === 'TTS')
+      ? '<button class="gear wasmToggle" title="Toggle WASM / remote">WASM</button>'
+      : '';
 
     el.innerHTML = `
       <div class="node__frame">
@@ -1704,6 +1731,7 @@ function refreshNodeResolution(force = false) {
           ${node.type === 'MediaStream' ? `<button class="gear mediaToggle" title="Start/Stop">▶</button>` : ''}
           ${node.type === 'Orientation' ? `<button class="gear orientationToggle" title="Start/Stop">▶</button>` : ''}
           ${node.type === 'Location' ? `<button class="gear locationToggle" title="Start/Stop">▶</button>` : ''}
+          ${wasmToggleMarkup}
           <button class="gear" title="Remove">🗑</button>
         </div>
       </div>
@@ -2443,6 +2471,35 @@ function refreshNodeResolution(force = false) {
         } finally {
           setTimeout(glyph, 0);
         }
+      });
+    }
+    const btnWasm = el.querySelector('.wasmToggle');
+    if (btnWasm) {
+      const applyWasmUi = () => {
+        const cfg = NodeStore.ensure(node.id, node.type)?.config || {};
+        const enabled = isWasmNode(node.type, cfg);
+        btnWasm.classList.toggle('active', enabled);
+        btnWasm.textContent = enabled ? 'W' : 'N';
+        btnWasm.title = enabled ? 'Browser (WASM) mode' : 'Remote service mode';
+        refreshNodeTransport(node.id);
+      };
+      applyWasmUi();
+      btnWasm.addEventListener('click', (e) => {
+        e.preventDefault();
+        const rec = NodeStore.ensure(node.id, node.type);
+        const cfg = rec?.config || {};
+        const next = !isWasmNode(node.type, cfg);
+        const defaults = NodeStore.defaultsByType?.[node.type] || {};
+        const patch = { type: node.type, wasm: next };
+        if (next) {
+          ['wasmWhisperModel', 'wasmPiperModelUrl', 'wasmPiperConfigUrl', 'wasmSpeakerId', 'wasmThreads'].forEach((key) => {
+            if (cfg[key] === undefined && defaults[key] !== undefined) patch[key] = defaults[key];
+          });
+        }
+        const updated = NodeStore.update(node.id, patch);
+        runNodeConfigSideEffects(node, updated, { quiet: false });
+        applyWasmUi();
+        openSettings(node.id);
       });
     }
     const btnMedia = el.querySelector('.mediaToggle');
@@ -5572,6 +5629,8 @@ function refreshNodeResolution(force = false) {
     const help = qs('#settingsHelp');
     const form = qs('#settingsForm');
     const isLlm = node.type === 'LLM';
+    const isWasmType = WASM_TYPES.has(node.type);
+    const wasmMode = isWasmNode(node.type, cfg);
     let memoryManagerSetup = null;
     fields.innerHTML = '';
     const schema = GraphTypes[node.type].schema || [];
@@ -5917,6 +5976,12 @@ function refreshNodeResolution(force = false) {
       };
     }
     for (const field of schema) {
+      const key = field.key || '';
+      if (isWasmType) {
+        const hideRemoteField = wasmMode && ['base', 'relay', 'api', 'model', 'endpointMode', 'prevModel'].includes(key);
+        const hideWasmField = !wasmMode && key.startsWith('wasm');
+        if (hideRemoteField || hideWasmField) continue;
+      }
       const label = document.createElement('label');
       label.textContent = field.label;
       if (node.type === 'NknDM' && field.key === 'address') {
@@ -5988,6 +6053,46 @@ function refreshNodeResolution(force = false) {
         continue;
       }
       if (field.type === 'select') {
+        if (node.type === 'TTS' && field.key === 'wasmSpeakerId') {
+          const select = document.createElement('select');
+          select.name = field.key;
+          const currentValue = String(cfg[field.key] ?? field.def ?? '');
+          const addOption = (val, text = val) => {
+            const opt = document.createElement('option');
+            opt.value = String(val);
+            opt.textContent = String(text);
+            select.appendChild(opt);
+          };
+          addOption('', '— loading voices —');
+          select.value = currentValue || '';
+          (async () => {
+            try {
+              const speakers = await TTS.listWasmVoices?.(node.id);
+              select.innerHTML = '';
+              if (!speakers || !speakers.length) {
+                addOption('', '— no voices —');
+                select.value = '';
+                return;
+              }
+              speakers.forEach((sp) => {
+                const id = sp?.id ?? sp?.value ?? sp;
+                const labelText = sp?.name || sp?.label || `Voice ${id}`;
+                addOption(id, labelText);
+              });
+              const desired = currentValue || String(speakers[0]?.id ?? '');
+              select.value = desired;
+            } catch (err) {
+              select.innerHTML = '';
+              if (currentValue) addOption(currentValue, `${currentValue} (saved)`);
+              addOption('', '— voices unavailable —');
+              select.value = currentValue || '';
+            }
+          })();
+          fields.appendChild(label);
+          fields.appendChild(select);
+          convertBooleanSelectsIn(select.parentElement || select);
+          continue;
+        }
         const modelProvider = field.key === 'model' ? MODEL_PROVIDERS[node.type] : null;
         if (modelProvider && typeof modelProvider.ensureModels === 'function') {
           const wrapper = document.createElement('div');
@@ -6912,19 +7017,26 @@ function refreshNodeResolution(force = false) {
     const nodeType = node.type;
     const config = cfg && typeof cfg === 'object' ? cfg : {};
     const typeInfo = GraphTypes[nodeType];
+    const wasmMode = isWasmNode(nodeType, config);
     if (typeInfo?.supportsNkn) {
-      const relayValue = getRelayValueFromConfig(config, typeInfo);
-      if (relayValue) ensurePendingRelayState(nodeId, DEFAULT_PENDING_MESSAGE);
-      else clearNodeRelayState(nodeId);
-      if (typeInfo.relayKey === 'relay') updateTransportButton();
-      refreshNodeTransport(nodeId);
+      if (wasmMode) {
+        clearNodeRelayState(nodeId);
+        if (typeInfo.relayKey === 'relay') updateTransportButton();
+        refreshNodeTransport(nodeId);
+      } else {
+        const relayValue = getRelayValueFromConfig(config, typeInfo);
+        if (relayValue) ensurePendingRelayState(nodeId, DEFAULT_PENDING_MESSAGE);
+        else clearNodeRelayState(nodeId);
+        if (typeInfo.relayKey === 'relay') updateTransportButton();
+        refreshNodeTransport(nodeId);
+      }
     }
     if (nodeType === 'ASR') {
-      ASR.refreshConfig?.(nodeId);
+      ASR.refreshConfig?.(nodeId, { wasm: wasmMode });
     }
     if (nodeType === 'TTS') {
       TTS.refreshUI(nodeId);
-      TTS.refreshConfig?.(nodeId);
+      TTS.refreshConfig?.(nodeId, { wasm: wasmMode });
     }
     if (nodeType === 'TextInput') {
       initTextInputNode(node);

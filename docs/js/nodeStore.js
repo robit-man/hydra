@@ -4,6 +4,9 @@ const NodeStore = {
   key: (id) => `graph.node.${id}`,
   defaultsByType: {
     ASR: {
+      wasm: false,
+      wasmWhisperModel: 'Xenova/whisper-tiny',
+      wasmThreads: 1,
       base: 'http://localhost:8126',
       relay: '',
       api: '',
@@ -79,6 +82,13 @@ const NodeStore = {
       endpointMode: 'auto',
       mode: 'stream',
       volume: 1,
+      wasm: false,
+      wasmPiperModelUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx',
+      wasmPiperConfigUrl:
+        'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json',
+      wasmSpeakerId: 0,
+      wasmThreads: 1,
       filterTokens: ['#'],
       muteSignalMode: 'true/false',
       activeSignalMode: 'true/false'
