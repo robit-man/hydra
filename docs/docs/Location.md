@@ -14,6 +14,10 @@ None; uses browser geolocation.
 - `precision` — Decimal places for coordinates.  
 - `running` — Runtime flag (toggled from the card).
 
+## Data Contracts
+- Outputs: `{ coords:{ latitude, longitude, accuracy, altitude?, heading?, speed? }, timestamp }`, rounded to `precision`.  
+- No inputs; router receives JSON objects.
+
 ## How It Works
 - Requests geolocation permission, polls/streams position updates, rounds to `precision`, and emits via the router.
 

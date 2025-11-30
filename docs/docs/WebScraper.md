@@ -24,6 +24,10 @@ Remote-controlled headless browser node for navigation, clicking, typing, scroll
 - Browser: `headless`, `autoScreenshot`, `autoCapture`, `frameRate`, `frameOutputMode`.  
 - Session: `sid` override.
 
+## Data Contracts
+- Actions: `{ action, selector?, text?, url?, amount?, xy? }`. `selector` and `text` can be strings or `{ text }`; `xy` is `{ x, y, viewportW?, viewportH?, naturalW?, naturalH? }`.  
+- Outputs: `status` strings; `frame` `{ blobUrl?, b64?, size?, mode }`; `dom` `{ dom, length, sid }`; `log` text; `rawFrame` base64 string.
+
 ## How It Works
 - Connects to the scraper service (HTTP or NKN) and issues JSON RPC-style actions.  
 - Manages session IDs so multiple actions reuse the same browser.  
@@ -40,6 +44,11 @@ Remote-controlled headless browser node for navigation, clicking, typing, scroll
 - `autoCapture=true` with `frameRate` streams frames continuously; mind bandwidth.  
 - Provide `sid` to attach to an existing remote browser session.  
 - For drags, pass `{ action:'drag', selector, xy:{x,y,viewportW,viewportH} }`.
+
+## Routing & Compatibility
+- Upstream: TextInput configured with action and selector fields; LogicGate for conditional actions.  
+- Downstream: TextDisplay/LLM for status/logs; Image consumers for frames.  
+- Avoid sending large `frame` payloads to text-only nodes; use `status`/`dom` instead.
 
 ## Signals & Router
 - Outputs are JSON payloads; image data is base64 when wrapped.  

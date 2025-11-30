@@ -12,6 +12,10 @@ Runs on-device face landmark detection (MediaPipe Tasks) to emit 3D/2D landmarks
 ## Key Settings
 - `delegate` (GPU/CPU), `numFaces`, `outputBlendshapes`, `outputWorld`, `outputHeadPose`, `runningMode` (VIDEO), `modelAssetPath`, `maxFPS`, `smoothing`, confidence thresholds.
 
+## Data Contracts
+- Outputs: structured landmark arrays, blendshape scores, and head pose metadata (objects/arrays) routed to Vision consumers.  
+- No text/audio outputs; downstream nodes must understand landmark schema.
+
 ## How It Works
 - Loads the configured MediaPipe model, processes frames at `maxFPS`, and streams landmark arrays plus optional blendshapes/world coordinates.
 

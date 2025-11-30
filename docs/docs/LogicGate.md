@@ -12,6 +12,10 @@ Conditional router that evaluates incoming payloads against rule sets and emits 
 ## Key Settings
 - `rules` — Array of rules with: `input`, `path`, `operator`, `compareValue`, `outputTrue`, `outputFalse`, `trueMode/falseMode` (message/boolean), `label`.
 
+## Data Contracts
+- Inputs: any payload; when `path` is set, the gate drills into object paths (dot notation).  
+- Outputs: if `trueMode/falseMode` is `message`, emits strings; if `boolean`, emits `true`/`false`. Ports are named per `outputTrue`/`outputFalse`.
+
 ## How It Works
 - Each rule inspects a selected input, optionally drills into a JSON path, applies the operator (truthy/equals/lt/gt/includes/etc.), and emits on the configured true/false output ports or message bodies.
 

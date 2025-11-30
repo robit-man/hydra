@@ -14,6 +14,11 @@ Composer node for injecting text or structured payloads into the graph. Supports
 - Structuring: `emitActionKey`, `actionValue`, `outputMode`, `includeNodeId`, `nodeIdKey`, `typeKey`, `typeValue`, `typeBackupKey`, `includeText`, `textKey`.  
 - Custom fields: `customFields` map with value modes (literal/text/incoming/raw/action/json/number/boolean/nodeId/timestamp/template).
 
+## Data Contracts
+- Outputs: when `outputMode=object`, emits an object composed from configured keys. Example default: `{ type:'text', text, nodeId }`. When `outputMode=text`, emits raw string.  
+- `incoming` payloads can be strings or objects; `incomingMode` controls merge vs replace.  
+- Action fields: if `emitActionKey=action`, outgoing payload includes `{ action: actionValue }` unless already present.
+
 ## How It Works
 - Maintains a local composer value (and last incoming text).  
 - Shapes outgoing payload according to selected keys and modes, emitting via `Router.sendFrom`.
@@ -27,6 +32,11 @@ Composer node for injecting text or structured payloads into the graph. Supports
 - Custom fields with `template` allow lightweight templating using `{placeholders}`.  
 - `includeNodeId` adds provenance to downstream consumers.  
 - `previewMode=compact` keeps the on-card preview tight for complex payloads.
+
+## Routing & Compatibility
+- Upstream: feed `incoming` from ASR/LLM outputs to prefill before emitting.  
+- Downstream: LLM `prompt`, WebScraper actions, LogicGate, TTS text, or any node expecting `{ text }`.  
+- For WebScraper, set `emitActionKey` and add `selector`/`text` custom fields to match scraper expectations.
 
 ## Troubleshooting
 - Missing text: ensure `includeText=true` and `textKey` set.  

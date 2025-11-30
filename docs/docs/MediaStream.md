@@ -15,6 +15,11 @@ Captures local camera/microphone streams and forwards them to peers over NKN. Pr
 - Session: `running`, `lastFacingMode`, `torchEnabled`.  
 - Transport: `targets`, `pendingAddress`, `relay` (uses node transport button).
 
+## Data Contracts
+- Media is sent over transport to peers; router outputs are limited (status).  
+- On-card preview uses raw MediaStream; no `{ text }` payloads are emitted to Router.  
+- Target list is an array of NKN addresses.
+
 ## How It Works
 - Requests MediaDevices permission, starts capture, displays local preview, and transmits encoded frames/audio to configured NKN targets.  
 - Maintains active target list and per-peer metadata (latency, status).

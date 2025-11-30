@@ -15,6 +15,11 @@ Serial port bridge for communicating with connected hardware directly from the b
 - Encoding: `encoding`, `appendNewline`, `newline`, `writeMode` (text/hex/raw), `readMode` (text/hex/raw), `echoSent`.  
 - Logging: `maxLogLines`.
 
+## Data Contracts
+- Inputs: strings or hex/raw buffers depending on `writeMode`; newline appended when enabled.  
+- Outputs: decoded strings when `readMode=text`; hex strings or raw ArrayBuffers otherwise.  
+- Router emits payloads as text unless `readMode` is raw/hex, in which case downstream nodes must decode accordingly.
+
 ## How It Works
 - Requests a serial port, applies baud/encoding, streams read data to the router, and writes outbound payloads from the `text` input.  
 - Reconnects automatically when enabled and remembers last used devices/ports.

@@ -15,6 +15,10 @@ Chunked file sender/receiver over Hydra transport (typically NKN). Handles chunk
 - `defaultKey` — Optional shared key/token.  
 - `preferRoute` — Preferred route/peer.
 
+## Data Contracts
+- Offers/receipts use file metadata plus chunked binary payloads over transport; router outputs are limited to status text.  
+- No text/audio outputs are emitted; downstream nodes must be transport-aware.
+
 ## How It Works
 - Splits selected files into chunks, sends over the configured transport, and reassembles on the receiver.  
 - Listens for incoming offers; accepts automatically when enabled.

@@ -19,6 +19,11 @@ Text generation and chat node that streams deltas or final completions from a re
 - Memory: `memoryOn`, `persistMemory`, `maxTurns`, `memory` (editable in modal).
 - Extras: `capabilities` (auto-populated per model), `think`, `tools`.
 
+## Data Contracts
+- Inputs: `prompt` accepts string or `{ text, system?, image?, tool_call? }`; non-string inputs are JSON-stringified when needed.  
+- Outputs: `delta`/`final` emit `{ type:'text', text, final?:boolean, meta? }`; memory notifications on `memory` port are `{ type:'updated', size }`.  
+- Endpoint bodies follow chat/completion schemas used by the configured backend; `model` must match discovery listing.
+
 ## How It Works
 - Fetches `/api/tags` and `/v1/models` to list models.  
 - Sends chat/completion requests (stream or one-shot) via HTTP or NKN relay.  
@@ -36,6 +41,12 @@ Text generation and chat node that streams deltas or final completions from a re
 - Memory manager in settings supports reordering, editing, and clearing turns.  
 - `capabilities` determine dynamic ports (e.g., tools/functions).  
 - When relaying, watch the transport badge for NKN health.
+
+## Routing & Compatibility
+- Upstream: ASR `final`, TextInput, Template outputs. Prefer `{ text }` objects for clarity.  
+- Downstream: TTS `text`, TextDisplay, LogicGate.  
+- Images: send `{ image: <b64 or payload>, text }` to multimodal models only.  
+- Avoid feeding binary or audio packets; ensure payloads are text or objects with `text` keys.
 
 ## Signals & Router
 - Emits `{ type: 'text', text, final? }` payloads; includes metadata when available.  

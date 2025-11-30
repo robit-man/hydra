@@ -14,6 +14,10 @@ None (driven from the card controls).
 - `amount`, `asset`, `chainId`, `receiver`, `memo`.  
 - `unlockTTL` — Lock expiry (seconds).
 
+## Data Contracts
+- Inputs: set via UI; no graph payloads required.  
+- Outputs: status strings describing payment state; no numeric/binary router payloads.
+
 ## How It Works
 - Prepares a payment intent with the provided asset and chain, initiates via the Payments helper, and tracks completion/expiry.
 

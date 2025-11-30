@@ -15,6 +15,11 @@ Connects to MCP servers to query resources/tools and stream responses into the g
 - Connection: `autoConnect`, `connectOnQuery`, `protocolVersion`, `clientName`, `clientVersion`, `timeoutMs`.  
 - Filters: `resourceFilters`, `toolFilters`, `emitSystem`, `emitContext`, `augmentSystem`.
 
+## Data Contracts
+- Inputs: `prompt` strings or `{ text }`.  
+- Outputs: streamed responses shaped by the MCP server; typically `{ type:'text', text, final? }` plus status/context updates.  
+- Connection metadata includes resource/tool lists; filter strings accept comma-separated identifiers.
+
 ## How It Works
 - Connects to the MCP server endpoint, lists available resources/tools, and issues queries.  
 - Applies filter strings to narrow the advertised capabilities.  

@@ -16,6 +16,11 @@ Peer-to-peer messaging node over NKN. Establishes handshakes, maintains peer lis
 - `heartbeatInterval` — Keepalive seconds.  
 - `componentId`, `handshake`, `peer`, `allowedPeers`, `autoAccept`, `autoChunk`.
 
+## Data Contracts
+- Inputs: strings or `{ text }`; large payloads are chunked when `autoChunk` is on.  
+- Outputs: messages as `{ text, from, ts, meta? }`; status strings on the card.  
+- Transport-only; router handles JSON payloads, not binary.
+
 ## How It Works
 - Uses the configured `address` or scanned QR to initiate a handshake.  
 - Auto-accept can permit inbound connections without prompts.  

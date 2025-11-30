@@ -13,6 +13,11 @@ String templating node that replaces `{variable}` placeholders with values from 
 - `template` — Base string with `{name}` placeholders.  
 - `variables` — Key/value map used when incoming payload lacks a key.
 
+## Data Contracts
+- Inputs: strings or objects; objects are used for lookup by key.  
+- Outputs: `{ type:'text', text }` with the rendered string.  
+- Missing keys remain unchanged in the output.
+
 ## How It Works
 - Extracts placeholders via a regex, merges incoming payload fields with stored variables, substitutes each occurrence, and emits the final string.
 

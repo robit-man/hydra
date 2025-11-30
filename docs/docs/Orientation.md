@@ -13,6 +13,10 @@ None; listens to device motion/orientation events.
 - `format` — Output style (`raw` currently).  
 - `running` — Runtime flag (toggled from the card).
 
+## Data Contracts
+- Outputs: orientation payloads `{ alpha, beta, gamma, absolute?, ts }` (numbers in degrees).  
+- No inputs; router receives JSON objects only.
+
 ## How It Works
 - Subscribes to browser `deviceorientation` events, normalizes values, and emits them through the router at runtime.
 

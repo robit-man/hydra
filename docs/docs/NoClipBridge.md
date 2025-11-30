@@ -15,6 +15,11 @@ Bridge node for relaying data through the NoClip network. It advertises Hydra id
 - `room` — Room name (`auto` uses discovery).  
 - `autoConnect` — Connect on startup.
 
+## Data Contracts
+- Inputs: strings or `{ text }` payloads.  
+- Outputs: `{ text, from, room, ts, meta? }` plus status updates.  
+- Transport is NKN-based; messages are JSON, not raw binary.
+
 ## How It Works
 - Connects to the NoClip overlay, joins the selected room, and relays payloads with metadata so downstream nodes can route/respond.
 

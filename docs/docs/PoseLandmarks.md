@@ -12,6 +12,10 @@ On-device body pose estimator using MediaPipe. Emits landmark coordinates and op
 ## Key Settings
 - `delegate` (GPU/CPU), `runningMode` (VIDEO), `modelAssetPath`, `minPoseDetectionConfidence`, `minPoseTrackingConfidence`, `segmentation`, `outputWorld`, `maxFPS`, `smoothing`.
 
+## Data Contracts
+- Outputs: landmark arrays/world coordinates; optional segmentation masks.  
+- No text/audio outputs; downstream consumers must handle numeric arrays.
+
 ## How It Works
 - Loads the configured pose model, processes frames up to `maxFPS`, and emits landmark sets; optional segmentation mask when enabled.
 

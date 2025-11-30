@@ -12,6 +12,10 @@ None (user-driven within the card).
 ## Key Settings
 No configurable fields.
 
+## Data Contracts
+- Payload: `{ nodeId, from, kind:'image', mime, dataUrl, b64, width, height, ts }`. All strings except dimensions/timestamp.  
+- Accepts any image MIME type supported by the browser.
+
 ## How It Works
 - Renders a drop/paste zone on the card.  
 - Reads the first image file, stores it in local storage for the node, and emits a structured image payload through the router.
@@ -24,6 +28,10 @@ No configurable fields.
 ## Advanced Tips
 - Paste from clipboard (Ctrl/Cmd+V) to quickly swap images.  
 - The payload includes `nodeId` so downstream logic can trace sources.
+
+## Routing & Compatibility
+- Downstream: LLM vision inputs (`image` port), WebScraper (for uploads), storage/analytics nodes.  
+- Avoid routing to nodes expecting plain text unless wrapped appropriately.
 
 ## Troubleshooting
 - Unsupported file: ensure the file is an image (png/jpg/webp).  

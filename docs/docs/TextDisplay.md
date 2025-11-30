@@ -12,6 +12,10 @@ None.
 ## Key Settings
 No configuration fields.
 
+## Data Contracts
+- Accepts any payload; non-string values are stringified for display.  
+- Does not emit router outputs; display-only.
+
 ## How It Works
 - Receives payloads, renders them in a monospace block on the card, and persists the last text in local storage.
 

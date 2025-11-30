@@ -20,6 +20,11 @@ Speech-to-text node that can stream or batch audio into partial/phrase/final tra
 - Output: `phraseOn`, `phraseMin`, `phraseStable`, `prompt`, `muteSignalMode`, `activeSignalMode`.
 - WASM: `wasm`, `wasmWhisperModel`, `wasmThreads`.
 
+## Data Contracts
+- Inputs: `mute` accepts booleans or strings (`"true"/"false"`). `audio` accepts `{ format:'pcm16'|'float32', sampleRate:number, data:number[] }`.  
+- Outputs: `partial`/`final`/`phrase` emit `{ type:'text', text, final?:boolean, eos?:boolean }`. `active` emits booleans (or empty when `activeSignalMode` is `true/empty`).
+- Endpoint body (stream start): `{ prompt?, mode, preview_model?, preview_window_s?, preview_step_s?, model? }`. Streaming uplink posts raw PCM16 chunk bodies.
+
 ## How It Works
 - Remote: opens `/recognize/stream` session, posts PCM16 chunks, listens for NDJSON events or NKN relay, aggregates partials/phrases, and finalizes `/recognize`.
 - Batch: `finalizeOnce` uploads a WAV when `live` is false or on manual finalize.
@@ -37,6 +42,11 @@ Speech-to-text node that can stream or batch audio into partial/phrase/final tra
 - Phrase mode (`phraseOn`) aggregates rolling text for chat-friendly chunks.  
 - Preview decoding uses `prevModel`/`prevWin`/`prevStep` when supported by the backend.  
 - In WASM mode, model pulls are cached in IndexedDB; `wasmThreads` tunes CPU usage.
+
+## Routing & Compatibility
+- Compatible downstream: LLM `prompt`, TextDisplay, LogicGate.  
+- Accepts upstream: MediaNode/Scripted audio sources emitting PCM16; do not feed binary or JSON blobs without `data/sampleRate`.  
+- Text payloads can be raw strings; they are wrapped into `{ text }` when emitted.
 
 ## Signals & Router
 - `muteSignalMode`/`activeSignalMode` control whether signals send booleans or empties.  

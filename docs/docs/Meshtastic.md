@@ -14,6 +14,11 @@ Interface node for Meshtastic devices, enabling LoRa mesh messaging through Hydr
 - `autoConnect`, `channel`, `publicPortName`, `defaultJson`, `rememberPort`, `rememberDevice`.  
 - `peers` metadata, `lastPortInfo`, `lastDeviceName`.
 
+## Data Contracts
+- Inputs: strings or `{ text }`.  
+- Outputs: `{ text, from, ts, meta? }` when `defaultJson` is true; otherwise plain text.  
+- Status updates shown on card; router receives text payloads only.
+
 ## How It Works
 - Connects to a Meshtastic device over serial/BLE, joins the specified channel, sends/receives messages, and emits router payloads.
 
