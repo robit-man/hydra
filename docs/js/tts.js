@@ -1217,9 +1217,14 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const key = `${modelUrl}|${configUrl}|${threads}`;
     if (wasmVoicesCache.has(key)) return wasmVoicesCache.get(key);
     const voices = await wasm.listSpeakers({ modelUrl, configUrl, threads });
+    const isCustomVoice = voice?.source === 'custom' || String(voice?.id || '').startsWith('custom');
     const normalized = Array.isArray(voices)
       ? voices.map((v, idx) => {
-          const name = v?.name || (voices.length === 1 ? voice.label || 'Voice 1' : `Voice ${idx + 1}`);
+          const base =
+            (isCustomVoice && idx === 0 && (voice.label || voice.id)) ||
+            v?.name ||
+            (voices.length === 1 ? voice.label || voice.id || 'Voice 1' : `Voice ${idx + 1}`);
+          const name = base || `Voice ${idx + 1}`;
           return { ...v, name };
         })
       : voices;
