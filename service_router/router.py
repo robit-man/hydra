@@ -516,15 +516,46 @@ class ServiceWatchdog:
             break
         state.running_since = None
 
+    def _preferred_python(self, state: ServiceState) -> Path:
+        """Choose a Python interpreter for the service.
+
+        For preserve_repo services (e.g., depth_any), prefer a repo-local venv so their
+        bootstrap scripts can install and use their own dependencies. Otherwise, stick to
+        the router venv.
+        """
+        if state.definition.preserve_repo:
+            candidates = []
+            # repo-local venv
+            venv_dir = state.workdir / ".venv"
+            if os.name == "nt":
+                candidates.append(venv_dir / "Scripts" / "python.exe")
+            else:
+                candidates.append(venv_dir / "bin" / "python")
+            # system interpreters
+            for exe in ("python3", "python"):
+                found = shutil.which(exe)
+                if found:
+                    candidates.append(Path(found))
+            # fallback to current
+            candidates.append(Path(sys.executable))
+            for cand in candidates:
+                if cand and Path(cand).exists():
+                    return Path(cand)
+        return Path(sys.executable)
+
     def _start_process(self, state: ServiceState) -> None:
         if state.process and state.process.poll() is None:
             return
-        python = sys.executable
-        if not Path(python).exists():
+        python_path = self._preferred_python(state)
+        if not python_path.exists():
             raise RuntimeError("Python executable not found for watchdog launch")
         log_file = open(state.log_path, "a", buffering=1, encoding="utf-8", errors="replace")
         state.log_handle = log_file
-        cmd = [python, str(state.script_path)]
+        cmd = [str(python_path), str(state.script_path)]
+        env = os.environ.copy()
+        # Ensure service bootstrap is not polluted by the router venv
+        env.pop("VIRTUAL_ENV", None)
+        env.pop("PYTHONHOME", None)
         state.process = subprocess.Popen(
             cmd,
             cwd=state.workdir,
@@ -532,6 +563,7 @@ class ServiceWatchdog:
             stderr=log_file,
             text=True,
             bufsize=1,
+            env=env,
         )
         state.running_since = time.time()
         state.last_error = None
