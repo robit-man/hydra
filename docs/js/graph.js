@@ -29,6 +29,7 @@ function createGraph({
   WebSerial,
   WebScraper,
   Vision,
+  Pointcloud,
   NoClip,
   NoClipBridgeSync,
   Net,
@@ -833,6 +834,115 @@ function refreshNodeResolution(force = false) {
     body.appendChild(panel);
     Payments.mount?.(node.id, panel);
     Payments.init?.(node.id);
+  }
+
+  function initPointcloudNode(node) {
+    if (!node?.el || node.type !== 'Pointcloud') return;
+    const body = node.el.querySelector('.body');
+    if (!body) return;
+    if (body.querySelector('[data-pointcloud-viewer]')) return;
+
+    const cfg = NodeStore.ensure(node.id, 'Pointcloud')?.config || {};
+    const showViewer = cfg.showViewer !== 'false';
+    if (!showViewer) return;
+
+    const viewerWrap = document.createElement('div');
+    viewerWrap.className = 'pointcloud-viewer';
+    viewerWrap.dataset.pointcloudViewer = 'true';
+    viewerWrap.dataset.nodeId = node.id;
+    viewerWrap.style.width = '100%';
+    viewerWrap.style.height = '300px';
+    viewerWrap.style.background = '#000';
+    viewerWrap.style.position = 'relative';
+    viewerWrap.style.marginBottom = '8px';
+
+    const controlsWrap = document.createElement('div');
+    controlsWrap.className = 'pointcloud-controls';
+    controlsWrap.style.display = 'flex';
+    controlsWrap.style.gap = '4px';
+    controlsWrap.style.marginBottom = '8px';
+    controlsWrap.style.flexWrap = 'wrap';
+
+    const cameraModeBtn = document.createElement('button');
+    cameraModeBtn.className = 'secondary camera-mode-btn';
+    cameraModeBtn.innerHTML = '<span class="camera-mode-text">Orbit Mode</span>';
+    cameraModeBtn.onclick = () => {
+      if (Pointcloud && typeof Pointcloud.cycleCameraMode === 'function') {
+        Pointcloud.cycleCameraMode(node.id);
+      }
+    };
+
+    const floorSelectBtn = document.createElement('button');
+    floorSelectBtn.className = 'secondary floor-select-btn';
+    floorSelectBtn.textContent = 'Select Floor';
+    floorSelectBtn.onclick = () => {
+      if (Pointcloud && typeof Pointcloud.toggleFloorSelection === 'function') {
+        Pointcloud.toggleFloorSelection(node.id);
+      }
+    };
+
+    const floorAutoBtn = document.createElement('button');
+    floorAutoBtn.className = 'secondary';
+    floorAutoBtn.textContent = 'Auto Floor';
+    floorAutoBtn.onclick = () => {
+      if (Pointcloud && typeof Pointcloud.alignFloorAuto === 'function') {
+        Pointcloud.alignFloorAuto(node.id);
+      }
+    };
+
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'secondary';
+    resetBtn.textContent = 'Reset View';
+    resetBtn.onclick = () => {
+      if (Pointcloud && typeof Pointcloud.resetCamera === 'function') {
+        Pointcloud.resetCamera(node.id);
+      }
+    };
+
+    const refreshModelsBtn = document.createElement('button');
+    refreshModelsBtn.className = 'secondary';
+    refreshModelsBtn.textContent = 'Refresh Models';
+    refreshModelsBtn.onclick = () => {
+      if (Pointcloud && typeof Pointcloud.refreshModels === 'function') {
+        Pointcloud.refreshModels(node.id);
+      }
+    };
+
+    controlsWrap.appendChild(cameraModeBtn);
+    controlsWrap.appendChild(floorSelectBtn);
+    controlsWrap.appendChild(floorAutoBtn);
+    controlsWrap.appendChild(resetBtn);
+    controlsWrap.appendChild(refreshModelsBtn);
+
+    const ports = body.querySelector('.ports');
+    if (ports && ports.parentElement === body) {
+      body.insertBefore(viewerWrap, ports);
+      body.insertBefore(controlsWrap, viewerWrap.nextSibling);
+    } else {
+      body.insertBefore(viewerWrap, body.firstChild);
+      body.insertBefore(controlsWrap, viewerWrap.nextSibling);
+    }
+
+    if (Pointcloud && typeof Pointcloud.initViewer === 'function') {
+      requestAnimationFrame(() => {
+        Pointcloud.initViewer(node.id, viewerWrap);
+
+        // Setup click handler for floor selection
+        viewerWrap.addEventListener('click', (event) => {
+          if (Pointcloud && typeof Pointcloud.onViewerClick === 'function') {
+            Pointcloud.onViewerClick(node.id, event);
+          }
+        });
+
+        // Setup resize handler
+        const resizeObserver = new ResizeObserver(() => {
+          if (Pointcloud && typeof Pointcloud.handleResize === 'function') {
+            Pointcloud.handleResize(node.id);
+          }
+        });
+        resizeObserver.observe(viewerWrap);
+      });
+    }
   }
 
   function scheduleModelPrefetch(nodeId, nodeType, delay = 200) {
@@ -3085,12 +3195,16 @@ function refreshNodeResolution(force = false) {
         });
         if (node.type === 'PoseLandmarks') requestAnimationFrame(() => Vision?.Pose?.init?.(node.id));
         if (node.type === 'MCP') requestAnimationFrame(() => MCP.init(node.id));
-      if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
-      if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
-      if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
-      if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
-      if (node.type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
-    }
+        if (node.type === 'Pointcloud') {
+          requestAnimationFrame(() => initPointcloudNode(node));
+          requestAnimationFrame(() => Pointcloud?.init?.(node.id));
+        }
+        if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
+        if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
+        if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
+        if (node.type === 'FileTransfer') requestAnimationFrame(() => FileTransfer.init(node.id));
+        if (node.type === 'Payments') requestAnimationFrame(() => initPaymentsNode(node));
+      }
     for (const node of WS.nodes.values()) {
       const rec = NodeStore.ensure(node.id, node.type);
       const cfg = rec?.config || {};
@@ -6438,6 +6552,101 @@ function refreshNodeResolution(force = false) {
           refreshWasmSpeakers().catch(() => {});
           continue;
         }
+        if (node.type === 'Pointcloud' && field.key === 'defaultModel') {
+          const select = document.createElement('select');
+          select.name = field.key;
+          const currentValue = String(cfg[field.key] ?? field.def ?? '');
+          const addOption = (val, text = val) => {
+            const opt = document.createElement('option');
+            opt.value = String(val);
+            opt.textContent = String(text);
+            select.appendChild(opt);
+          };
+          const setStatus = (text) => {
+            select.innerHTML = '';
+            addOption('', text);
+            select.disabled = true;
+          };
+          const applyModels = (models, preferredValue = '') => {
+            select.innerHTML = '';
+            const list = Array.isArray(models) ? models : [];
+            if (!list.length) {
+              const fallback = preferredValue || currentValue;
+              if (fallback) addOption(fallback, `${fallback} (saved)`);
+              addOption('', '— no models found —');
+              select.value = fallback || '';
+              select.disabled = !select.value;
+              return;
+            }
+            list.forEach((m) => {
+              const id = m?.id ?? '';
+              if (!id) return;
+              const name = m?.name || id;
+              const labelText = name && name !== id ? `${name} (${id})` : id;
+              addOption(id, labelText);
+            });
+            if (preferredValue && !list.some((m) => String(m?.id) === String(preferredValue))) {
+              addOption(preferredValue, `${preferredValue} (saved)`);
+            } else if (currentValue && !list.some((m) => String(m?.id) === String(currentValue))) {
+              addOption(currentValue, `${currentValue} (saved)`);
+            }
+            const desired = preferredValue
+              || currentValue
+              || list.find((m) => m?.current)?.id
+              || list[0]?.id
+              || '';
+            select.value = desired ? String(desired) : '';
+            select.disabled = false;
+          };
+          const resolveBase = () => {
+            const baseInput = fields.querySelector('input[name="base"]');
+            const raw = baseInput?.value?.trim?.() || '';
+            return raw || 'http://127.0.0.1:5000';
+          };
+          let modelFetchTimer = null;
+          let modelFetchToken = 0;
+          const fetchModels = async () => {
+            const token = ++modelFetchToken;
+            const preferredValue = select.value || currentValue;
+            const baseRaw = resolveBase();
+            const baseUrl = baseRaw.replace(/\/$/, '');
+            setStatus('— loading models… —');
+            try {
+              const models = Pointcloud?.fetchModels
+                ? await Pointcloud.fetchModels(node.id, { baseOverride: baseRaw })
+                : await (async () => {
+                  const resp = await fetch(`${baseUrl}/api/models/list`);
+                  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                  const data = await resp.json();
+                  return Array.isArray(data?.models) ? data.models : [];
+                })();
+              if (token !== modelFetchToken) return;
+              applyModels(models, preferredValue);
+            } catch (err) {
+              if (token !== modelFetchToken) return;
+              select.innerHTML = '';
+              const fallback = preferredValue || currentValue;
+              if (fallback) addOption(fallback, `${fallback} (saved)`);
+              addOption('', '— load failed —');
+              select.value = fallback || '';
+              select.disabled = false;
+            }
+          };
+          const scheduleFetch = () => {
+            if (modelFetchTimer) clearTimeout(modelFetchTimer);
+            modelFetchTimer = setTimeout(fetchModels, 250);
+          };
+          const baseInput = fields.querySelector('input[name="base"]');
+          if (baseInput) {
+            baseInput.addEventListener('input', scheduleFetch);
+            baseInput.addEventListener('blur', scheduleFetch);
+          }
+          fields.appendChild(label);
+          fields.appendChild(select);
+          convertBooleanSelectsIn(select.parentElement || select);
+          scheduleFetch();
+          continue;
+        }
         const modelProvider = field.key === 'model' ? MODEL_PROVIDERS[node.type] : null;
         if (modelProvider && typeof modelProvider.ensureModels === 'function') {
           const wrapper = document.createElement('div');
@@ -7655,6 +7864,10 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
     if (type === 'NknDM') requestAnimationFrame(() => initNknDmNode(node));
     if (type === 'FaceLandmarks') requestAnimationFrame(() => initFaceLandmarksNode(node));
+    if (type === 'Pointcloud') {
+      requestAnimationFrame(() => initPointcloudNode(node));
+      requestAnimationFrame(() => Pointcloud?.init?.(id));
+    }
     if (type === 'MCP') requestAnimationFrame(() => MCP.init(id));
     if (type === 'MediaStream') {
       requestAnimationFrame(() => Media.init(id));
@@ -7760,6 +7973,9 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     if (node.type === 'PoseLandmarks') {
       Vision?.Pose?.dispose?.(nodeId);
     }
+    if (node.type === 'Pointcloud') {
+      Pointcloud?.destroyViewer?.(nodeId);
+    }
 
     connectedWires.forEach((w) => detachWire(w));
     node.el.remove();
@@ -7796,6 +8012,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
       { type: 'WebScraper', label: 'Web Scraper', x: 380, y: 220 },
       { type: 'FaceLandmarks', label: 'Face Viewer', x: 360, y: 300 },
       { type: 'PoseLandmarks', label: 'Pose Landmarks', x: 360, y: 360 },
+      { type: 'Pointcloud', label: 'Pointcloud', x: 360, y: 420 },
       { type: 'Meshtastic', label: 'Meshtastic', x: 260, y: 120 },
       { type: 'WebSerial', label: 'Web Serial', x: 320, y: 120 },
       { type: 'Orientation', label: 'Orientation', x: 220, y: 260 },

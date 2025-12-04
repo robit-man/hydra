@@ -97,6 +97,7 @@ DEFAULT_TARGETS = {
     "tts": "http://127.0.0.1:8123",
     "mcp": "http://127.0.0.1:9003",
     "web_scrape": "http://127.0.0.1:8130",
+    "depth_any": "http://127.0.0.1:5000",
 }
 
 SERVICE_TARGETS = {
@@ -119,6 +120,10 @@ SERVICE_TARGETS = {
     "web_scrape": {
         "target": "web_scrape",
         "aliases": ["web_scrape", "browser", "chrome", "scrape"],
+    },
+    "depth_any": {
+        "target": "depth_any",
+        "aliases": ["depth_any", "depth", "pointcloud"],
     },
 }
 
@@ -239,6 +244,7 @@ class ServiceDefinition:
     repo_url: str
     script_path: str
     description: str
+    preserve_repo: bool = False  # If True, keep full repo structure instead of extracting only script
 
     @property
     def script_name(self) -> str:
@@ -334,6 +340,13 @@ class ServiceWatchdog:
             script_path="scrape/web_scrape.py",
             description="Headless Chrome scrape/control service",
         ),
+        ServiceDefinition(
+            name="depth_any",
+            repo_url="https://github.com/robit-man/Depth-Anything-3.git",
+            script_path="app.py",
+            description="Depth Anything 3 depth estimation and pointcloud generation",
+            preserve_repo=True,  # Requires full repo structure for dependencies
+        ),
     ]
 
     def __init__(self, base_dir: Optional[Path] = None, enable_logs: bool = True):
@@ -424,6 +437,20 @@ class ServiceWatchdog:
         )
 
     def _fetch_and_extract(self, definition: ServiceDefinition, svc_dir: Path, script_dest: Path, meta_path: Path) -> None:
+        # Check if we should preserve the full repository structure
+        if definition.preserve_repo:
+            # Clone entire repo into service directory
+            if svc_dir.exists():
+                shutil.rmtree(svc_dir, ignore_errors=True)
+            subprocess.check_call(["git", "clone", "--depth", "1", definition.repo_url, str(svc_dir)])
+            source_file = svc_dir / definition.script_path
+            if not source_file.exists():
+                shutil.rmtree(svc_dir, ignore_errors=True)
+                raise FileNotFoundError(f"Service script {definition.script_path} not found in repo {definition.repo_url}")
+            self._write_metadata(meta_path, definition, "fetched")
+            return
+
+        # Standard behavior: extract only the script file
         tmp_dir = SERVICES_ROOT / f"tmp_{definition.name}_{int(time.time())}"
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -442,6 +469,7 @@ class ServiceWatchdog:
             "name": definition.name,
             "repo": definition.repo_url,
             "script": definition.script_path,
+            "preserve_repo": definition.preserve_repo,
             "status": status,
             "ts": int(time.time()),
         }
@@ -579,6 +607,8 @@ class ServiceWatchdog:
             return [9003]
         if service_name == "web_scrape":
             return [8130]
+        if service_name == "depth_any":
+            return [5000]
         return []
 
     def _terminate_process(self, state: ServiceState) -> None:

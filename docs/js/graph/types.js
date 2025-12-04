@@ -462,6 +462,36 @@ const GraphTypes = {
       { key: 'smoothing', label: 'Smoothing', type: 'select', options: ['true', 'false'], def: 'true' }
     ]
   },
+  Pointcloud: {
+    title: 'Pointcloud',
+    supportsNkn: true,
+    relayKey: 'relay',
+    inputs: [
+      { name: 'image', label: 'Image (Base64)', tooltip: 'Base64 encoded image for depth processing' },
+      { name: 'model', label: 'Model ID', tooltip: 'Select model to use for depth estimation' },
+      { name: 'download', label: 'Download GLB', tooltip: 'Trigger GLB download' }
+    ],
+    outputs: [
+      { name: 'pointcloud', label: 'Pointcloud Data', tooltip: 'Chunked pointcloud vertices and colors' },
+      { name: 'models', label: 'Available Models', tooltip: 'List of available Depth Anything models' },
+      { name: 'status', label: 'Status', tooltip: 'Processing status updates' }
+    ],
+    schema: [
+      { key: 'base', label: 'Base URL', type: 'text', placeholder: 'http://127.0.0.1:5000', def: 'http://127.0.0.1:5000' },
+      { key: 'relay', label: 'NKN Relay', type: 'text' },
+      { key: 'endpointMode', label: 'Endpoint Mode', type: 'select', options: ['auto', 'local', 'remote'], def: 'auto' },
+      { key: 'autoLoadModel', label: 'Auto Load Model', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'defaultModel', label: 'Model ID', type: 'select', options: [], def: 'da3nested-giant-large' },
+      { key: 'resolution', label: 'Resolution', type: 'number', def: 504, min: 128, max: 2048, step: 8 },
+      { key: 'maxPoints', label: 'Max Points', type: 'number', def: 1000000, min: 10000, max: 10000000, step: 10000 },
+      { key: 'alignToInputScale', label: 'Align to Input Scale', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'includeConfidence', label: 'Include Confidence', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'applyConfidenceFilter', label: 'Apply Confidence Filter', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'chunkSize', label: 'Chunk Size (KB)', type: 'number', def: 800, min: 100, max: 2000, step: 100 },
+      { key: 'showViewer', label: 'Show 3D Viewer', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'gridDistance', label: 'Grid Distance', type: 'number', def: 10, min: 3, max: 100, step: 1 }
+    ]
+  },
   WebSerial: {
     title: 'WebSerial',
     supportsNkn: false,

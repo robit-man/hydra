@@ -1829,7 +1829,7 @@ button.danger {
 
 .node .head>.titleRow .title {
   flex: 1 1 auto;
-  text-align: center;
+  text-align: left;
 }
 
 .node .head>.row::before {
@@ -1874,7 +1874,7 @@ button.danger {
 
 .node .titleRow {
   display: flex;
-  flex-flow: row;
+  flex-flow: wrap;
   align-items: center;
   gap: 8px;
   max-width: 6rem;

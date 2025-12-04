@@ -21,6 +21,7 @@ import { createFlowsLibrary } from './flows.js';
 import { createMeshtastic } from './meshtastic.js';
 import { createWebSerial } from './webSerial.js';
 import { createVision } from './vision.js';
+import { createPointcloud } from './pointcloud.js';
 import { primeLocalNetworkRequest } from './localNetwork.js';
 import { createPeerDiscovery } from './peerDiscovery.js';
 import { createPayments } from './payments.js';
@@ -174,6 +175,14 @@ const Vision = createVision({
   log
 });
 
+const Pointcloud = createPointcloud({
+  getNode: (id) => graphAccess.getNode(id),
+  Router,
+  NodeStore,
+  setBadge,
+  log
+});
+
 const NoClipBridge = createNoClipBridge({
   NodeStore,
   Router,
@@ -223,6 +232,7 @@ const Graph = createGraph({
   WebSerial,
   WebScraper,
   Vision,
+  Pointcloud,
   NoClip: NoClipBridge,
   NoClipBridgeSync: NoClipBridgeSyncProxy,
   Net,
