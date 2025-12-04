@@ -2660,7 +2660,7 @@ button.danger {
   display: grid;
   grid-template-columns: 160px 1fr;
   gap: 12px;
-  min-height: 520px;
+  min-height: 100%;
   max-height: 72vh;
   position: relative;
   display: flex;
