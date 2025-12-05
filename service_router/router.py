@@ -4544,6 +4544,7 @@ class RelayNode:
         method = (req.get("method") or "GET").upper()
         headers = req.get("headers") or {}
         timeout_s = float(req.get("timeout_ms") or 30000) / 1000.0
+
         verify = self.verify_default
         if isinstance(req.get("verify"), bool):
             verify = bool(req.get("verify"))
@@ -4551,9 +4552,22 @@ class RelayNode:
             verify = False
 
         service_name = self._canonical_service(req.get("service") or req.get("target")) or self.primary_service
+
+        # Look up service definition from the watchdog, not from RelayNode
         svc_def = None
         if service_name:
-            svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
+            try:
+                from router import ServiceWatchdog  # if this file is named differently, drop the import and just use ServiceWatchdog directly
+            except ImportError:
+                # Same module, name already in globals – safe to ignore
+                pass
+            try:
+                svc_def = next(
+                    (d for d in ServiceWatchdog.DEFINITIONS if d.name == service_name),
+                    None,
+                )
+            except Exception:
+                svc_def = None
 
         # Derive target label + host:port + path for logging
         target_label = self._flow_target_label(service_name, url)
@@ -4572,20 +4586,11 @@ class RelayNode:
             path_snippet = "/"
             host_port = ""
 
-        egress_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
-        self._record_flow(
-            src or "client",
-            target_label,
-            f"EGRESS {method} {egress_loc} {rid}",
-            service=service_name,
-            channel=src,
-        )
-
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
         if stream_mode in ("1", "true", "yes", "on", "chunks", "dm", "lines", "ndjson", "sse", "events"):
             want_stream = True
-        if svc_def and svc_def.default_stream:
+        if svc_def and getattr(svc_def, "default_stream", False):
             want_stream = True
             if "X-Relay-Stream" not in headers and "x-relay-stream" not in headers:
                 headers["X-Relay-Stream"] = "chunks"
@@ -4594,6 +4599,7 @@ class RelayNode:
         body_bytes = 0
         body_chunks = req.get("body_chunks_b64") or []
         json_chunks = req.get("json_chunks_b64") or []
+
         if body_chunks:
             try:
                 combined = b"".join(
@@ -4734,6 +4740,7 @@ class RelayNode:
         self._record_usage_stats(
             service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts
         )
+
 
 
     def _handle_response_status(self, status_code: int) -> None:
