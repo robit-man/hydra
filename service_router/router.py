@@ -5042,6 +5042,10 @@ class Router:
             kb = int(http_cfg.get("chunk_upload_b", 600 * 1024) // 1024)
             self.ui.set_chunk_upload_kb(kb)
 
+        # Local copy of target endpoints (defaults merged with config)
+        self.targets: Dict[str, str] = dict(DEFAULT_TARGETS)
+        self.targets.update(self.cfg.get("targets", {}))
+
         self.watchdog = ServiceWatchdog(BASE_DIR)
         self.watchdog.ensure_sources(service_config=self.ui.service_config)
         self.latest_service_status: Dict[str, dict] = {
