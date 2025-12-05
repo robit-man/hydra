@@ -1323,7 +1323,7 @@ class StatsTracker:
 class EnhancedUI:
     """Enhanced nested menu interface with Config, Statistics, Address Book, Ingress, and Egress views."""
 
-    MENU_ITEMS = ["Config", "Statistics", "Address Book", "Ingress", "Egress"]
+    MENU_ITEMS = ["Config", "Statistics", "Address Book", "Ingress", "Egress", "Debug"]
 
     def __init__(self, enabled: bool, config_path: Path):
         self.enabled = enabled and curses is not None and sys.stdout.isatty()
@@ -1432,7 +1432,7 @@ class EnhancedUI:
     def set_daemon_info(self, info: Optional[dict]):
         self.daemon_info = info
 
-    def bump(self, node_id: str, kind: str, msg: str):
+    def bump(self, node_id: str, kind: str, msg: str, nkn_addr: str = "", bytes_sent: int = 0):
         target = self.nodes.get(node_id)
         if target:
             target["last"] = msg
@@ -1447,20 +1447,34 @@ class EnhancedUI:
         source = target.get("name") if target else node_id
         self.activity.append((ts, source or node_id, kind, msg))
 
-        # Track stats
-        if kind == "IN":
-            # Extract service from message if possible
+        # Track stats for requests
+        if kind in ("IN", "OUT"):
+            # Extract service from message
             for svc in self.services.keys():
-                if svc in msg:
-                    # Extract NKN address if present (simplified)
-                    nkn_addr = "—"
-                    self.stats.record_request(svc, nkn_addr)
+                if svc in msg or svc in str(node_id):
+                    # Use provided NKN address or try to extract from message
+                    addr = nkn_addr if nkn_addr else self._extract_nkn_addr(msg)
+                    self.stats.record_request(svc, addr, bytes_sent)
                     break
 
         if self.enabled:
             self.events.put((node_id, kind, msg, ts))
         else:
             print(f"[{ts}] {source:<8} {kind:<3} {msg}")
+
+    def _extract_nkn_addr(self, msg: str) -> str:
+        """Extract NKN address from message string."""
+        # Look for NKN address patterns in the message
+        import re
+        # NKN addresses typically look like: identifier.pubkey_hash
+        match = re.search(r'([a-zA-Z0-9_-]+\.[a-f0-9]{40,})', msg)
+        if match:
+            return match.group(1)
+        # Or just hex patterns
+        match = re.search(r'([a-f0-9]{40,})', msg)
+        if match:
+            return match.group(1)
+        return "unknown"
 
     def run(self):
         if not self.enabled:
@@ -1523,6 +1537,8 @@ class EnhancedUI:
                 self._render_ingress_view(stdscr, h, w)
             elif self.current_view == "egress":
                 self._render_egress_view(stdscr, h, w)
+            elif self.current_view == "debug":
+                self._render_debug_view(stdscr, h, w)
 
             stdscr.refresh()
 
@@ -1767,7 +1783,8 @@ class EnhancedUI:
                 prefix = "  "
 
             svc_display = (svc[:20] + "...") if len(svc) > 23 else svc
-            addr_display = (addr[:40] + "...") if len(addr) > 43 else addr
+            # Don't truncate address - show full string
+            addr_display = addr
 
             line = f"{prefix}{svc_display:<23} [{state:<8}] {addr_display}"
             self._safe_addstr(stdscr, row, 2, line, attr)
@@ -1846,6 +1863,54 @@ class EnhancedUI:
                 self._safe_addstr(stdscr, start_row, 2, line, curses.A_NORMAL)
                 start_row += 1
 
+    def _render_debug_view(self, stdscr, h, w):
+        """Render Debug/Activity Log view - full screen log of all input/output."""
+        self._draw_box(stdscr, 0, 0, h, w)
+        title = "═══ Debug / Activity Log ═══"
+        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
+
+        help_text = "↑/↓: Scroll | ESC: Back"
+        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
+
+        if not self.activity:
+            self._safe_addstr(stdscr, 3, 2, "(No recent activity)", curses.A_DIM)
+            return
+
+        start_row = 3
+        visible_rows = h - start_row - 1
+
+        # Show most recent entries first (reversed)
+        activity_list = list(reversed(self.activity))
+        total_entries = len(activity_list)
+
+        # Calculate scroll bounds
+        max_scroll = max(0, total_entries - visible_rows)
+        self.scroll_offset = min(self.scroll_offset, max_scroll)
+
+        # Display activity entries
+        end_idx = min(total_entries, self.scroll_offset + visible_rows)
+        for i in range(self.scroll_offset, end_idx):
+            ts, source, kind, message = activity_list[i]
+            row = start_row + (i - self.scroll_offset)
+
+            # Color code by kind
+            if kind == "IN":
+                attr = curses.color_pair(2)  # Green
+            elif kind == "OUT":
+                attr = curses.color_pair(2)  # Green
+            elif kind == "ERR":
+                attr = curses.color_pair(4)  # Red
+            else:
+                attr = curses.A_NORMAL
+
+            line = f"[{ts}] {source:<12} {kind:<3} {message}"
+            self._safe_addstr(stdscr, row, 2, line, attr)
+
+        # Show scroll indicator
+        if total_entries > visible_rows:
+            scroll_info = f"Showing {self.scroll_offset + 1}-{end_idx} of {total_entries}"
+            self._safe_addstr(stdscr, h - 1, w - len(scroll_info) - 2, scroll_info, curses.A_DIM)
+
     def _render_qr_code(self, stdscr, y, x, max_h, max_w):
         """Render QR code for selected service."""
         if not self.qr_data:
@@ -1898,6 +1963,9 @@ class EnhancedUI:
         elif ch in (curses.KEY_UP, ord('k')):
             if self.current_view == "main":
                 self.main_menu_index = (self.main_menu_index - 1) % len(self.MENU_ITEMS)
+            elif self.current_view == "debug":
+                # Scroll debug view
+                self.scroll_offset = max(0, self.scroll_offset - 1)
             else:
                 self.main_menu_index = max(0, self.main_menu_index - 1)
                 if self.main_menu_index < self.scroll_offset:
@@ -1906,6 +1974,11 @@ class EnhancedUI:
         elif ch in (curses.KEY_DOWN, ord('j')):
             if self.current_view == "main":
                 self.main_menu_index = (self.main_menu_index + 1) % len(self.MENU_ITEMS)
+            elif self.current_view == "debug":
+                # Scroll debug view
+                total_entries = len(self.activity)
+                # Will be limited in render method
+                self.scroll_offset += 1
             else:
                 max_idx = 0
                 if self.current_view == "config":
@@ -1945,6 +2018,8 @@ class EnhancedUI:
                 self.current_view = "ingress"
             elif selected == "Egress":
                 self.current_view = "egress"
+            elif selected == "Debug":
+                self.current_view = "debug"
 
             self.main_menu_index = 0
             self.scroll_offset = 0
@@ -3691,7 +3766,9 @@ class RelayNode:
         else:
             payload["body_b64"] = base64.b64encode(raw).decode("ascii")
         self.bridge.dm(src, payload, DM_OPTS_SINGLE)
-        self.ui.bump(self.node_id, "OUT", f"{payload['status']} {rid}")
+        # Track stats with bytes sent and NKN address
+        bytes_sent = len(raw)
+        self.ui.bump(self.node_id, "OUT", f"{payload['status']} {rid}", nkn_addr=src, bytes_sent=bytes_sent)
 
     def _sanitize_response_json(self, req: Optional[dict], data: Any) -> Any:
         try:
