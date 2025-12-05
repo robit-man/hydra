@@ -1196,7 +1196,7 @@ class UnifiedUI:
         self.qr_locked: bool = False
         self.qr_row_ref: Optional[dict] = None
         self._last_dims: Tuple[int, int] = (0, 0)
-        self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=5)
+        self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=500)
         self.chunk_upload_kb: int = 600
 
     def add_node(self, node_id: str, name: str):
