@@ -109,7 +109,8 @@ function createASR({
       relay: useRelay ? relayRaw : '',
       rawRelay: relayRaw,
       viaNkn: useRelay && hasRelay,
-      mode
+      mode,
+      relayOnly: mode === 'remote'
     };
   }
 
@@ -179,11 +180,12 @@ function createASR({
     };
   };
 
-  async function fetchModelMetadata(base, api, viaNkn, relay) {
+  async function fetchModelMetadata(base, api, viaNkn, relay, options = {}) {
+    const { forceRelay = false } = options || {};
     const cleaned = (base || '').replace(/\/+$/, '');
     if (!cleaned) return [];
     try {
-      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay);
+      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay, { forceRelay });
       const list = [];
       const push = (entry) => {
         const normalized = normalizeModelEntry(entry);
@@ -204,7 +206,7 @@ function createASR({
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
     const endpoint = resolveEndpointConfig(cfg, override);
-    const { base, relay, api, viaNkn, mode } = endpoint;
+    const { base, relay, api, viaNkn, mode, relayOnly } = endpoint;
     if (!base) {
       setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode });
       clearModelRefresh(nodeId);
@@ -218,7 +220,7 @@ function createASR({
     const key = makeCacheKey(nodeId, base, relay, api);
     if (MODEL_PROMISE.has(key)) return MODEL_PROMISE.get(key);
     const task = (async () => {
-      const list = await fetchModelMetadata(base, api, viaNkn, relay);
+      const list = await fetchModelMetadata(base, api, viaNkn, relay, { forceRelay: relayOnly });
       setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now(), mode });
       return list.slice();
     })();
@@ -757,7 +759,16 @@ function createASR({
           logprob_threshold: -1.0,
           ...(model ? { model } : {})
         };
-        const data = await Net.postJSON(this._base, '/recognize/stream/start', body, this._api, this._viaNkn, this._relay, 45000);
+        const data = await Net.postJSON(
+          this._base,
+          '/recognize/stream/start',
+          body,
+          this._api,
+          this._viaNkn,
+          this._relay,
+          45000,
+          { forceRelay: this._forceRelay }
+        );
         if (!this.running || this.ownerId !== activeId) {
           this.sid = null;
           this._startingSid = false;
@@ -769,7 +780,7 @@ function createASR({
         const sid = this.sid;
         this._relayStatus('ok', 'Session ready');
         this.openEvents(sid, this._viaNkn, this._base, this._relay, this._api, cfg).catch(() => {});
-        this.flushLoop(this._rate, this._chunk, this._viaNkn, this._base, this._relay, this._api).catch(() => {});
+        this.flushLoop(this._rate, this._chunk, this._viaNkn, this._base, this._relay, this._api, this._forceRelay).catch(() => {});
       } catch (err) {
         log('[asr] start(lazy) ' + (err?.message || err));
         this._relayStatus('err', err?.message || 'Session start failed');
@@ -804,7 +815,16 @@ function createASR({
       }
       try {
         if (oldSid) {
-          const resp = await Net.postJSON(this._base, `/recognize/stream/${encodeURIComponent(oldSid)}/end`, {}, this._api, this._viaNkn, this._relay, 20000);
+        const resp = await Net.postJSON(
+          this._base,
+          `/recognize/stream/${encodeURIComponent(oldSid)}/end`,
+          {},
+          this._api,
+          this._viaNkn,
+          this._relay,
+          20000,
+          { forceRelay: this._forceRelay }
+        );
           const finalText = resp?.final?.text || resp?.final?.result?.text || resp?.text || resp?.result?.text || '';
           if (finalText) {
             this.handleFinalFlush(finalText);
@@ -831,6 +851,7 @@ function createASR({
       const wasmEnabled = isWasmMode(cfg);
       if (!wasmEnabled) cfg = await ensureModelConfigured(nodeId, cfg);
       this._wasmMode = wasmEnabled;
+      this._forceRelay = false;
       this.ownerId = nodeId;
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
@@ -842,6 +863,8 @@ function createASR({
         this._api = '';
       } else {
         const endpoint = resolveEndpointConfig(cfg);
+        this._forceRelay = endpoint.relayOnly;
+        if (this._forceRelay && !endpoint.viaNkn) throw new Error('Relay address required for remote mode');
         this._base = endpoint.base;
         this._relay = endpoint.relay;
         this._viaNkn = endpoint.viaNkn;
@@ -944,6 +967,7 @@ function createASR({
       if (!wasmEnabled) await ensureLocalNetworkAccess({ requireGesture: true });
       if (!wasmEnabled) cfg = await ensureModelConfigured(nodeId, cfg);
       this._wasmMode = wasmEnabled;
+      this._forceRelay = false;
       this.ownerId = nodeId;
       this._rate = cfg.rate | 0 || 16000;
       this._chunk = cfg.chunk | 0 || 120;
@@ -955,6 +979,8 @@ function createASR({
         this._api = '';
       } else {
         const endpoint = resolveEndpointConfig(cfg);
+        this._forceRelay = endpoint.relayOnly;
+        if (this._forceRelay && !endpoint.viaNkn) throw new Error('Relay address required for remote mode');
         this._base = endpoint.base;
         this._relay = endpoint.relay;
         this._viaNkn = endpoint.viaNkn;
@@ -1132,6 +1158,7 @@ function createASR({
       const api = this._api;
       const relay = this._relay;
       const viaNkn = this._viaNkn;
+      const forceRelay = this._forceRelay;
 
       this.running = false;
       this._startingSid = false;
@@ -1189,11 +1216,21 @@ function createASR({
       this._muted = false;
       this._wasmTask = null;
       this._wasmMode = false;
+      this._forceRelay = false;
       this.ownerId = null;
 
       if (!endSid) return;
       try {
-        await Net.postJSON(base, `/recognize/stream/${encodeURIComponent(endSid)}/end`, {}, api, viaNkn, relay, 20000);
+        await Net.postJSON(
+          base,
+          `/recognize/stream/${encodeURIComponent(endSid)}/end`,
+          {},
+          api,
+          viaNkn,
+          relay,
+          20000,
+          { forceRelay }
+        );
       } catch (err) {
         // ignore
       }
@@ -1240,7 +1277,16 @@ function createASR({
         const cfg = NodeStore.ensure(this.ownerId, 'ASR').config || {};
         const prompt = (cfg.prompt || '').trim();
         const body = Object.assign({ body_b64: b64, format: 'wav', sample_rate: rate }, prompt ? { prompt } : {});
-        const data = await Net.postJSON(this._base, '/recognize', body, this._api, this._viaNkn, this._relay, 120000);
+        const data = await Net.postJSON(
+          this._base,
+          '/recognize',
+          body,
+          this._api,
+          this._viaNkn,
+          this._relay,
+          120000,
+          { forceRelay: this._forceRelay }
+        );
         const txt = (data && (data.text || data.transcript)) || '';
         if (txt) this.appendFinal(txt);
       } catch (err) {
@@ -1367,7 +1413,7 @@ function createASR({
       }
     },
 
-    async flushLoop(rate, chunk, viaNkn, base, relay, api) {
+    async flushLoop(rate, chunk, viaNkn, base, relay, api, forceRelay = false) {
       const need = () => Math.round(rate * (chunk / 1000));
       while (this.running && this.sid) {
         if (!this._uplinkOn) {
@@ -1399,7 +1445,16 @@ function createASR({
             this._relayStatus('warn', 'Session reset');
             if (failedSid) {
               try {
-                await Net.postJSON(base, `/recognize/stream/${encodeURIComponent(failedSid)}/end`, {}, api, viaNkn, relay, 10000);
+                await Net.postJSON(
+                  base,
+                  `/recognize/stream/${encodeURIComponent(failedSid)}/end`,
+                  {},
+                  api,
+                  viaNkn,
+                  relay,
+                  10000,
+                  { forceRelay }
+                );
               } catch (endErr) {
                 // ignore double-end failures
               }

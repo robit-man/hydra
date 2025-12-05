@@ -298,7 +298,8 @@ function createLLM({
       relay: useRelay ? relayRaw : '',
       rawRelay: relayRaw,
       viaNkn: useRelay && hasRelay,
-      mode
+      mode,
+      relayOnly: mode === 'remote'
     };
   }
 
@@ -378,7 +379,7 @@ function createLLM({
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
     const endpoint = resolveEndpointConfig(cfg, override);
-    const { base, relay, api, viaNkn } = endpoint;
+    const { base, relay, api, viaNkn, relayOnly } = endpoint;
     if (!base) return null;
 
     let skipCache = force;
@@ -399,7 +400,16 @@ function createLLM({
     if (!skipCache && MODEL_INFO_CACHE.has(key)) return MODEL_INFO_CACHE.get(key);
     if (!skipCache && MODEL_INFO_PROMISES.has(key)) return MODEL_INFO_PROMISES.get(key);
 
-    const promise = Net.postJSON(base.replace(/\/+$/, ''), '/api/show', { name: modelId }, api, viaNkn, relay)
+    const promise = Net.postJSON(
+      base.replace(/\/+$/, ''),
+      '/api/show',
+      { name: modelId },
+      api,
+      viaNkn,
+      relay,
+      undefined,
+      { forceRelay: relayOnly }
+    )
       .then((data) => {
         try {
           console.log('[LLM] model show response', {
@@ -426,14 +436,15 @@ function createLLM({
     return promise;
   }
 
-  async function fetchModelMetadataList(base, api, viaNkn, relay) {
+  async function fetchModelMetadataList(base, api, viaNkn, relay, options = {}) {
+    const { forceRelay = false } = options || {};
     const cleaned = (base || '').replace(/\/+$/, '');
     if (!cleaned) return [];
     const collected = new Map();
 
     const tryFetch = async (path) => {
       try {
-        const res = await Net.getJSON(cleaned, path, api, viaNkn, relay);
+        const res = await Net.getJSON(cleaned, path, api, viaNkn, relay, { forceRelay });
         if (!res) return;
         const pushEntry = (entry) => {
           const normalized = normalizeModelEntry(entry, path);
@@ -460,7 +471,7 @@ function createLLM({
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
     const endpoint = resolveEndpointConfig(cfg, override);
-    const { base, relay, api, viaNkn, mode } = endpoint;
+    const { base, relay, api, viaNkn, mode, relayOnly } = endpoint;
     if (!base) {
       setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode });
       clearModelRefresh(nodeId);
@@ -476,7 +487,7 @@ function createLLM({
       return MODEL_PROMISE.get(key);
     }
     const task = (async () => {
-      const list = await fetchModelMetadataList(base, api, viaNkn, relay);
+      const list = await fetchModelMetadataList(base, api, viaNkn, relay, { forceRelay: relayOnly });
       setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now(), mode });
       return list.slice();
     })();
@@ -644,7 +655,8 @@ function createLLM({
     let cfg = rec.config || {};
     cfg = await ensureModelConfigured(nodeId, cfg);
     const endpoint = resolveEndpointConfig(cfg);
-    const { base, api, relay, viaNkn } = endpoint;
+    const { base, api, relay, viaNkn, relayOnly } = endpoint;
+    if (relayOnly && !viaNkn) throw new Error('Relay address required for remote mode');
     const model = (cfg.model || '').trim();
     const stream = !!cfg.stream;
     const sysUse = !!cfg.useSystem;
@@ -881,7 +893,16 @@ function createLLM({
           mux.flush(emitBoth);
         }
       } else {
-        const data = await Net.postJSON(base, '/api/chat', buildRequestBody(false), api, viaNkn, relay, 120000);
+        const data = await Net.postJSON(
+          base,
+          '/api/chat',
+          buildRequestBody(false),
+          api,
+          viaNkn,
+          relay,
+          120000,
+          { forceRelay: relayOnly }
+        );
         if (usingNkn) updateRelayState('ok', 'Response ready');
         full = stripEOT((data?.message?.content) || (data?.response) || '') || '';
         if (full) {

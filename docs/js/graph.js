@@ -3270,7 +3270,8 @@ function refreshNodeResolution(force = false) {
           if (!obj || !obj.type || !obj.config) continue;
           const defaults = NodeStore?.defaultsByType?.[obj.type] || {};
           const existing = NodeStore.load(id) || {};
-          const mergedCfg = deepClone({ ...defaults, ...(existing.config || {}), ...obj.config });
+          // Prefer newer per-node storage over stale workspace snapshots (preserves edits like relay URLs)
+          const mergedCfg = deepClone({ ...defaults, ...(obj.config || {}), ...(existing.config || {}) });
           NodeStore.saveObj(id, { id, type: obj.type, config: mergedCfg });
         }
       }
@@ -3385,11 +3386,11 @@ function refreshNodeResolution(force = false) {
     return true;
   }
 
-  async function discoverASRModels(base, api, useNkn, relay) {
+  async function discoverASRModels(base, api, useNkn, relay, forceRelay = false) {
     const b = (base || '').replace(/\/+$/, '');
     if (!b) return [];
     try {
-      const j = await Net.getJSON(b, '/models', api, useNkn, relay);
+      const j = await Net.getJSON(b, '/models', api, useNkn, relay, { forceRelay });
       const arr = Array.isArray(j?.models) ? j.models : (Array.isArray(j) ? j : []);
       const names = arr
         .map((m) => (m && (m.name || m.id || m)) ?? '')
@@ -3401,12 +3402,12 @@ function refreshNodeResolution(force = false) {
     }
   }
 
-  async function discoverLLMModels(base, api, useNkn, relay) {
+  async function discoverLLMModels(base, api, useNkn, relay, forceRelay = false) {
     const out = [];
     const b = (base || '').replace(/\/+$/, '');
     if (!b) return out;
     try {
-      const j = await Net.getJSON(b, '/api/tags', api, useNkn, relay);
+      const j = await Net.getJSON(b, '/api/tags', api, useNkn, relay, { forceRelay });
       if (j && Array.isArray(j.models)) {
         for (const m of j.models) if (m && m.name) out.push(String(m.name));
       }
@@ -3414,14 +3415,14 @@ function refreshNodeResolution(force = false) {
       // ignore
     }
     try {
-      const j = await Net.getJSON(b, '/v1/models', api, useNkn, relay);
+      const j = await Net.getJSON(b, '/v1/models', api, useNkn, relay, { forceRelay });
       const arr = Array.isArray(j?.data) ? j.data : (Array.isArray(j) ? j : []);
       for (const m of arr) if (m && (m.id || m.name)) out.push(String(m.id || m.name));
     } catch (err) {
       // ignore
     }
     try {
-      const j = await Net.getJSON(b, '/models', api, useNkn, relay);
+      const j = await Net.getJSON(b, '/models', api, useNkn, relay, { forceRelay });
       if (Array.isArray(j)) {
         for (const m of j) out.push(String(m.id || m.name || m));
       } else if (Array.isArray(j?.data)) {
@@ -3433,11 +3434,11 @@ function refreshNodeResolution(force = false) {
     return Array.from(new Set(out.filter(Boolean))).sort((a, b) => a.localeCompare(b));
   }
 
-  async function discoverTTSModels(base, api, useNkn, relay) {
+  async function discoverTTSModels(base, api, useNkn, relay, forceRelay = false) {
     const b = (base || '').replace(/\/+$/, '');
     if (!b) return [];
     try {
-      const j = await Net.getJSON(b, '/models', api, useNkn, relay);
+      const j = await Net.getJSON(b, '/models', api, useNkn, relay, { forceRelay });
       let arr = [];
       if (Array.isArray(j?.models)) arr = j.models;
       else if (Array.isArray(j?.data)) arr = j.data;
@@ -7258,13 +7259,15 @@ function refreshNodeResolution(force = false) {
             try {
               const base = cfg.base || '';
               const api = cfg.api || '';
-              const relay = cfg.relay || '';
-              const viaNkn = !!relay;
+              const mode = String(cfg.endpointMode || 'auto').toLowerCase();
+              const relay = mode === 'local' ? '' : (cfg.relay || '');
+              const viaNkn = mode !== 'local' && !!relay;
+              const forceRelay = mode === 'remote';
               const list = node.type === 'LLM'
-                ? await discoverLLMModels(base, api, viaNkn, relay)
+                ? await discoverLLMModels(base, api, viaNkn, relay, forceRelay)
                 : node.type === 'TTS'
-                  ? await discoverTTSModels(base, api, viaNkn, relay)
-                  : await discoverASRModels(base, api, viaNkn, relay);
+                  ? await discoverTTSModels(base, api, viaNkn, relay, forceRelay)
+                  : await discoverASRModels(base, api, viaNkn, relay, forceRelay);
               select.innerHTML = '';
               if (!list.length) addOption('', '— no models found —');
               for (const name of list) addOption(name);

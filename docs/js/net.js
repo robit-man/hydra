@@ -133,7 +133,8 @@ const Net = {
     return chunks;
   },
 
-  async getJSON(base, path, api, useNkn, relay) {
+  async getJSON(base, path, api, useNkn, relay, options = {}) {
+    const { forceRelay = false } = options || {};
     const useRelay = useNkn && relay;
     const direct = async () => {
       const headers = this.auth({}, api);
@@ -143,18 +144,24 @@ const Net = {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
     };
-    if (!useRelay) return direct();
+    if (!useRelay) {
+      if (forceRelay) throw new Error('Relay address required for remote endpoint');
+      return direct();
+    }
     try {
       return await this.nknFetch(base, path, 'GET', null, api, relay);
     } catch (err) {
+      if (forceRelay) throw err;
       // fallback to direct if relay fails
       return direct();
     }
   },
 
-  async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000, progressCb = null) {
+  async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000, progressCb = null, options = {}) {
+    const { forceRelay = false } = options || {};
     const useRelay = useNkn && relay;
     if (!useRelay) {
+      if (forceRelay) throw new Error('Relay address required for remote endpoint');
       return this.postJSON(base, path, body, api, false, '', timeout);
     }
     // Stream upload over NKN in multiple DMs
@@ -231,6 +238,7 @@ const Net = {
     try {
       return await responsePromise;
     } catch (err) {
+      if (forceRelay) throw err;
       // fallback to direct HTTP if relay upload fails
       return this.postJSON(base, path, body, api, false, '', timeout);
     } finally {
@@ -333,7 +341,8 @@ const Net = {
     });
   },
 
-  async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {
+  async postJSON(base, path, body, api, useNkn, relay, timeout = 45000, options = {}) {
+    const { forceRelay = false } = options || {};
     const useRelay = useNkn && relay;
     const direct = async () => {
       const res = await fetch(base.replace(/\/+$/, '') + path, {
@@ -344,10 +353,14 @@ const Net = {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
     };
-    if (!useRelay) return direct();
+    if (!useRelay) {
+      if (forceRelay) throw new Error('Relay address required for remote endpoint');
+      return direct();
+    }
     try {
       return await this.nknFetch(base, path, 'POST', body, api, relay, timeout);
     } catch (err) {
+      if (forceRelay) throw err;
       return direct();
     }
   },
@@ -356,9 +369,11 @@ const Net = {
     return this.nknFetch(base, path, 'POST_FORM', formData, api, relay, timeout);
   },
 
-  async fetchBlob(fullUrl, useNkn, relay, api) {
+  async fetchBlob(fullUrl, useNkn, relay, api, options = {}) {
+    const { forceRelay = false } = options || {};
     const useRelay = useNkn && relay;
     if (!useRelay) {
+      if (forceRelay) throw new Error('Relay address required for remote endpoint');
       const res = await fetch(fullUrl, { headers: this.auth({}, api) });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.blob();

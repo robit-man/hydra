@@ -351,7 +351,8 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       relay: useRelay ? relayRaw : '',
       rawRelay: relayRaw,
       viaNkn: useRelay && hasRelay,
-      mode
+      mode,
+      relayOnly: mode === 'remote'
     };
   }
 
@@ -421,11 +422,12 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     };
   };
 
-  async function fetchModelMetadata(base, api, viaNkn, relay) {
+  async function fetchModelMetadata(base, api, viaNkn, relay, options = {}) {
+    const { forceRelay = false } = options || {};
     const cleaned = (base || '').replace(/\/+$/, '');
     if (!cleaned) return [];
     try {
-      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay);
+      const res = await Net.getJSON(cleaned, '/models', api, viaNkn, relay, { forceRelay });
       const list = [];
       const push = (entry) => {
         const normalized = normalizeModelEntry(entry);
@@ -446,7 +448,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
     const endpoint = resolveEndpointConfig(cfg, override);
-    const { base, relay, api, viaNkn } = endpoint;
+    const { base, relay, api, viaNkn, relayOnly } = endpoint;
     if (!base) {
       setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode: endpoint.mode });
       clearModelRefresh(nodeId);
@@ -460,7 +462,7 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
     const key = makeCacheKey(nodeId, base, relay, api);
     if (MODEL_PROMISE.has(key)) return MODEL_PROMISE.get(key);
     const task = (async () => {
-      const list = await fetchModelMetadata(base, api, viaNkn, relay);
+      const list = await fetchModelMetadata(base, api, viaNkn, relay, { forceRelay: relayOnly });
       setCachedMeta(nodeId, { list, base, relay, api, fetchedAt: Date.now(), mode: endpoint.mode });
       return list.slice();
     })();
@@ -982,8 +984,9 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
       await ensureLocalNetworkAccess({ requireGesture: false });
       cfg = await ensureModelConfigured(nodeId, cfg);
     }
-    const endpoint = wasmEnabled ? { base: '', api: '', relay: '', viaNkn: false } : resolveEndpointConfig(cfg);
-    const { base, api, relay, viaNkn } = endpoint;
+    const endpoint = wasmEnabled ? { base: '', api: '', relay: '', viaNkn: false, relayOnly: false } : resolveEndpointConfig(cfg);
+    const { base, api, relay, viaNkn, relayOnly } = endpoint;
+    if (relayOnly && !viaNkn) throw new Error('Relay address required for remote mode');
     const model = (cfg.model || '').trim();
     const mode = cfg.mode || 'stream';
     const usingNkn = viaNkn;
@@ -1154,13 +1157,14 @@ function createTTS({ getNode, NodeStore, Net, CFG, log, b64ToBytes, setRelayStat
             api,
             viaNkn,
             relay,
-            10 * 60 * 1000
+            10 * 60 * 1000,
+            { forceRelay: relayOnly }
           );
           let blob = null;
           let mime = 'audio/ogg';
           if (data?.files?.[0]?.url) {
             const fileUrl = base.replace(/\/+$/, '') + data.files[0].url;
-            blob = await Net.fetchBlob(fileUrl, viaNkn, relay, api);
+            blob = await Net.fetchBlob(fileUrl, viaNkn, relay, api, { forceRelay: relayOnly });
             mime = blob.type || mime;
           } else if (data?.audio_b64) {
             const u8 = b64ToBytes(data.audio_b64);

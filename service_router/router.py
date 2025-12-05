@@ -4041,27 +4041,40 @@ class RelayNode:
         if not self.ui.port_isolation_enabled:
             return True  # Port isolation disabled, allow all requests
 
-        # Extract port from URL
         try:
             from urllib.parse import urlparse
+
             parsed = urlparse(url)
             port = parsed.port
-
-            # If no explicit port, infer from scheme
             if port is None:
                 port = 443 if parsed.scheme == "https" else 80
 
-            # Check if this port is allowed for any service
-            for svc_key, target_info in SERVICE_TARGETS.items():
-                allowed_ports = target_info.get("ports", [])
-                # If service is specified, only check that service's ports
-                if service and service != svc_key and service not in target_info.get("aliases", []):
-                    continue
-                if port in allowed_ports:
-                    return True
+            # Canonicalize service so aliases map correctly
+            svc = self._canonical_service(service) if service else ""
 
-            # Port not in whitelist
-            return False
+            # Start with statically whitelisted ports
+            allowed_ports: set[int] = set()
+            for svc_key, target_info in SERVICE_TARGETS.items():
+                if svc and svc != svc_key and svc not in target_info.get("aliases", []):
+                    continue
+                for p in target_info.get("ports", []):
+                    allowed_ports.add(int(p))
+
+            # Add ports from configured targets (so custom endpoints are honored while isolation is on)
+            for target_name, base_url in (self.targets or {}).items():
+                if svc and svc != target_name and svc != self._canonical_service(target_name):
+                    continue
+                try:
+                    t_parsed = urlparse(base_url)
+                    t_port = t_parsed.port
+                    if t_port is None:
+                        t_port = 443 if t_parsed.scheme == "https" else 80
+                    if t_port:
+                        allowed_ports.add(int(t_port))
+                except Exception:
+                    continue
+
+            return port in allowed_ports
         except Exception:
             # If we can't parse the URL, reject it for security
             return False
