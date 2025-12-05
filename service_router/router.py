@@ -4986,6 +4986,23 @@ class Router:
                     SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
                     LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
 
+                # Update router targets/config to match detected port (no hard-coding)
+                target_key = SERVICE_TARGETS[service_name].get("target") or service_name
+                existing_base = self.targets.get(target_key) or SERVICE_TARGETS[service_name].get("endpoint") or ""
+                try:
+                    parsed = urllib.parse.urlparse(existing_base or f"http://127.0.0.1:{detected_port}")
+                    host = parsed.hostname or "127.0.0.1"
+                    scheme = parsed.scheme or "http"
+                    new_base = f"{scheme}://{host}:{detected_port}"
+                    if new_base != existing_base:
+                        self.targets[target_key] = new_base
+                        self.cfg.setdefault("targets", {})[target_key] = new_base
+                        self.config_dirty = True
+                        self.ui.update_service_info(service_name, {"endpoint": new_base})
+                        LOGGER.info("Aligned target for %s -> %s", target_key, new_base)
+                except Exception as exc:
+                    LOGGER.debug("Failed to align target for %s: %s", target_key, exc)
+
     def start(self):
         LOGGER.info("Starting services via watchdog")
         self.watchdog.start_all()
