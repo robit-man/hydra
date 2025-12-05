@@ -22,6 +22,14 @@ const Net = {
     return out;
   },
 
+  _chunkString(str, size = 60000) {
+    const chunks = [];
+    for (let i = 0; i < str.length; i += size) {
+      chunks.push(str.slice(i, i + size));
+    }
+    return chunks;
+  },
+
   async getJSON(base, path, api, useNkn, relay) {
     const useRelay = useNkn && relay;
     if (!useRelay) {
@@ -33,6 +41,33 @@ const Net = {
       return res.json();
     }
     return this.nknFetch(base, path, 'GET', null, api, relay);
+  },
+
+  async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000) {
+    const useRelay = useNkn && relay;
+    if (!useRelay) {
+      return this.postJSON(base, path, body, api, false, '', timeout);
+    }
+    const headers = this.auth({}, api);
+    headers['X-Relay-Stream'] = 'chunks';
+    const payloadStr = JSON.stringify(body || {});
+    const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
+    const chunks = this._chunkString(b64, chunkSize);
+    const req = {
+      url: base.replace(/\/+$/, '') + path,
+      method: 'POST',
+      headers,
+      timeout_ms: timeout,
+      json_chunks_b64: chunks
+    };
+    const res = await this.nknSend(req, relay, timeout);
+    if (!res || res.ok === false) throw new Error((res && res.error) || ('HTTP ' + (res && res.status)));
+    if (res.json !== undefined && res.json !== null) return res.json;
+    if (res.body_b64) {
+      const u8 = b64ToBytes(res.body_b64);
+      return JSON.parse(td.decode(u8));
+    }
+    return null;
   },
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {

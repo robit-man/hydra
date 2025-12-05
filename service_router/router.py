@@ -236,6 +236,7 @@ def render_qr_ascii(text: str, scale: int = 1, invert: bool = False) -> str:
 SERVICES_ROOT = BASE_DIR / ".services"
 LOGS_ROOT = BASE_DIR / ".logs"
 METADATA_ROOT = SERVICES_ROOT / "meta"
+BACKUP_ROOT = BASE_DIR / ".backups"
 
 
 @dataclass
@@ -245,6 +246,7 @@ class ServiceDefinition:
     script_path: str
     description: str
     preserve_repo: bool = False  # If True, keep full repo structure instead of extracting only script
+    default_stream: bool = False  # If True, prefer streaming responses (chunks) by default
 
     @property
     def script_name(self) -> str:
@@ -346,6 +348,7 @@ class ServiceWatchdog:
             script_path="app.py",
             description="Depth Anything 3 depth estimation and pointcloud generation",
             preserve_repo=True,  # Requires full repo structure for dependencies
+            default_stream=True,  # Responses can be large (pointcloud) — stream by default
         ),
     ]
 
@@ -359,6 +362,8 @@ class ServiceWatchdog:
         self._global_stop = threading.Event()
         self._lock = threading.Lock()
         self._terminal_template = self._detect_terminal()
+        self._update_thread: Optional[threading.Thread] = None
+        self._repo_thread: Optional[threading.Thread] = None
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
 
@@ -378,9 +383,19 @@ class ServiceWatchdog:
             t = threading.Thread(target=self._run_service_loop, args=(state,), daemon=True)
             state.supervisor = t
             t.start()
+        if not self._update_thread or not self._update_thread.is_alive():
+            self._update_thread = threading.Thread(target=self._poll_updates_loop, daemon=True)
+            self._update_thread.start()
+        if not self._repo_thread or not self._repo_thread.is_alive():
+            self._repo_thread = threading.Thread(target=self._poll_core_repo_loop, daemon=True)
+            self._repo_thread.start()
 
     def shutdown(self, timeout: float = 15.0) -> None:
         self._global_stop.set()
+        if self._update_thread and self._update_thread.is_alive():
+            self._update_thread.join(timeout=timeout)
+        if self._repo_thread and self._repo_thread.is_alive():
+            self._repo_thread.join(timeout=timeout)
         for state in self._states.values():
             state.stop_event.set()
             proc = state.process
@@ -474,6 +489,120 @@ class ServiceWatchdog:
             "ts": int(time.time()),
         }
         path.write_text(json.dumps(meta, indent=2))
+
+    def _run_git(self, workdir: Path, args: List[str]) -> str:
+        return subprocess.check_output(["git", "-C", str(workdir), *args], text=True).strip()
+
+    def _backup_repo(self, repo_dir: Path) -> Optional[Path]:
+        try:
+            BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            backup_dir = BACKUP_ROOT / f"hydra_{ts}"
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            shutil.copytree(repo_dir, backup_dir, dirs_exist_ok=False)
+            return backup_dir
+        except Exception:
+            return None
+
+    def _restore_repo(self, repo_dir: Path, backup_dir: Path) -> bool:
+        try:
+            if not backup_dir.exists():
+                return False
+            # Danger: remove current repo and restore backup
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            shutil.copytree(backup_dir, repo_dir, dirs_exist_ok=False)
+            return True
+        except Exception:
+            return False
+
+    def _maybe_update_service(self, state: ServiceState) -> None:
+        """
+        Check for upstream updates on preserve_repo services.
+        If updates are found, pull them and restart the service.
+        """
+        if not state.definition.preserve_repo:
+            return
+        git_dir = state.workdir / ".git"
+        if not git_dir.exists():
+            return
+        try:
+            self._run_git(state.workdir, ["fetch", "--prune", "--quiet"])
+            try:
+                branch = self._run_git(state.workdir, ["rev-parse", "--abbrev-ref", "HEAD"])
+            except Exception:
+                branch = "main"
+            try:
+                local = self._run_git(state.workdir, ["rev-parse", "HEAD"])
+                remote = self._run_git(state.workdir, ["rev-parse", f"{branch}@{{upstream}}"])
+            except Exception:
+                return
+            if local == remote:
+                return
+            print(f"[watchdog] Updates detected for {state.definition.name}; pulling…")
+            self._run_git(state.workdir, ["pull", "--rebase", "--autostash"])
+            if state.process and state.process.poll() is None:
+                print(f"[watchdog] Restarting {state.definition.name} after update")
+                self._terminate_process(state)
+            # The supervisor loop will restart it; if not running, start a fresh loop.
+            if not state.supervisor or not state.supervisor.is_alive():
+                state.stop_event.clear()
+                t = threading.Thread(target=self._run_service_loop, args=(state,), daemon=True)
+                state.supervisor = t
+                t.start()
+        except Exception as exc:
+            state.last_error = f"update check failed: {exc}"
+
+    def _poll_updates_loop(self) -> None:
+        """Periodic git update checks for running services."""
+        interval = 300
+        while not self._global_stop.is_set():
+            for state in list(self._states.values()):
+                if self._global_stop.is_set():
+                    break
+                try:
+                    self._maybe_update_service(state)
+                except Exception:
+                    # best-effort; errors are recorded per state
+                    pass
+            self._global_stop.wait(interval)
+
+    def _poll_core_repo_loop(self) -> None:
+        """Monitor the main hydra repo for updates; auto-pull with backup/rollback."""
+        repo_dir = BASE_DIR
+        interval = 300
+        while not self._global_stop.is_set():
+            try:
+                git_dir = repo_dir / '.git'
+                if git_dir.exists():
+                    self._run_git(repo_dir, ["fetch", "--prune", "--quiet"])
+                    try:
+                        branch = self._run_git(repo_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+                    except Exception:
+                        branch = "main"
+                    try:
+                        local = self._run_git(repo_dir, ["rev-parse", "HEAD"])
+                        remote = self._run_git(repo_dir, ["rev-parse", f"{branch}@{{upstream}}"])
+                    except Exception:
+                        local = remote = None
+                    if local and remote and local != remote:
+                        backup = self._backup_repo(repo_dir)
+                        try:
+                            self._run_git(repo_dir, ["pull", "--rebase", "--autostash"])
+                            # If we reach here, pull succeeded
+                            backup = None
+                        except Exception as exc:
+                            # rollback
+                            if backup:
+                                self._restore_repo(repo_dir, backup)
+                            # log error but keep running
+                            print(f"[watchdog] core repo pull failed: {exc}")
+                else:
+                    # Not a git repo; skip
+                    pass
+            except Exception:
+                pass
+            self._global_stop.wait(interval)
 
     def _run_service_loop(self, state: ServiceState) -> None:
         backoff = 1.0
@@ -2281,12 +2410,37 @@ class RelayNode:
         if req.get("insecure_tls") in (True, "1", "true", "on"):
             verify = False
 
+        service_name = self._canonical_service(req.get("service") or req.get("target"))
+        svc_def = None
+        if service_name:
+            svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
+
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
         if stream_mode in ("1", "true", "yes", "on", "chunks", "dm", "lines", "ndjson", "sse", "events"):
             want_stream = True
+        if svc_def and svc_def.default_stream:
+            want_stream = True
+            if "X-Relay-Stream" not in headers and "x-relay-stream" not in headers:
+                headers["X-Relay-Stream"] = "chunks"
+
         params: Dict[str, Any] = {"headers": headers, "timeout": timeout_s, "verify": verify}
-        if "json" in req and req["json"] is not None:
+        body_chunks = req.get("body_chunks_b64") or []
+        json_chunks = req.get("json_chunks_b64") or []
+        if body_chunks:
+            try:
+                combined = b"".join(base64.b64decode(str(c), validate=False) for c in body_chunks if c is not None)
+            except Exception:
+                combined = b""
+            params["data"] = combined
+        elif json_chunks:
+            try:
+                combined = b"".join(base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None)
+                params["data"] = combined
+                headers.setdefault("Content-Type", "application/json")
+            except Exception:
+                params["data"] = b""
+        elif "json" in req and req["json"] is not None:
             params["json"] = req["json"]
         elif "body_b64" in req and req["body_b64"] is not None:
             try:

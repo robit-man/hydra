@@ -401,7 +401,13 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         Object.entries(params).forEach(([k, v]) => {
           if (v !== undefined && v !== null && v !== '') body[k] = v;
         });
-        result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000);
+        // If payload is large, chunk the JSON to stay within DM limits
+        const useChunked = b64Payload && b64Payload.length > 60000;
+        if (useChunked && Net.postJSONChunked) {
+          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 60000);
+        } else {
+          result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000);
+        }
       } else {
         const formData = new FormData();
         formData.append('file', blob, filename);
