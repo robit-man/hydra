@@ -2725,29 +2725,28 @@ class RelayNode:
             self._finalize_upload(uid, entry, allow_partial=False)
 
     def _finalize_upload(self, uid: str, entry: dict, allow_partial: bool = False) -> None:
-        try:
-            chunks = entry.get("chunks") or []
-            missing = [i + 1 for i, ch in enumerate(chunks) if ch is None]
-            if missing and not allow_partial:
-                entry["missing_requested"] = time.time()
-                self._request_missing(uid, entry, missing)
-                return
-            data = b"".join(ch for ch in chunks if ch is not None)
-            req = dict(entry.get("req") or {})
-            ctype = entry.get("ctype") or (req.get("headers") or {}).get("Content-Type") or ""
-            if "application/json" in ctype:
-                try:
-                    text = data.decode("utf-8", errors="ignore")
-                    req["json"] = json.loads(text)
-                except Exception:
-                    req["body_b64"] = base64.b64encode(data).decode("ascii")
-            else:
+        chunks = entry.get("chunks") or []
+        missing = [i + 1 for i, ch in enumerate(chunks) if ch is None]
+        if missing and not allow_partial:
+            entry["missing_requested"] = time.time()
+            self._request_missing(uid, entry, missing)
+            return
+        data = b"".join(ch for ch in chunks if ch is not None)
+        req = dict(entry.get("req") or {})
+        ctype = entry.get("ctype") or (req.get("headers") or {}).get("Content-Type") or ""
+        if "application/json" in ctype:
+            try:
+                text = data.decode("utf-8", errors="ignore")
+                req["json"] = json.loads(text)
+            except Exception:
                 req["body_b64"] = base64.b64encode(data).decode("ascii")
-            self._enqueue_request(entry.get("src") or "", entry.get("rid") or "", req)
-            missing_note = f" missing={len(missing)}" if missing else ""
-            self._log_upload(entry.get("rid") or uid, f"complete bytes={len(data)}{missing_note}")
-        finally:
-            self.upload_sessions.pop(uid, None)
+        else:
+            req["body_b64"] = base64.b64encode(data).decode("ascii")
+        self._enqueue_request(entry.get("src") or "", entry.get("rid") or "", req)
+        missing_note = f" missing={len(missing)}" if missing else ""
+        self._log_upload(entry.get("rid") or uid, f"complete bytes={len(data)}{missing_note}")
+        # Only drop the session once we’ve enqueued the HTTP request (or finalized partial)
+        self.upload_sessions.pop(uid, None)
 
     def _upload_cleanup_loop(self) -> None:
         """Sweep unfinished uploads so they don't stall forever."""
