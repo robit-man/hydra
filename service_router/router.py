@@ -4250,7 +4250,7 @@ class RelayNode:
 
         target_label = self._flow_target_label(service_name, url)
         path_snippet = urllib.parse.urlparse(url).path or "/"
-        self._record_flow(src or "client", target_label, f"{method} {path_snippet} {rid}", service=service_name, channel=src)
+        self._record_flow(src or "client", target_label, f"EGRESS {method} {path_snippet} {rid}", service=service_name, channel=src)
 
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
@@ -4309,12 +4309,14 @@ class RelayNode:
             self._reset_rate_limit()
             stream_mode = self._infer_stream_mode(stream_mode, resp)
             bytes_out = self._handle_stream(src, rid, resp, stream_mode, service_name, body_bytes, start_ts)
+            self._record_flow(target_label, src or "client", f"STREAM {resp.status_code} {method} {path_snippet} {rid}", service=service_name, channel=src, direction="←")
             self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
             return
 
         resp = self._http_request_with_retry(session, method, url, **params)
         self._handle_response_status(resp.status_code)
         bytes_out = self._send_simple_response(src, rid, resp, req)
+        self._record_flow(target_label, src or "client", f"RESP {resp.status_code} {method} {path_snippet} {rid}", service=service_name, channel=src, direction="←")
         self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
 
     def _handle_response_status(self, status_code: int) -> None:
