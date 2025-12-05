@@ -3791,12 +3791,18 @@ class RelayNode:
         self.ui = ui
         self.node_id = node_cfg.get("name") or node_cfg.get("id") or secrets.token_hex(4)
         self.ui.add_node(self.node_id, self.node_id)
+        # Always share the global targets map so detection updates propagate
+        global_targets = global_cfg.setdefault("targets", {})
+
         explicit_targets = node_cfg.get("targets") or {}
         if explicit_targets:
-            self.targets = {k: v for k, v in explicit_targets.items() if v}
-        else:
-            # Share target map with global config so detected updates propagate
-            self.targets = global_cfg.setdefault("targets", {})
+            # Seed/override global targets with explicit per-node config
+            for k, v in explicit_targets.items():
+                if v:
+                    global_targets[k] = v
+
+        self.targets = global_targets
+
         http_cfg = global_cfg.get("http", {})
         self.workers_count = int(node_cfg.get("workers") or http_cfg.get("workers") or 4)
         self.max_body = int(node_cfg.get("max_body_b") or http_cfg.get("max_body_b") or (2 * 1024 * 1024))
@@ -4207,6 +4213,43 @@ class RelayNode:
         except Exception:
             # If we can't parse the URL, reject it for security
             return False
+        
+    def _realign_service_target(self, service_name: Optional[str], failed_url: str) -> bool:
+        """
+        After a connection failure, try to detect the service's actual port from its log,
+        validate it's listening, and update self.targets / SERVICE_TARGETS.
+
+        Returns True if we updated the target and callers should re-resolve the URL.
+        """
+        if not service_name:
+            return False
+
+        svc = self._canonical_service(service_name)
+        if not svc or svc not in SERVICE_TARGETS:
+            return False
+
+        try:
+            parsed = urllib.parse.urlparse(failed_url)
+        except Exception:
+            parsed = None
+
+        # Prefer configured host hint, then the host from the failed URL, then loopback.
+        host_hint = self._service_host_hint(svc)
+        requested_host = parsed.hostname if parsed else None
+        host = host_hint or requested_host or "127.0.0.1"
+        scheme = (parsed.scheme if parsed and parsed.scheme else "http")
+
+        # Detect port from logs
+        detected_port = self._detect_service_port_from_log(svc)
+        if not detected_port:
+            return False
+
+        # This will probe host:port and, if successful, update SERVICE_TARGETS and self.targets
+        aligned = self._whitelist_service_port(svc, detected_port, host, scheme,
+                                               reason="egress-retry", require_probe=True)
+        if aligned:
+            LOGGER.info("Realigned %s to detected port %s after connection failure", svc, detected_port)
+        return aligned
 
     def _detect_service_port_from_log(self, service_name: str) -> Optional[int]:
         """Best-effort detection of a service port by tailing its log."""
@@ -4503,24 +4546,67 @@ class RelayNode:
             except Exception:
                 body_bytes = 0
 
+        realigned = False  # Ensure we only realign/retry once per request
+
+        def _retry_after_realign(exc: Exception, stream: bool = False) -> requests.Response:
+            nonlocal url, target_label, path_snippet, realigned
+
+            # Only trigger on connection-type issues, once
+            if realigned:
+                raise exc
+            if not isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+                raise exc
+            if not service_name:
+                raise exc
+
+            if not self._realign_service_target(service_name, url):
+                raise exc
+
+            realigned = True
+            # Re-resolve against updated self.targets (includes detection updates)
+            url = self._resolve_url(req)
+            target_label = self._flow_target_label(service_name, url)
+            path_snippet = urllib.parse.urlparse(url).path or "/"
+
+            if stream:
+                return self._http_request_with_retry(session, method, url, stream=True, **params)
+            return self._http_request_with_retry(session, method, url, **params)
+
+        # --- streaming path ---
         if want_stream:
-            resp = self._http_request_with_retry(session, method, url, stream=True, **params)
+            try:
+                resp = self._http_request_with_retry(session, method, url, stream=True, **params)
+            except requests.RequestException as exc:
+                # Try one fast realign + retry on connection failure
+                resp = _retry_after_realign(exc, stream=True)
+
             if resp.status_code == 429:
                 self._register_rate_limit_hit()
                 self._send_simple_response(src, rid, resp, req)
-                self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=len(resp.content or b""), start_ts=start_ts)
+                self._record_usage_stats(service_name, src, bytes_in=body_bytes,
+                                        bytes_out=len(resp.content or b""), start_ts=start_ts)
                 return
+
             self._reset_rate_limit()
             stream_mode = self._infer_stream_mode(stream_mode, resp)
             bytes_out = self._handle_stream(src, rid, resp, stream_mode, service_name, body_bytes, start_ts)
-            self._record_flow(target_label, src or "client", f"STREAM {resp.status_code} {method} {path_snippet} {rid}", service=service_name, channel=src, direction="←")
+            self._record_flow(target_label, src or "client",
+                            f"STREAM {resp.status_code} {method} {path_snippet} {rid}",
+                            service=service_name, channel=src, direction="←")
             self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
             return
 
-        resp = self._http_request_with_retry(session, method, url, **params)
+        # --- non-streaming path ---
+        try:
+            resp = self._http_request_with_retry(session, method, url, **params)
+        except requests.RequestException as exc:
+            resp = _retry_after_realign(exc, stream=False)
+
         self._handle_response_status(resp.status_code)
         bytes_out = self._send_simple_response(src, rid, resp, req)
-        self._record_flow(target_label, src or "client", f"RESP {resp.status_code} {method} {path_snippet} {rid}", service=service_name, channel=src, direction="←")
+        self._record_flow(target_label, src or "client",
+                        f"RESP {resp.status_code} {method} {path_snippet} {rid}",
+                        service=service_name, channel=src, direction="←")
         self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
 
     def _handle_response_status(self, status_code: int) -> None:
