@@ -58,16 +58,41 @@ const Net = {
       method: 'POST',
       headers,
       timeout_ms: timeout,
-      json_chunks_b64: chunks
+      json_chunks_b64: chunks,
+      stream: 'chunks'
     };
-    const res = await this.nknSend(req, relay, timeout);
-    if (!res || res.ok === false) throw new Error((res && res.error) || ('HTTP ' + (res && res.status)));
-    if (res.json !== undefined && res.json !== null) return res.json;
-    if (res.body_b64) {
-      const u8 = b64ToBytes(res.body_b64);
-      return JSON.parse(td.decode(u8));
+    let buf = [];
+    let ended = false;
+    let ok = false;
+    let status = 0;
+    let headersResp = {};
+    await this.nknStream(req, relay, {
+      onBegin: (meta) => {
+        ok = meta?.ok !== false;
+        status = meta?.status || 0;
+        headersResp = meta?.headers || {};
+      },
+      onChunk: (chunk) => {
+        if (ended) return;
+        buf.push(chunk);
+      },
+      onEnd: () => {
+        ended = true;
+      },
+      lingerEndMs: 50
+    }, timeout);
+    const merged = buf.length ? new Blob(buf) : new Blob([]);
+    const arrBuf = await merged.arrayBuffer();
+    const text = td.decode(new Uint8Array(arrBuf));
+    if (!ok) throw new Error(`HTTP ${status || 0}`);
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      if (headersResp['content-type'] && headersResp['content-type'].includes('application/json')) {
+        throw err;
+      }
+      return { body: text, status, headers: headersResp };
     }
-    return null;
   },
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {
