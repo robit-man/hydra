@@ -1323,23 +1323,24 @@ class UnifiedUI:
             selected_row = self._interactive_rows[0] if self._interactive_rows else None
 
             now = time.time()
-            qr_candidates = [row for row in rows if row.get("type") in ("node", "service")]
-            if qr_candidates:
-                if qr_candidates != self.qr_candidates:
-                    self.qr_candidates = qr_candidates
-                    self.qr_cycle_index = self.qr_cycle_index % len(self.qr_candidates)
-                if not self.qr_locked and (now >= self.qr_next_ts or not self.qr_cycle_lines):
-                    self._advance_qr_cycle()
-            else:
-                self.qr_candidates = []
-                if not self.qr_locked:
-                    self.qr_cycle_lines = []
+            qr_candidates = [] if self.show_activity else [row for row in rows if row.get("type") in ("node", "service")]
+            if not self.show_activity:
+                if qr_candidates:
+                    if qr_candidates != self.qr_candidates:
+                        self.qr_candidates = qr_candidates
+                        self.qr_cycle_index = self.qr_cycle_index % len(self.qr_candidates)
+                    if not self.qr_locked and (now >= self.qr_next_ts or not self.qr_cycle_lines):
+                        self._advance_qr_cycle()
+                else:
+                    self.qr_candidates = []
+                    if not self.qr_locked:
+                        self.qr_cycle_lines = []
 
-            dims = (curses.LINES, curses.COLS)
-            if self.qr_row_ref and dims != self._last_dims:
-                label, lines = self._qr_text_for_row(self.qr_row_ref, include_detail=False)
-                self._set_cycle_display(label, lines, lock=self.qr_locked, remember_row=self.qr_row_ref)
-            self._last_dims = dims
+                dims = (curses.LINES, curses.COLS)
+                if self.qr_row_ref and dims != self._last_dims:
+                    label, lines = self._qr_text_for_row(self.qr_row_ref, include_detail=False)
+                    self._set_cycle_display(label, lines, lock=self.qr_locked, remember_row=self.qr_row_ref)
+                self._last_dims = dims
 
             screen_row = 3
             width = max(0, curses.COLS - 1)
@@ -1371,7 +1372,7 @@ class UnifiedUI:
                     pass
                 screen_row += 1
 
-            if self.qr_cycle_lines:
+            if self.qr_cycle_lines and not self.show_activity:
                 mode = "locked" if self.qr_locked else "auto"
                 label_line = f"QR ({mode} every 10s): {self.qr_cycle_label}" if self.qr_cycle_label else f"QR ({mode})"
                 if screen_row < curses.LINES - 1:
@@ -1427,6 +1428,16 @@ class UnifiedUI:
 
     def _build_rows(self) -> List[dict]:
         rows: List[dict] = []
+        if self.show_activity:
+            rows.append({"type": "activity_header", "text": "Service Activity (s to toggle, ↑/↓ to scroll)", "selectable": False})
+            if self.activity:
+                for ts, source, kind, message in reversed(self.activity):
+                    line = f"[{ts}] {source} {kind}: {message}"
+                    rows.append({"type": "activity", "text": line, "selectable": False})
+            else:
+                rows.append({"type": "activity", "text": "(no recent activity)", "selectable": False})
+            return rows
+
         rows.append({"type": "section", "text": "Services", "selectable": False})
         if self.service_names:
             name = self.service_names[self.service_index % len(self.service_names)]
@@ -1435,16 +1446,6 @@ class UnifiedUI:
             rows.append({"type": "service", "id": name, "text": f"{name} {addr}", "selectable": True})
         else:
             rows.append({"type": "service", "id": "none", "text": "(no services yet)", "selectable": False})
-
-        if self.show_activity:
-            rows.append({"type": "separator", "text": "", "selectable": False})
-            rows.append({"type": "activity_header", "text": "Service Activity", "selectable": False})
-            if self.activity:
-                for ts, source, kind, message in reversed(self.activity):
-                    line = f"[{ts}] {source} {kind}: {message}"
-                    rows.append({"type": "activity", "text": line, "selectable": False})
-            else:
-                rows.append({"type": "activity", "text": "(no recent activity)", "selectable": False})
         return rows
 
     @staticmethod
