@@ -312,6 +312,33 @@ const graphDropEls = {
 const graphDropState = { snapshot: null, name: '', source: '' };
 let graphDragDepth = 0;
 
+async function runHealthCheck() {
+  const defaultRelay = (Net?.nkn?.addr || '').trim();
+  const relay = (prompt('Relay NKN address to check', defaultRelay) || defaultRelay || '').trim();
+  if (!relay) {
+    setBadge('Health check cancelled', false);
+    return;
+  }
+  setBadge(`Checking relay ${relay}…`);
+  try {
+    const resp = await Net.relayHealth(relay, 15000);
+    const iso = resp?.port_isolation ? 'on' : 'off';
+    log(`[relay.health] node=${resp?.node || '-'} addr=${resp?.addr || relay} isolation=${iso}`);
+    const services = Array.isArray(resp?.services) ? resp.services : [];
+    services.forEach((svc) => {
+      const name = svc?.name || 'service';
+      const port = svc?.port ? `:${svc.port}` : '';
+      const endpoint = (svc?.endpoint || '').replace(/^https?:\/\//, '');
+      const assigned = svc?.assigned_node ? ` assigned=${svc.assigned_node}` : '';
+      log(`  ${name}${port ? ' @ ' + port : ''} → ${endpoint || 'unknown'}${assigned}`);
+    });
+    if (!services.length) log('  (no services reported)');
+    setBadge('Health check complete');
+  } catch (err) {
+    setBadge(`Health check failed: ${err?.message || err}`, false);
+  }
+}
+
 function bindUI() {
   const toggle = qs('#transportToggle');
   if (toggle) {
@@ -319,6 +346,13 @@ function bindUI() {
     toggle.addEventListener('click', (e) => {
       e.preventDefault();
       setBadge('Hybrid transport: HTTP for local endpoints, NKN for relays');
+    });
+  }
+  const healthBtn = qs('#healthCheckBtn');
+  if (healthBtn) {
+    healthBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      runHealthCheck();
     });
   }
   if (CFG.transport !== 'nkn') {

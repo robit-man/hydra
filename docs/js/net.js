@@ -452,6 +452,15 @@ const Net = {
           this._handleUploadMissing(uid, msg);
           return;
         }
+        if (ev === 'relay.health' && id) {
+          const pending = this.nkn.pend.get(id);
+          if (pending) {
+            clearTimeout(pending.t);
+            this.nkn.pend.delete(id);
+            pending.res(msg);
+          }
+          return;
+        }
         if (ev === 'relay.response' && id) {
           const pending = this.nkn.pend.get(id);
           if (pending) {
@@ -640,6 +649,26 @@ const Net = {
       }
     );
     return new Blob(parts, { type: contentType });
+  },
+
+  async relayHealth(relay, timeout = 15000) {
+    const addr = (relay || '').trim();
+    if (!addr) throw new Error('No relay provided');
+    if (!this.nkn.client) this.ensureNkn();
+    const id = 'h-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.nkn.pend.delete(id);
+        reject(new Error('NKN health timeout'));
+      }, timeout);
+      this.nkn.pend.set(id, { res: resolve, rej: reject, t: timer });
+      this._sendNkn(addr, { event: 'relay.health', id }, { noReply: true, maxHoldingSeconds: 30 }, timeout)
+        .catch((err) => {
+          clearTimeout(timer);
+          this.nkn.pend.delete(id);
+          reject(err);
+        });
+    });
   }
 };
 

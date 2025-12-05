@@ -3914,6 +3914,65 @@ class RelayNode:
             }
             self.bridge.dm(src, info)
             return
+        if event in ("relay.health", "health"):
+            assign_map = self.assignment_lookup("__map__") if self.assignment_lookup else {}
+            targets_cfg = self.global_cfg.get("targets", {}) if isinstance(self.global_cfg, dict) else {}
+
+            def _assignment(entry):
+                if isinstance(entry, dict):
+                    return entry.get("node"), entry.get("addr")
+                if isinstance(entry, (list, tuple)) and entry:
+                    return entry[0], entry[1] if len(entry) > 1 else None
+                return None, None
+
+            def _port_of(url: str) -> Optional[int]:
+                try:
+                    parsed = urllib.parse.urlparse(url)
+                    port_val = parsed.port
+                    if port_val:
+                        return int(port_val)
+                    if parsed.scheme == "https":
+                        return 443
+                    if parsed.scheme == "http":
+                        return 80
+                except Exception:
+                    return None
+                return None
+
+            services_payload = []
+            for svc_name, info in SERVICE_TARGETS.items():
+                target_key = info.get("target") or svc_name
+                endpoint = (
+                    self.targets.get(target_key)
+                    or targets_cfg.get(target_key)
+                    or info.get("endpoint")
+                    or DEFAULT_TARGETS.get(target_key, "")
+                )
+                port = _port_of(endpoint) if endpoint else None
+                assigned = assign_map.get(svc_name) if isinstance(assign_map, dict) else None
+                assigned_node, assigned_addr = _assignment(assigned)
+                services_payload.append({
+                    "name": svc_name,
+                    "target": target_key,
+                    "aliases": info.get("aliases", []),
+                    "endpoint": endpoint,
+                    "port": port,
+                    "ports": sorted(dict.fromkeys(info.get("ports", []))),
+                    "assigned_node": assigned_node,
+                    "assigned_addr": assigned_addr,
+                    "this_node": self.node_id if svc_name == self.primary_service else None,
+                })
+
+            health = {
+                "event": "relay.health",
+                "ts": int(time.time() * 1000),
+                "node": self.node_id,
+                "addr": self.bridge.addr,
+                "port_isolation": self.ui.port_isolation_enabled,
+                "services": services_payload,
+            }
+            self.bridge.dm(src, health, DM_OPTS_SINGLE)
+            return
         try:
             if event == "asr.start":
                 req = req_from_asr_start(body)
