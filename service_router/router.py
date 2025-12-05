@@ -3795,7 +3795,8 @@ class RelayNode:
         if explicit_targets:
             self.targets = {k: v for k, v in explicit_targets.items() if v}
         else:
-            self.targets = global_cfg.get("targets", {}).copy()
+            # Share target map with global config so detected updates propagate
+            self.targets = global_cfg.setdefault("targets", {})
         http_cfg = global_cfg.get("http", {})
         self.workers_count = int(node_cfg.get("workers") or http_cfg.get("workers") or 4)
         self.max_body = int(node_cfg.get("max_body_b") or http_cfg.get("max_body_b") or (2 * 1024 * 1024))
@@ -5101,9 +5102,10 @@ class Router:
             kb = int(http_cfg.get("chunk_upload_b", 600 * 1024) // 1024)
             self.ui.set_chunk_upload_kb(kb)
 
-        # Local copy of target endpoints (defaults merged with config)
-        self.targets: Dict[str, str] = dict(DEFAULT_TARGETS)
-        self.targets.update(self.cfg.get("targets", {}))
+        # Shared target endpoints (defaults merged with config; kept shared so detections propagate)
+        self.targets: Dict[str, str] = self.cfg.setdefault("targets", {})
+        for k, v in DEFAULT_TARGETS.items():
+            self.targets.setdefault(k, v)
 
         self.watchdog = ServiceWatchdog(BASE_DIR)
         self.watchdog.ensure_sources(service_config=self.ui.service_config)
