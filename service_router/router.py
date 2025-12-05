@@ -1345,33 +1345,53 @@ class UnifiedUI:
 
             screen_row = 3
             width = max(0, curses.COLS - 1)
-            for row in rows:
-                if screen_row >= curses.LINES - 1:
-                    break
-                rtype = row.get("type")
-                if rtype == "separator":
+            if self.show_activity:
+                # Full-screen activity log, no QR
+                for row in rows:
+                    if row.get("type") == "activity_header":
+                        try:
+                            stdscr.addnstr(screen_row, 0, row.get("text", "")[:width], node_attr | curses.A_BOLD)
+                        except curses.error:
+                            pass
+                        screen_row += 1
+                        continue
+                    if row.get("type") != "activity":
+                        continue
+                    if screen_row >= curses.LINES - 1:
+                        break
+                    try:
+                        stdscr.addnstr(screen_row, 0, row.get("text", "")[:width], node_attr)
+                    except curses.error:
+                        pass
                     screen_row += 1
-                    continue
-                attr = node_attr if rtype in ("node", "service") else curses.A_NORMAL
-                if rtype == "header":
-                    attr = header_attr
-                if rtype == "section":
-                    attr = section_attr
-                if rtype in ("activity", "activity_header"):
-                    attr = node_attr
-                    if rtype == "activity_header":
-                        attr |= curses.A_BOLD
-                prefix = ""
-                if row.get("selectable"):
-                    prefix = "• " if (selected_row and row is selected_row) else "  "
-                text = prefix + row.get("text", "")
-                if selected_row and row is selected_row and row.get("selectable"):
-                    attr |= curses.A_REVERSE
-                try:
-                    stdscr.addnstr(screen_row, 0, text[:width], attr)
-                except curses.error:
-                    pass
-                screen_row += 1
+            else:
+                for row in rows:
+                    if screen_row >= curses.LINES - 1:
+                        break
+                    rtype = row.get("type")
+                    if rtype == "separator":
+                        screen_row += 1
+                        continue
+                    attr = node_attr if rtype in ("node", "service") else curses.A_NORMAL
+                    if rtype == "header":
+                        attr = header_attr
+                    if rtype == "section":
+                        attr = section_attr
+                    if rtype in ("activity", "activity_header"):
+                        attr = node_attr
+                        if rtype == "activity_header":
+                            attr |= curses.A_BOLD
+                    prefix = ""
+                    if row.get("selectable"):
+                        prefix = "• " if (selected_row and row is selected_row) else "  "
+                    text = prefix + row.get("text", "")
+                    if selected_row and row is selected_row and row.get("selectable"):
+                        attr |= curses.A_REVERSE
+                    try:
+                        stdscr.addnstr(screen_row, 0, text[:width], attr)
+                    except curses.error:
+                        pass
+                    screen_row += 1
 
             if self.qr_cycle_lines and not self.show_activity:
                 mode = "locked" if self.qr_locked else "auto"
