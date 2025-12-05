@@ -17,6 +17,7 @@ import codecs
 import contextlib
 import json
 import logging
+import math
 import os
 import queue
 import secrets
@@ -377,6 +378,7 @@ class ServiceWatchdog:
         self._terminal_template = self._detect_terminal()
         self._update_thread: Optional[threading.Thread] = None
         self._repo_thread: Optional[threading.Thread] = None
+        self._core_repo_block_reason: Optional[str] = None
         self._restart_pending: bool = False
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
@@ -505,7 +507,37 @@ class ServiceWatchdog:
         path.write_text(json.dumps(meta, indent=2))
 
     def _run_git(self, workdir: Path, args: List[str]) -> str:
-        return subprocess.check_output(["git", "-C", str(workdir), *args], text=True).strip()
+        proc = subprocess.run(
+            ["git", "-C", str(workdir), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, proc.args, output=proc.stdout, stderr=proc.stderr)
+        return proc.stdout.strip()
+
+    def _core_repo_blocker(self, repo_dir: Path) -> Optional[str]:
+        """
+        Return a reason string if the core repo should not be auto-pulled.
+        Avoids triggering git when locks/operations are in progress or when the
+        repo isn't writable (prevents noisy ORIG_HEAD.lock failures).
+        """
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return "not a git repository"
+        lock_names = ["index.lock", "HEAD.lock", "ORIG_HEAD.lock"]
+        for name in lock_names:
+            if (git_dir / name).exists():
+                return f"lock present ({name})"
+        busy_markers = ["rebase-apply", "rebase-merge", "MERGE_HEAD"]
+        for name in busy_markers:
+            if (git_dir / name).exists():
+                return f"repository busy ({name})"
+        # Ensure we can write to both the repo and .git metadata
+        if not os.access(repo_dir, os.W_OK) or not os.access(git_dir, os.W_OK):
+            return "repository not writable"
+        return None
 
     def _backup_repo(self, repo_dir: Path) -> Optional[Path]:
         try:
@@ -599,6 +631,14 @@ class ServiceWatchdog:
             try:
                 git_dir = repo_dir / '.git'
                 if git_dir.exists():
+                    blocker = self._core_repo_blocker(repo_dir)
+                    if blocker:
+                        if blocker != self._core_repo_block_reason:
+                            print(f"[watchdog] Skipping core repo pull: {blocker}")
+                        self._core_repo_block_reason = blocker
+                        self._global_stop.wait(interval)
+                        continue
+                    self._core_repo_block_reason = None
                     self._run_git(repo_dir, ["fetch", "--prune", "--quiet"])
                     try:
                         branch = self._run_git(repo_dir, ["rev-parse", "--abbrev-ref", "HEAD"])
@@ -616,6 +656,12 @@ class ServiceWatchdog:
                             backup = None
                             # restart the router to pick up changes
                             self._restart_router()
+                        except subprocess.CalledProcessError as exc:
+                            if backup:
+                                self._restore_repo(repo_dir, backup)
+                            detail = (exc.stderr or exc.output or "").strip()
+                            msg = detail if detail else str(exc)
+                            print(f"[watchdog] core repo pull failed: {msg}")
                         except Exception as exc:
                             if backup:
                                 self._restore_repo(repo_dir, backup)
@@ -1330,6 +1376,111 @@ class StatsTracker:
 
 
 # ──────────────────────────────────────────────────────────────
+# Animated Hydra System
+# ──────────────────────────────────────────────────────────────
+class HydraPolyp:
+    """Single polyp of the hydra with animated tentacles."""
+    def __init__(self, x: int, y: int, polyp_id: int = 0):
+        self.x = x
+        self.y = y
+        self.polyp_id = polyp_id
+        self.tentacle_count = 6
+        self.phase = (polyp_id * math.pi / 3) + (time.time() * 0.5)  # Offset phases
+        self.activity = 0.0  # 0.0 to 1.0
+        self.size = 1.0
+
+    def update(self, activity_level: float):
+        """Update animation state based on activity."""
+        self.activity = min(1.0, self.activity * 0.9 + activity_level * 0.1)  # Smooth decay
+        self.phase = (time.time() * 0.5) + (self.polyp_id * math.pi / 3)
+
+    def get_tentacle_positions(self) -> List[Tuple[int, int]]:
+        """Calculate animated tentacle tip positions."""
+        positions = []
+        wiggle = math.sin(self.phase) * (1 + self.activity)
+        for i in range(self.tentacle_count):
+            angle = (i / self.tentacle_count) * 2 * math.pi
+            length = 2 + self.activity
+            tx = int(self.x + math.cos(angle + wiggle * 0.3) * length)
+            ty = int(self.y + math.sin(angle + wiggle * 0.3) * length * 0.5)  # Squash Y
+            positions.append((tx, ty))
+        return positions
+
+class Hydra:
+    """Multi-polyp hydra organism that reacts to router activity."""
+    def __init__(self, base_x: int = 8, base_y: int = 20):
+        self.base_x = base_x
+        self.base_y = base_y
+        self.polyps = [HydraPolyp(base_x, base_y - 10, 0)]
+        self.stalk_segments = 10
+        self.activity_history = deque(maxlen=100)
+        self.last_activity_time = time.time()
+        self.division_threshold = 0.8  # Activity level to trigger polyp division
+        self.max_polyps = 3
+
+    def feed_activity(self, kind: str, intensity: float = 0.5):
+        """Feed router activity to the hydra."""
+        self.activity_history.append((time.time(), kind, intensity))
+        self.last_activity_time = time.time()
+
+        # Calculate current activity level
+        now = time.time()
+        recent = [i for t, k, i in self.activity_history if now - t < 2.0]
+        activity_level = sum(recent) / max(1, len(recent))
+
+        # Update all polyps
+        for polyp in self.polyps:
+            polyp.update(activity_level)
+
+        # Division: add polyp if sustained high activity
+        if activity_level > self.division_threshold and len(self.polyps) < self.max_polyps:
+            if len([i for t, k, i in self.activity_history if now - t < 5.0]) > 20:
+                self._divide_polyp()
+
+    def _divide_polyp(self):
+        """Bud a new polyp (biological division)."""
+        if len(self.polyps) >= self.max_polyps:
+            return
+        # Place new polyp offset from base
+        offset = len(self.polyps) * 2
+        new_polyp = HydraPolyp(self.base_x + offset, self.base_y - 10 + offset, len(self.polyps))
+        self.polyps.append(new_polyp)
+
+    def render(self, stdscr, y_offset: int = 5):
+        """Render the hydra to curses screen."""
+        if not curses:
+            return
+
+        try:
+            # Draw stalk from bottom up
+            for i in range(self.stalk_segments):
+                y = y_offset + self.stalk_segments - i
+                x = self.base_x + int(math.sin(time.time() + i * 0.3) * 1.5)
+                if 0 <= y < curses.LINES - 1 and 0 <= x < curses.COLS - 1:
+                    stdscr.addstr(y, x, "│", curses.color_pair(6))
+
+            # Draw each polyp
+            for polyp in self.polyps:
+                py = y_offset + (self.base_y - polyp.y)
+                px = polyp.x
+
+                # Draw body (pulsing size based on activity)
+                body_char = "●" if polyp.activity > 0.3 else "○"
+                if 0 <= py < curses.LINES - 1 and 0 <= px < curses.COLS - 1:
+                    color = curses.color_pair(7) if polyp.activity > 0.5 else curses.color_pair(6)
+                    stdscr.addstr(py, px, body_char, color | curses.A_BOLD)
+
+                # Draw tentacles
+                for tx, ty in polyp.get_tentacle_positions():
+                    ty_screen = y_offset + (self.base_y - ty)
+                    if 0 <= ty_screen < curses.LINES - 1 and 0 <= tx < curses.COLS - 1:
+                        stdscr.addstr(ty_screen, tx, "~", curses.color_pair(6))
+
+        except curses.error:
+            pass  # Ignore boundary errors
+
+
+# ──────────────────────────────────────────────────────────────
 # Enhanced Nested Menu UI
 # ──────────────────────────────────────────────────────────────
 class EnhancedUI:
@@ -1370,6 +1521,10 @@ class EnhancedUI:
         # Security settings
         self.port_isolation_enabled = True  # Default ON for security
         self._load_security_config()
+
+        # Animated Hydra
+        self.hydra = Hydra(base_x=8, base_y=20)
+        self.brutalist_mode = True  # Use brutalist UI layout
 
     def _load_service_config(self):
         """Load service enabled/disabled state from config."""
@@ -1476,6 +1631,10 @@ class EnhancedUI:
         source = target.get("name") if target else node_id
         self.activity.append((ts, source or node_id, kind, msg))
 
+        # Feed activity to hydra (intensity based on kind)
+        intensity = {"IN": 0.6, "OUT": 0.4, "ERR": 0.9}.get(kind, 0.3)
+        self.hydra.feed_activity(kind, intensity)
+
         # Track stats for requests
         if kind in ("IN", "OUT"):
             # Extract service from message
@@ -1541,7 +1700,8 @@ class EnhancedUI:
             curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Warning
             curses.init_pair(4, curses.COLOR_RED, -1)  # Error
             curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # Section
-            curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Selected
+            curses.init_pair(6, curses.COLOR_CYAN, -1)  # Hydra (idle)
+            curses.init_pair(7, curses.COLOR_YELLOW, -1)  # Hydra (active)
 
         while not self.stop.is_set():
             # Clear events queue
