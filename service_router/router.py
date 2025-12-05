@@ -105,37 +105,37 @@ SERVICE_TARGETS = {
     "whisper_asr": {
         "target": "asr",
         "aliases": ["whisper_asr", "asr", "whisper"],
-        "ports": [8126],
+        "ports": list(range(8126, 8136)),  # Port range 8126-8135 (allow fallback ports)
         "endpoint": "http://127.0.0.1:8126",
     },
     "piper_tts": {
         "target": "tts",
         "aliases": ["piper_tts", "tts", "piper"],
-        "ports": [8123],
+        "ports": list(range(8123, 8133)),  # Port range 8123-8132
         "endpoint": "http://127.0.0.1:8123",
     },
     "ollama_farm": {
         "target": "ollama",
         "aliases": ["ollama_farm", "ollama", "llm"],
-        "ports": [11434, 8080],
+        "ports": [11434, 8080] + list(range(11435, 11445)),  # Primary ports + fallback range
         "endpoint": "http://127.0.0.1:11434",
     },
     "mcp_server": {
         "target": "mcp",
         "aliases": ["mcp_server", "mcp", "context"],
-        "ports": [9003],
+        "ports": list(range(9003, 9013)),  # Port range 9003-9012
         "endpoint": "http://127.0.0.1:9003",
     },
     "web_scrape": {
         "target": "web_scrape",
         "aliases": ["web_scrape", "browser", "chrome", "scrape"],
-        "ports": [8130],
+        "ports": list(range(8130, 8140)),  # Port range 8130-8139
         "endpoint": "http://127.0.0.1:8130",
     },
     "depth_any": {
         "target": "depth_any",
         "aliases": ["depth_any", "depth", "pointcloud"],
-        "ports": [5000],
+        "ports": list(range(5000, 5010)),  # Port range 5000-5009 (matches find_available_port)
         "endpoint": "http://127.0.0.1:5000",
     },
 }
@@ -3394,6 +3394,61 @@ class RelayNode:
         except Exception:
             pass
 
+    # Port Detection -------------------------------------------
+    def _detect_service_port(self, service_name: str) -> Optional[int]:
+        """Detect actual port a service is running on by parsing its log file."""
+        log_file = LOGS_ROOT / f"{service_name}.log"
+        if not log_file.exists():
+            return None
+
+        try:
+            # Read last 100 lines of log file (most recent startup info)
+            with open(log_file, 'r') as f:
+                lines = f.readlines()[-100:]
+
+            # Look for common port announcement patterns
+            patterns = [
+                r'Running on .*:(\d+)',  # Flask: "Running on http://127.0.0.1:5000"
+                r'listening on .*:(\d+)',  # Generic: "listening on 0.0.0.0:8080"
+                r'Listening on port (\d+)',  # Generic: "Listening on port 8080"
+                r'Server.*port (\d+)',  # Generic: "Server started on port 8080"
+                r'Started.*:(\d+)',  # Generic: "Started on :8080"
+                r'http://[^:]+:(\d+)',  # URL pattern: "http://127.0.0.1:8080"
+            ]
+
+            for line in reversed(lines):  # Start from most recent
+                for pattern in patterns:
+                    match = re.search(pattern, line, re.IGNORECASE)
+                    if match:
+                        port = int(match.group(1))
+                        # Sanity check: port should be in reasonable range
+                        if 1024 <= port <= 65535:
+                            return port
+
+            return None
+        except Exception as e:
+            LOGGER.debug(f"Port detection failed for {service_name}: {e}")
+            return None
+
+    def _update_service_ports(self):
+        """Update SERVICE_TARGETS with detected ports from running services."""
+        for service_name in SERVICE_TARGETS.keys():
+            detected_port = self._detect_service_port(service_name)
+            if detected_port:
+                current_ports = SERVICE_TARGETS[service_name].get("ports", [])
+                if detected_port not in current_ports:
+                    # Port not in whitelist, add it
+                    SERVICE_TARGETS[service_name]["ports"].append(detected_port)
+                    LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+
+                # Update endpoint to show actual detected port
+                current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
+                if current_endpoint and f":{detected_port}" not in current_endpoint:
+                    # Update endpoint to reflect detected port
+                    base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
+                    SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
+                    LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
+
     # HTTP workers ---------------------------------------------
     def _validate_url_port(self, url: str, service: str = "") -> bool:
         """Validate URL port against known service endpoints (port isolation security)."""
@@ -4164,6 +4219,11 @@ class Router:
     def start(self):
         LOGGER.info("Starting services via watchdog")
         self.watchdog.start_all()
+
+        # Detect actual ports services are running on (after startup)
+        time.sleep(2)  # Give services time to write to logs
+        self._update_service_ports()
+
         for node in self.nodes:
             node.start()
         self.status_thread = threading.Thread(target=self._status_monitor, daemon=True)
@@ -4390,12 +4450,19 @@ class Router:
         self.ui.update_service_info(service, info)
 
     def _status_monitor(self):
+        port_detection_counter = 0
         while not self.stop.is_set():
             try:
                 snapshot = self.watchdog.get_snapshot()
                 for entry in snapshot:
                     self.latest_service_status[entry["name"]] = entry
                     self._publish_assignment(entry["name"])
+
+                # Update service ports every 30 seconds (5s * 6 iterations)
+                port_detection_counter += 1
+                if port_detection_counter >= 6:
+                    self._update_service_ports()
+                    port_detection_counter = 0
             except Exception as exc:
                 LOGGER.debug("Status monitor error: %s", exc)
             time.sleep(5)
