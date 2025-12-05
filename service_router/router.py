@@ -2617,26 +2617,56 @@ class RelayNode:
         req = body.get("req") or {}
         total = int(body.get("total") or body.get("total_chunks") or 0)
         ctype = body.get("content_type") or (req.get("headers") or {}).get("Content-Type") or ""
-        entry = {
-            "src": src,
-            "rid": rid,
-            "req": req,
-            "chunks": [None] * total if total > 0 else [],
-            "total": total,
-            "got": 0,
-            "ended": False,
-            "ctype": ctype,
-            "created": time.time(),
-        }
-        self.upload_sessions[uid] = entry
-        self._log_upload(rid, f"begin total={total}")
+        entry = self.upload_sessions.get(uid)
+        if entry:
+            # Merge begin into an existing session started implicitly from a chunk
+            if not entry.get("req"):
+                entry["req"] = req
+            if not entry.get("ctype"):
+                entry["ctype"] = ctype
+            if not entry.get("total") and total:
+                entry["total"] = total
+                entry["chunks"] = [None] * total
+            self._log_upload(rid, f"begin merge total={entry.get('total')}")
+        else:
+            entry = {
+                "src": src,
+                "rid": rid,
+                "req": req,
+                "chunks": [None] * total if total > 0 else [],
+                "total": total,
+                "got": 0,
+                "ended": False,
+                "ctype": ctype,
+                "created": time.time(),
+            }
+            self.upload_sessions[uid] = entry
+            self._log_upload(rid, f"begin total={total}")
 
     def _handle_upload_chunk(self, src: str, rid: str, body: dict) -> None:
         uid = body.get("upload_id") or rid
         entry = self.upload_sessions.get(uid)
         if not entry:
-            self._send_upload_error(src, rid, "unknown upload id", 404)
-            return
+            # If the chunk includes req (first chunk) recover by creating a session on the fly
+            req = body.get("req")
+            if not req:
+                self._send_upload_error(src, rid, "unknown upload id", 404)
+                return
+            total_chunks = int(body.get("total") or body.get("total_chunks") or 0)
+            ctype = body.get("content_type") or (req.get("headers") or {}).get("Content-Type") or ""
+            entry = {
+                "src": src,
+                "rid": rid,
+                "req": req,
+                "chunks": [None] * total_chunks if total_chunks > 0 else [],
+                "total": total_chunks,
+                "got": 0,
+                "ended": False,
+                "ctype": ctype,
+                "created": time.time(),
+            }
+            self.upload_sessions[uid] = entry
+            self._log_upload(rid, f"implicit begin from chunk total={total_chunks}")
         b64 = body.get("b64") or ""
         try:
             raw = base64.b64decode(str(b64), validate=False)

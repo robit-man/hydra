@@ -134,24 +134,34 @@ const Net = {
     if (typeof progressCb === 'function') {
       try { progressCb(0, total, 'begin'); } catch (_) { /* ignore */ }
     }
-    await sendMsg({
+    const beginPayload = {
       event: 'http.upload.begin',
       id: uploadId,
       upload_id: uploadId,
       req: { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' },
       total_chunks: total,
       content_type: 'application/json'
-    });
+    };
+    await sendMsg(beginPayload);
+    // Send a second begin as a safeguard in case the first DM is dropped
+    await this._sleep(10);
+    await sendMsg(beginPayload);
     let seq = 1;
     for (const chunk of chunks) {
-      await sendMsg({
+      const payload = {
         event: 'http.upload.chunk',
         id: uploadId,
         upload_id: uploadId,
         seq,
         total: total,
         b64: chunk
-      });
+      };
+      // Include req on first chunk so router can recover if begin was dropped
+      if (seq === 1) {
+        payload.req = { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' };
+        payload.content_type = 'application/json';
+      }
+      await sendMsg(payload);
       if (typeof progressCb === 'function') {
         try { progressCb(seq, total, 'chunk'); } catch (_) { /* ignore */ }
       }
