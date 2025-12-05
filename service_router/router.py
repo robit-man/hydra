@@ -2490,6 +2490,29 @@ class EnhancedUI:
 
     def _set_debug_scroll(self, tab: str, value: int) -> None:
         self.debug_scroll_offsets[tab] = max(0, value)
+    
+    def _short_label(self, label: str, max_label: int) -> str:
+        """
+        Compact long labels for the debug view.
+
+        - For NKN-style addresses like 'hydra.<40+ hex>', show 'hydra.xx…yy'
+          (first 2 and last 2 hex chars).
+        - For everything else, fall back to simple width-based truncation.
+        """
+        if len(label) <= max_label:
+            return label
+
+        try:
+            import re
+            m = re.match(r"^([a-zA-Z0-9_-]+)\.([0-9a-f]{8,})$", label)
+            if m:
+                prefix, hexpart = m.groups()
+                return f"{prefix}.{hexpart[:2]}…{hexpart[-2:]}"
+        except Exception:
+            pass
+
+        # Generic fallback: keep as much as fits
+        return label[: max_label - 1] + "…"
 
     def _render_debug_view(self, stdscr, h, w):
         """Render Debug/Activity Log view with directional flows and tabs."""
@@ -2560,8 +2583,8 @@ class EnhancedUI:
 
             # Compact source/target to fit on screen
             max_label = max(10, (w // 4))
-            src_short = src if len(src) <= max_label else src[: max_label - 1] + "…"
-            tgt_short = tgt if len(tgt) <= max_label else tgt[: max_label - 1] + "…"
+            src_short = self._short_label(src, max_label)
+            tgt_short = self._short_label(tgt, max_label)
 
             payload_space = max(10, w - len(ts) - len(src_short) - len(tgt_short) - 12)
             payload_short = payload if len(payload) <= payload_space else payload[: payload_space - 1] + "…"
@@ -4453,11 +4476,47 @@ class RelayNode:
                 self._process_request(session, src, rid, req)
             except Exception as e:
                 blocked = isinstance(e, ValueError) and "port isolation" in str(e).lower()
+
+                # Derive a useful target label & payload with host:port if possible
+                url = req.get("url") or ""
+                try:
+                    if not url:
+                        # Recompute resolved URL just for logging; ignore validation
+                        tmp_req = dict(req)
+                        tmp_req.setdefault("path", req.get("path") or "/")
+                        url = self._resolve_url(tmp_req)
+                except Exception:
+                    pass
+
+                target_label = self._flow_target_label(service_name, url or (req.get("path") or service_name or ""))
+
+                method = (req.get("method") or "GET").upper()
+                path_snippet = req.get("path") or "/"
+                try:
+                    parsed = urllib.parse.urlparse(url) if url else None
+                    hostport = parsed.netloc if parsed else ""
+                except Exception:
+                    hostport = ""
+
+                if hostport:
+                    loc = f"{hostport}{path_snippet}"
+                else:
+                    loc = path_snippet
+
                 if blocked:
-                    target_label = self._flow_target_label(service_name, req.get("url") or req.get("path") or service_name or "")
-                    method = (req.get("method") or "GET").upper()
-                    path_snippet = req.get("path") or "/"
-                    self._record_flow(src or "client", target_label, f"BLOCKED {method} {path_snippet}: {e}", service=service_name, channel=src, blocked=True)
+                    payload = f"BLOCKED {method} {loc}: {e}"
+                else:
+                    payload = f"ERROR {type(e).__name__} {method} {loc}: {e}"
+
+                self._record_flow(
+                    src or "client",
+                    target_label,
+                    payload,
+                    service=service_name,
+                    channel=src,
+                    blocked=blocked,
+                )
+
                 self.bridge.dm(src, {
                     "event": "relay.response",
                     "id": rid,
@@ -4471,6 +4530,7 @@ class RelayNode:
                 }, DM_OPTS_SINGLE)
                 self.ui.bump(self.node_id, "ERR", f"http {type(e).__name__}: {e}")
                 self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=0, start_ts=start_ts)
+
             finally:
                 self.jobs.task_done()
                 try:
@@ -4495,9 +4555,31 @@ class RelayNode:
         if service_name:
             svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
 
+        # Derive target label + host:port + path for logging
         target_label = self._flow_target_label(service_name, url)
-        path_snippet = urllib.parse.urlparse(url).path or "/"
-        self._record_flow(src or "client", target_label, f"EGRESS {method} {path_snippet} {rid}", service=service_name, channel=src)
+        try:
+            parsed = urllib.parse.urlparse(url)
+            path_snippet = parsed.path or "/"
+            port = parsed.port
+            if port is None:
+                port = 443 if parsed.scheme == "https" else 80
+            host_port = ""
+            if parsed.hostname:
+                host_port = f"{parsed.hostname}:{port}" if port else parsed.hostname
+            elif parsed.netloc:
+                host_port = parsed.netloc
+        except Exception:
+            path_snippet = "/"
+            host_port = ""
+
+        egress_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
+        self._record_flow(
+            src or "client",
+            target_label,
+            f"EGRESS {method} {egress_loc} {rid}",
+            service=service_name,
+            channel=src,
+        )
 
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
@@ -4514,14 +4596,18 @@ class RelayNode:
         json_chunks = req.get("json_chunks_b64") or []
         if body_chunks:
             try:
-                combined = b"".join(base64.b64decode(str(c), validate=False) for c in body_chunks if c is not None)
+                combined = b"".join(
+                    base64.b64decode(str(c), validate=False) for c in body_chunks if c is not None
+                )
             except Exception:
                 combined = b""
             params["data"] = combined
             body_bytes = len(combined)
         elif json_chunks:
             try:
-                combined = b"".join(base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None)
+                combined = b"".join(
+                    base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None
+                )
                 params["data"] = combined
                 headers.setdefault("Content-Type", "application/json")
             except Exception:
@@ -4542,14 +4628,18 @@ class RelayNode:
         elif "data" in req and req["data"] is not None:
             params["data"] = req["data"]
             try:
-                body_bytes = len(req["data"]) if isinstance(req["data"], (bytes, bytearray)) else len(str(req["data"]).encode("utf-8"))
+                body_bytes = (
+                    len(req["data"])
+                    if isinstance(req["data"], (bytes, bytearray))
+                    else len(str(req["data"]).encode("utf-8"))
+                )
             except Exception:
                 body_bytes = 0
 
         realigned = False  # Ensure we only realign/retry once per request
 
         def _retry_after_realign(exc: Exception, stream: bool = False) -> requests.Response:
-            nonlocal url, target_label, path_snippet, realigned
+            nonlocal url, target_label, path_snippet, host_port, realigned
 
             # Only trigger on connection-type issues, once
             if realigned:
@@ -4566,7 +4656,20 @@ class RelayNode:
             # Re-resolve against updated self.targets (includes detection updates)
             url = self._resolve_url(req)
             target_label = self._flow_target_label(service_name, url)
-            path_snippet = urllib.parse.urlparse(url).path or "/"
+            try:
+                parsed2 = urllib.parse.urlparse(url)
+                path_snippet = parsed2.path or "/"
+                port2 = parsed2.port
+                if port2 is None:
+                    port2 = 443 if parsed2.scheme == "https" else 80
+                host_port = ""
+                if parsed2.hostname:
+                    host_port = f"{parsed2.hostname}:{port2}" if port2 else parsed2.hostname
+                elif parsed2.netloc:
+                    host_port = parsed2.netloc
+            except Exception:
+                path_snippet = "/"
+                host_port = ""
 
             if stream:
                 return self._http_request_with_retry(session, method, url, stream=True, **params)
@@ -4583,17 +4686,32 @@ class RelayNode:
             if resp.status_code == 429:
                 self._register_rate_limit_hit()
                 self._send_simple_response(src, rid, resp, req)
-                self._record_usage_stats(service_name, src, bytes_in=body_bytes,
-                                        bytes_out=len(resp.content or b""), start_ts=start_ts)
+                self._record_usage_stats(
+                    service_name,
+                    src,
+                    bytes_in=body_bytes,
+                    bytes_out=len(resp.content or b""),
+                    start_ts=start_ts,
+                )
                 return
 
             self._reset_rate_limit()
-            stream_mode = self._infer_stream_mode(stream_mode, resp)
-            bytes_out = self._handle_stream(src, rid, resp, stream_mode, service_name, body_bytes, start_ts)
-            self._record_flow(target_label, src or "client",
-                            f"STREAM {resp.status_code} {method} {path_snippet} {rid}",
-                            service=service_name, channel=src, direction="←")
-            self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
+            stream_mode_resolved = self._infer_stream_mode(stream_mode, resp)
+            bytes_out = self._handle_stream(
+                src, rid, resp, stream_mode_resolved, service_name, body_bytes, start_ts
+            )
+            stream_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
+            self._record_flow(
+                target_label,
+                src or "client",
+                f"STREAM {resp.status_code} {method} {stream_loc} {rid}",
+                service=service_name,
+                channel=src,
+                direction="←",
+            )
+            self._record_usage_stats(
+                service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts
+            )
             return
 
         # --- non-streaming path ---
@@ -4604,10 +4722,19 @@ class RelayNode:
 
         self._handle_response_status(resp.status_code)
         bytes_out = self._send_simple_response(src, rid, resp, req)
-        self._record_flow(target_label, src or "client",
-                        f"RESP {resp.status_code} {method} {path_snippet} {rid}",
-                        service=service_name, channel=src, direction="←")
-        self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
+        resp_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
+        self._record_flow(
+            target_label,
+            src or "client",
+            f"RESP {resp.status_code} {method} {resp_loc} {rid}",
+            service=service_name,
+            channel=src,
+            direction="←",
+        )
+        self._record_usage_stats(
+            service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts
+        )
+
 
     def _handle_response_status(self, status_code: int) -> None:
         if status_code == 429:
