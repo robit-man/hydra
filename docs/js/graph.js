@@ -535,8 +535,11 @@ function refreshNodeResolution(force = false) {
     root.querySelectorAll('canvas').forEach((cv) => {
       // getBoundingClientRect() already includes CSS transforms (zoom)
       const r = cv.getBoundingClientRect();
-      const targetW = Math.max(1, Math.round(r.width * dpr));
-      const targetH = Math.max(1, Math.round(r.height * dpr));
+      // Undo workspace scale so internal render size stays stable when zooming
+      const logicalW = r.width / (scale || 1);
+      const logicalH = r.height / (scale || 1);
+      const targetW = Math.max(1, Math.round(logicalW * dpr));
+      const targetH = Math.max(1, Math.round(logicalH * dpr));
 
       if (force || cv.width !== targetW || cv.height !== targetH) {
         cv.width = targetW;

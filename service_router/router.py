@@ -1552,16 +1552,23 @@ class UnifiedUI:
         elif rtype == "service":
             service_id = row.get("id")
             info = self.services.get(service_id, {})
-            raw_addr = (info.get("assigned_addr") or "").strip()
-            hex_part = raw_addr.split(".")[-1] if raw_addr and "." in raw_addr else raw_addr
-            base = self._clean_identifier(service_id)
-            addr = f"{base}.{hex_part}" if hex_part else base
-            label = f"Service {service_id} ({addr or '—'})"
+            qr_addr = (info.get("assigned_addr") or "").strip()
+            # display-friendly label (trim relay suffix) but QR must use real addr
+            display_addr = qr_addr
+            try:
+                base = self._clean_identifier(service_id)
+                hex_part = qr_addr.split(".")[-1] if qr_addr and "." in qr_addr else qr_addr
+                if base and hex_part:
+                    display_addr = f"{base}.{hex_part}"
+            except Exception:
+                display_addr = qr_addr
+            label = f"Service {service_id} ({display_addr or '—'})"
+            addr = qr_addr
             if include_detail:
                 detail = (
                     f"Service: {service_id}\n"
                     f"Assigned node: {info.get('assigned_node','—')}\n"
-                    f"Address: {addr or '—'}\n"
+                    f"Address: {qr_addr or '—'}\n"
                     f"Status: {info.get('status','?')}"
                 )
                 detail_lines = detail.splitlines()

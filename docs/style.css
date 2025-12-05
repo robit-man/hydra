@@ -3459,10 +3459,6 @@ audio {
 [data-pointcloud-viewer],
 [data-face-viewer] {
   position: relative;
-  width: calc(100% * var(--graph-scale, 1));
-  height: calc(100% * var(--graph-scale, 1));
-  transform-origin: top left;
-  transform: scale(calc(1 / var(--graph-scale, 1)));
 }
 
 [data-pointcloud-viewer] canvas,
