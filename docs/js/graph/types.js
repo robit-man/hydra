@@ -487,6 +487,7 @@ const GraphTypes = {
       { key: 'alignToInputScale', label: 'Align to Input Scale', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'includeConfidence', label: 'Include Confidence', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'applyConfidenceFilter', label: 'Apply Confidence Filter', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'pointSize', label: 'Point Size', type: 'number', def: 0.05, min: 0.001, max: 1, step: 0.01 },
       { key: 'processResMethod', label: 'Process Res Method', type: 'select', options: ['upper_bound_resize', 'upper_bound_crop', 'lower_bound_resize', 'lower_bound_crop'], def: 'upper_bound_resize' },
       { key: 'inferGs', label: 'Infer GS', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'confThreshPercentile', label: 'Confidence Percentile', type: 'number', def: 40, min: 0, max: 100, step: 1 },

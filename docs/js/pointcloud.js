@@ -621,12 +621,15 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   // ============================================================================
 
   function createSectorGrid(distance = 10, center = new THREE.Vector3()) {
+    // Match the reference: tiny line bundles with per-vertex alpha
     const gridDistance = distance;
-    const lineLength = 1;
+    const lineLength = 0.4;
     const span = gridDistance * 2 + 1;
     const totalVerts = span * span * span * 3 * 2; // 3 axes, 2 verts each
     const positions = new Float32Array(totalVerts * 3);
+    const alphas = new Float32Array(totalVerts);
     let p = 0;
+    let a = 0;
     const half = lineLength / 2;
     for (let x = -gridDistance; x <= gridDistance; x++) {
       for (let y = -gridDistance; y <= gridDistance; y++) {
@@ -634,24 +637,49 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
           // X axis segment
           positions[p++] = x - half; positions[p++] = y; positions[p++] = z;
           positions[p++] = x + half; positions[p++] = y; positions[p++] = z;
+          alphas[a++] = 1; alphas[a++] = 1;
+
           // Y axis segment
           positions[p++] = x; positions[p++] = y - half; positions[p++] = z;
           positions[p++] = x; positions[p++] = y + half; positions[p++] = z;
+          alphas[a++] = 1; alphas[a++] = 1;
+
           // Z axis segment
           positions[p++] = x; positions[p++] = y; positions[p++] = z - half;
           positions[p++] = x; positions[p++] = y; positions[p++] = z + half;
+          alphas[a++] = 1; alphas[a++] = 1;
         }
       }
     }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
     geometry.computeBoundingSphere();
 
-    const material = new THREE.LineBasicMaterial({
-      color: 0x444444,
-      opacity: 0.25,
-      transparent: true
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      uniforms: {
+        uColor: { value: new THREE.Color(0x666666) },
+        uOpacity: { value: 0.35 }
+      },
+      vertexShader: `
+        attribute float alpha;
+        varying float vAlpha;
+        void main() {
+          vAlpha = alpha;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        varying float vAlpha;
+        void main() {
+          gl_FragColor = vec4(uColor, uOpacity * vAlpha);
+        }
+      `
     });
 
     const grid = new THREE.LineSegments(geometry, material);
@@ -680,6 +708,20 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     makeAxis(new THREE.Vector3(0, 1, 0), 0x00ff00);
     makeAxis(new THREE.Vector3(0, 0, 1), 0x0000ff);
     return group;
+  }
+
+  function createGroundPlane(size = 400, color = 0x444444) {
+    const planeGeom = new THREE.PlaneGeometry(size, size, 1, 1);
+    const planeMat = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.12,
+      side: THREE.DoubleSide
+    });
+    const plane = new THREE.Mesh(planeGeom, planeMat);
+    plane.rotation.x = -Math.PI / 2;
+    plane.position.y = -0.01;
+    return plane;
   }
 
   function initViewer(nodeId, container) {
@@ -737,6 +779,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const grid = createSectorGrid(gridDistance);
     scene.add(grid);
 
+    // Ground plane
+    const ground = createGroundPlane(gridDistance * 40);
+    scene.add(ground);
+
     // Store viewer state
     const viewerState = {
       scene,
@@ -750,6 +796,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       currentMode: 'orbit',
       points: null,
       grid,
+      ground,
       animationId: null,
       container,
       clock: new THREE.Clock()
@@ -781,6 +828,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       viewerState.scene.remove(viewerState.grid);
       viewerState.grid.geometry.dispose();
       viewerState.grid.material.dispose();
+    }
+    if (viewerState.ground) {
+      viewerState.scene.remove(viewerState.ground);
+      viewerState.ground.geometry.dispose();
+      viewerState.ground.material.dispose();
     }
 
     if (viewerState.renderer) {
@@ -814,6 +866,9 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const viewerState = VIEWER_STATE.get(nodeId);
     if (!viewerState || !pointcloudData) return;
 
+    const cfg = getConfig(nodeId);
+    const pointSize = Number(cfg.pointSize) || 0.05;
+
     // Remove existing points
     if (viewerState.points) {
       viewerState.scene.remove(viewerState.points);
@@ -841,7 +896,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
 
     // Create material
     const material = new THREE.PointsMaterial({
-      size: 0.05,
+      size: pointSize,
       vertexColors: colors && colors.length > 0,
       sizeAttenuation: true
     });
