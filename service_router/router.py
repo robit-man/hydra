@@ -3945,6 +3945,24 @@ class RelayNode:
         except Exception:
             pass
 
+    def _estimate_body_bytes(self, req: dict) -> int:
+        """Best-effort estimate of request body size for stats."""
+        try:
+            if "body_b64" in req and req["body_b64"] is not None:
+                return len(base64.b64decode(str(req["body_b64"]), validate=False))
+            if "data" in req and req["data"] is not None:
+                val = req["data"]
+                return len(val) if isinstance(val, (bytes, bytearray)) else len(str(val).encode("utf-8"))
+            if "json" in req and req["json"] is not None:
+                return len(json.dumps(req["json"]).encode("utf-8"))
+            if req.get("body_chunks_b64"):
+                return sum(len(base64.b64decode(str(c), validate=False)) for c in req.get("body_chunks_b64") if c is not None)
+            if req.get("json_chunks_b64"):
+                return sum(len(base64.b64decode(str(c), validate=False)) for c in req.get("json_chunks_b64") if c is not None)
+        except Exception:
+            return 0
+        return 0
+
     def _check_assignment(self, service_name: Optional[str], src: str, rid: str) -> bool:
         if not service_name:
             return True
@@ -4058,6 +4076,9 @@ class RelayNode:
             src = job.get("src")
             rid = job.get("id")
             req = job.get("req") or {}
+            service_name = self._canonical_service(req.get("service") or req.get("target")) or self.primary_service
+            body_bytes = self._estimate_body_bytes(req)
+            start_ts = time.time()
             try:
                 self._process_request(session, src, rid, req)
             except Exception as e:
@@ -4073,6 +4094,7 @@ class RelayNode:
                     "error": f"{type(e).__name__}: {e}",
                 }, DM_OPTS_SINGLE)
                 self.ui.bump(self.node_id, "ERR", f"http {type(e).__name__}: {e}")
+                self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=0, start_ts=start_ts)
             finally:
                 self.jobs.task_done()
                 try:
@@ -4092,7 +4114,7 @@ class RelayNode:
         if req.get("insecure_tls") in (True, "1", "true", "on"):
             verify = False
 
-        service_name = self._canonical_service(req.get("service") or req.get("target"))
+        service_name = self._canonical_service(req.get("service") or req.get("target")) or self.primary_service
         svc_def = None
         if service_name:
             svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
