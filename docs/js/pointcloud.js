@@ -54,7 +54,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         pollingInterval: null,
         receivedChunks: new Map(),
         floorSelectionActive: false,
-        floorPoints: []
+        floorPoints: [],
+        autoLoadStarted: false,
+        modelLoading: false,
+        modelLoadPromise: null
       });
     }
     return STATE.get(key);
@@ -63,6 +66,48 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   function getConfig(nodeId) {
     const rec = NodeStore.ensure(nodeId, 'Pointcloud');
     return rec?.config || {};
+  }
+
+  function updateStatus(nodeId, text, tone = 'muted') {
+    const el = document.querySelector(`.pointcloud-status[data-pointcloud-status="${nodeId}"]`);
+    if (!el) return;
+    el.textContent = text;
+    el.dataset.state = tone;
+    if (tone === 'ok') el.style.color = '#9ef1c2';
+    else if (tone === 'pending') el.style.color = '#ffd479';
+    else if (tone === 'err') el.style.color = '#ff9b9b';
+    else el.style.color = '#ccc';
+  }
+
+  async function maybeAutoLoadModel(nodeId, models) {
+    const state = ensureState(nodeId);
+    if (!state || state.modelReady) return;
+    const cfg = getConfig(nodeId);
+    if (String(cfg.autoLoadModel ?? 'true') === 'false') return;
+    if (state.autoLoadStarted) return;
+    state.autoLoadStarted = true;
+    const list = Array.isArray(models) ? models : state.availableModels;
+    if (!list || !list.length) {
+      state.autoLoadStarted = false;
+      return;
+    }
+    const desired = cfg.defaultModel
+      || list.find((m) => m.current)?.id
+      || list.find((m) => m.downloaded)?.id
+      || list[0]?.id;
+    if (!desired) {
+      state.autoLoadStarted = false;
+      return;
+    }
+    try {
+      updateStatus(nodeId, `Loading model ${desired}…`, 'pending');
+      const ok = await loadModel(nodeId, desired);
+      if (!ok) {
+        updateStatus(nodeId, `Model ${desired} failed`, 'err');
+      }
+    } finally {
+      state.autoLoadStarted = false;
+    }
   }
 
   // ============================================================================
@@ -87,12 +132,20 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       const current = state.availableModels.find(m => m.current);
       if (current) {
         state.currentModel = current.id;
-        state.modelReady = current.downloaded;
+        state.modelReady = current.status === 'ready';
+        updateStatus(nodeId, `Model: ${current.id} ${state.modelReady ? '✓' : '(not loaded)'}`, state.modelReady ? 'ok' : 'pending');
+      } else if (state.availableModels.length) {
+        updateStatus(nodeId, `Models found (${state.availableModels.length})`, 'muted');
+      } else {
+        updateStatus(nodeId, 'No models available', 'err');
       }
+
+      maybeAutoLoadModel(nodeId, state.availableModels).catch(() => {});
 
       return state.availableModels;
     } catch (err) {
       if (setBadge) setBadge(`Models fetch failed: ${err.message}`, false);
+      updateStatus(nodeId, 'Model list failed', 'err');
       return [];
     }
   }
@@ -100,41 +153,76 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   async function loadModel(nodeId, modelId) {
     const state = ensureState(nodeId);
     if (!state) return false;
+    if (!modelId) return false;
+    if (state.modelLoading && state.currentModel === modelId && state.modelLoadPromise) {
+      return state.modelLoadPromise;
+    }
 
     const cfg = getConfig(nodeId);
     const baseUrl = cfg.base || 'http://127.0.0.1:5000';
 
-    try {
-      const selectResponse = await fetch(`${baseUrl}/api/models/select`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: modelId })
-      });
+    const doLoad = async () => {
+      state.modelLoading = true;
+      state.modelReady = false;
+      try {
+        updateStatus(nodeId, `Selecting ${modelId}…`, 'pending');
+        const selectResponse = await fetch(`${baseUrl}/api/models/select`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_id: modelId })
+        });
 
-      if (!selectResponse.ok) throw new Error(`Select failed: ${selectResponse.status}`);
+        if (!selectResponse.ok) throw new Error(`Select failed: ${selectResponse.status}`);
 
-      const loadResponse = await fetch(`${baseUrl}/api/load_model`, {
-        method: 'POST'
-      });
+        state.currentModel = modelId;
+        updateStatus(nodeId, `Loading ${modelId}…`, 'pending');
+        const loadResponse = await fetch(`${baseUrl}/api/load_model`, {
+          method: 'POST'
+        });
 
-      if (!loadResponse.ok) throw new Error(`Load failed: ${loadResponse.status}`);
+        if (!loadResponse.ok) {
+          let message = '';
+          try {
+            const j = await loadResponse.json();
+            message = j?.message || j?.error || '';
+          } catch (_) { /* ignore */ }
+          if (loadResponse.status === 400 && /already loading/i.test(message)) {
+            const ready = await pollModelStatus(nodeId);
+            if (ready) {
+              state.currentModel = modelId;
+              updateStatus(nodeId, `Model ready: ${modelId}`, 'ok');
+              return true;
+            }
+          }
+          throw new Error(message || `Load failed (${loadResponse.status})`);
+        }
 
-      state.currentModel = modelId;
-      await pollModelStatus(nodeId);
+        const ready = await pollModelStatus(nodeId);
+        if (!ready) throw new Error('Model did not become ready');
+        updateStatus(nodeId, `Model ready: ${modelId}`, 'ok');
 
-      return true;
-    } catch (err) {
-      if (setBadge) setBadge(`Model load failed: ${err.message}`, false);
-      return false;
-    }
+        return true;
+      } catch (err) {
+        if (setBadge) setBadge(`Model load failed: ${err.message}`, false);
+        updateStatus(nodeId, `Model failed: ${modelId}`, 'err');
+        state.modelReady = false;
+        return false;
+      } finally {
+        state.modelLoading = false;
+        state.modelLoadPromise = null;
+      }
+    };
+
+    state.modelLoadPromise = doLoad();
+    return state.modelLoadPromise;
   }
 
-  async function pollModelStatus(nodeId) {
+  async function pollModelStatus(nodeId, { once = false } = {}) {
     const state = ensureState(nodeId);
-    if (!state) return;
+    if (!state) return false;
 
     const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const baseUrl = (cfg.base || 'http://127.0.0.1:5000').replace(/\/+$/, '');
 
     return new Promise((resolve) => {
       const checkStatus = async () => {
@@ -146,25 +234,58 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
           }
 
           const data = await response.json();
-
-          if (data.status === 'ready') {
+          const status = data.status;
+          const progress = data.progress || 0;
+          if (status === 'ready') {
             state.modelReady = true;
-            if (setBadge) setBadge('Model ready', true);
+            state.currentModel = data.model || state.currentModel;
+            updateStatus(nodeId, `Model ready: ${state.currentModel || 'loaded'}`, 'ok');
             resolve(true);
-          } else if (data.status === 'loading') {
-            if (setBadge) setBadge(`Loading model... ${data.progress}%`, true);
-            setTimeout(checkStatus, 1000);
-          } else {
-            state.modelReady = false;
-            resolve(false);
+            return;
           }
+          if (status === 'loading') {
+            state.modelReady = false;
+            updateStatus(nodeId, `Loading model… ${progress}%`, 'pending');
+            if (once) return resolve(false);
+            return setTimeout(checkStatus, 1000);
+          }
+          state.modelReady = false;
+          updateStatus(nodeId, 'Model not loaded', 'err');
+          resolve(false);
         } catch (err) {
           resolve(false);
         }
       };
-
       checkStatus();
     });
+  }
+
+  async function ensureModelReady(nodeId) {
+    const state = ensureState(nodeId);
+    if (!state) return false;
+    const ready = await pollModelStatus(nodeId, { once: true });
+    if (ready) return true;
+    const statusCheck = await pollModelStatus(nodeId, { once: true });
+    if (statusCheck) return true;
+    if (state.currentModel) {
+      const loaded = await loadModel(nodeId, state.currentModel);
+      if (loaded) return true;
+    } else {
+      const models = await fetchModels(nodeId);
+      const pick = models?.[0]?.id;
+      if (pick) {
+        const loaded = await loadModel(nodeId, pick);
+        if (loaded) return true;
+      }
+    }
+    // If still not ready, try polling for a short period
+    const maxAttempts = 20;
+    for (let i = 0; i < maxAttempts; i++) {
+      const ok = await pollModelStatus(nodeId, { once: true });
+      if (ok) return true;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return false;
   }
 
   async function processImage(nodeId, imageData) {
@@ -172,7 +293,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     if (!state) return null;
 
     const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const baseUrlRaw = cfg.base || 'http://127.0.0.1:5000';
+    const baseUrl = (baseUrlRaw || '').replace(/\/+$/, '');
+    const apiKey = cfg.api || '';
+    // Force direct HTTP for uploads (NKN relay not supported for multipart here)
 
     if (state.processing) {
       if (setBadge) setBadge('Already processing', false);
@@ -180,68 +304,113 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     }
 
     if (!state.modelReady) {
-      if (setBadge) setBadge('Model not loaded', false);
-      return null;
+      const cfg = getConfig(nodeId);
+      if (String(cfg.autoLoadModel ?? 'true') !== 'false') {
+        if (!state.availableModels.length) await fetchModels(nodeId);
+        await maybeAutoLoadModel(nodeId);
+        if (!state.modelReady) await ensureModelReady(nodeId);
+      }
+      if (!state.modelReady) {
+        if (setBadge) setBadge('Model not loaded', false);
+        updateStatus(nodeId, 'Model not loaded', 'err');
+        return null;
+      }
     }
 
     try {
       state.processing = true;
+      updateStatus(nodeId, 'Processing image…', 'pending');
 
-      let b64Data = imageData;
-      if (typeof imageData === 'string' && imageData.startsWith('data:')) {
-        const idx = imageData.indexOf(',');
-        if (idx >= 0) {
-          b64Data = imageData.slice(idx + 1);
+      const normalizeImage = async (val, mimeHint = 'image/png') => {
+        if (val instanceof Blob) return val;
+        if (val instanceof ArrayBuffer) return new Blob([val], { type: 'image/png' });
+        if (typeof val === 'string') {
+          if (val.startsWith('data:')) {
+            return await (await fetch(val)).blob();
+          }
+          try {
+            const byteString = atob(val);
+            const bytes = new Uint8Array(byteString.length);
+            for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i);
+            return new Blob([bytes], { type: mimeHint || 'image/png' });
+          } catch (_) {
+            return null;
+          }
         }
-      }
+        if (val && typeof val === 'object') {
+          if (val.dataUrl) return await normalizeImage(val.dataUrl, val.mime || mimeHint);
+          if (val.b64 || val.image || val.data) return await normalizeImage(val.b64 || val.image || val.data, val.mime || mimeHint);
+          if (val.file instanceof Blob) return val.file;
+        }
+        return null;
+      };
 
-      const byteString = atob(b64Data);
-      const bytes = new Uint8Array(byteString.length);
-      for (let i = 0; i < byteString.length; i++) {
-        bytes[i] = byteString.charCodeAt(i);
+      const mimeGuess = (imageData && typeof imageData === 'object' && imageData.mime) ? imageData.mime : 'image/png';
+      const blob = await normalizeImage(imageData, mimeGuess);
+      if (!blob) {
+        updateStatus(nodeId, 'Invalid image data', 'err');
+        state.processing = false;
+        return null;
       }
-      const blob = new Blob([bytes], { type: 'image/png' });
 
       const formData = new FormData();
-      formData.append('file', blob, 'image.png');
+      const filename = imageData?.name || 'image.png';
+      const mime = (typeof imageData === 'object' && imageData?.type) ? imageData.type : (mimeGuess || 'image/png');
+      formData.append('file', blob, filename);
 
       if (cfg.resolution) formData.append('resolution', cfg.resolution);
       if (cfg.maxPoints) formData.append('max_points', cfg.maxPoints);
       if (cfg.alignToInputScale) formData.append('align_to_input_ext_scale', cfg.alignToInputScale);
       if (cfg.includeConfidence) formData.append('include_confidence', cfg.includeConfidence);
       if (cfg.applyConfidenceFilter) formData.append('apply_confidence_filter', cfg.applyConfidenceFilter);
+      formData.append('process_res_method', cfg.processResMethod || 'upper_bound_resize');
+      formData.append('infer_gs', cfg.inferGs ?? 'false');
+      formData.append('conf_thresh_percentile', cfg.confThreshPercentile ?? 40);
+      formData.append('show_cameras', cfg.showCameras ?? 'true');
+      formData.append('feat_vis_fps', cfg.featVisFps ?? 15);
 
       const response = await fetch(`${baseUrl}/api/process`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: apiKey ? { Authorization: apiKey } : undefined
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        let reason = `HTTP ${response.status}`;
+        try {
+          const errJson = await response.json();
+          reason = errJson?.error || errJson?.message || reason;
+        } catch (_) {
+          try { reason = await response.text(); } catch (_) { /* ignore */ }
+        }
+        throw new Error(reason);
       }
 
       const result = await response.json();
 
-      if (result.status === 'completed' && result.pointcloud) {
-        state.currentPointcloud = result.pointcloud;
-        state.processing = false;
-        updatePointcloudViewer(nodeId, result.pointcloud);
-        return result.pointcloud;
+      const directPc = result.pointcloud;
+      if (result.status === 'completed' && directPc) {
+        state.currentPointcloud = directPc;
+        updatePointcloudViewer(nodeId, directPc);
+        updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
+        return directPc;
       } else if (result.job_id) {
         state.lastJobId = result.job_id;
         const pointcloud = await pollJobStatus(nodeId, result.job_id);
-        state.processing = false;
         if (pointcloud) {
           updatePointcloudViewer(nodeId, pointcloud);
+          updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
         }
         return pointcloud;
       } else {
         throw new Error('Unexpected response format');
       }
     } catch (err) {
-      state.processing = false;
       if (setBadge) setBadge(`Processing failed: ${err.message}`, false);
+      updateStatus(nodeId, 'Processing failed', 'err');
       return null;
+    } finally {
+      state.processing = false;
     }
   }
 
@@ -263,15 +432,19 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
 
           const data = await response.json();
 
-          if (data.status === 'completed' && data.result?.pointcloud) {
-            state.currentPointcloud = data.result.pointcloud;
+          const pointcloud = data.pointcloud || data.result?.pointcloud;
+          if (data.status === 'completed' && pointcloud) {
+            state.currentPointcloud = pointcloud;
             if (setBadge) setBadge('Processing complete', true);
-            resolve(data.result.pointcloud);
+            updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
+            resolve(pointcloud);
           } else if (data.status === 'processing') {
             if (setBadge) setBadge(`Processing... ${data.progress || 0}%`, true);
+            updateStatus(nodeId, `Processing… ${data.progress || 0}%`, 'pending');
             setTimeout(checkJob, 500);
-          } else if (data.status === 'failed') {
+          } else if (data.status === 'failed' || data.status === 'error') {
             if (setBadge) setBadge(`Processing failed: ${data.error || 'Unknown error'}`, false);
+            updateStatus(nodeId, 'Processing failed', 'err');
             resolve(null);
           } else {
             setTimeout(checkJob, 500);
@@ -448,46 +621,65 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   // ============================================================================
 
   function createSectorGrid(distance = 10, center = new THREE.Vector3()) {
-    const geometry = new THREE.BufferGeometry();
-    const positions = [];
     const gridDistance = distance;
+    const lineLength = 1;
     const span = gridDistance * 2 + 1;
-
-    // Create sector-based 3D grid lines
+    const totalVerts = span * span * span * 3 * 2; // 3 axes, 2 verts each
+    const positions = new Float32Array(totalVerts * 3);
+    let p = 0;
+    const half = lineLength / 2;
     for (let x = -gridDistance; x <= gridDistance; x++) {
       for (let y = -gridDistance; y <= gridDistance; y++) {
         for (let z = -gridDistance; z <= gridDistance; z++) {
-          const count = (x === 0 ? 1 : 0) + (y === 0 ? 1 : 0) + (z === 0 ? 1 : 0);
-          if (count < 2) continue;
-
-          const px = x * 10;
-          const py = y * 10;
-          const pz = z * 10;
-
-          if (x === 0 && y === 0) {
-            positions.push(px, py, pz - 10, px, py, pz + 10);
-          }
-          if (x === 0 && z === 0) {
-            positions.push(px, py - 10, pz, px, py + 10, pz);
-          }
-          if (y === 0 && z === 0) {
-            positions.push(px - 10, py, pz, px + 10, py, pz);
-          }
+          // X axis segment
+          positions[p++] = x - half; positions[p++] = y; positions[p++] = z;
+          positions[p++] = x + half; positions[p++] = y; positions[p++] = z;
+          // Y axis segment
+          positions[p++] = x; positions[p++] = y - half; positions[p++] = z;
+          positions[p++] = x; positions[p++] = y + half; positions[p++] = z;
+          // Z axis segment
+          positions[p++] = x; positions[p++] = y; positions[p++] = z - half;
+          positions[p++] = x; positions[p++] = y; positions[p++] = z + half;
         }
       }
     }
 
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.computeBoundingSphere();
 
     const material = new THREE.LineBasicMaterial({
       color: 0x444444,
-      opacity: 0.3,
+      opacity: 0.25,
       transparent: true
     });
 
     const grid = new THREE.LineSegments(geometry, material);
     grid.position.copy(center);
     return grid;
+  }
+
+  function createAxisIndicator(length = 1) {
+    const group = new THREE.Group();
+    const coneGeom = new THREE.ConeGeometry(0.02, 0.08, 8);
+    const makeAxis = (dir, color) => {
+      const points = [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3().addScaledVector(dir, length)
+      ];
+      const geom = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({ color, linewidth: 3 });
+      const line = new THREE.Line(geom, mat);
+      const cone = new THREE.Mesh(coneGeom, new THREE.MeshBasicMaterial({ color }));
+      cone.position.copy(points[1]);
+      cone.lookAt(points[0]);
+      group.add(line);
+      group.add(cone);
+    };
+    makeAxis(new THREE.Vector3(1, 0, 0), 0xff0000);
+    makeAxis(new THREE.Vector3(0, 1, 0), 0x00ff00);
+    makeAxis(new THREE.Vector3(0, 0, 1), 0x0000ff);
+    return group;
   }
 
   function initViewer(nodeId, container) {
@@ -499,6 +691,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     // Create scene
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
+    scene.fog = new THREE.Fog(0x000000, 10, 100);
 
     // Create camera
     const camera = new THREE.PerspectiveCamera(
@@ -507,7 +700,8 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       0.1,
       1000
     );
-    camera.position.set(0, 5, 10);
+    camera.position.set(0, 1.6, 6);
+    camera.lookAt(new THREE.Vector3(0, 1.6, -1));
 
     // Create renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -528,10 +722,12 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     orbitControls.enableDamping = true;
     orbitControls.dampingFactor = 0.05;
     orbitControls.enabled = true;
+    orbitControls.target.set(0, 1.6, 0);
 
     const flyControls = new FlyControls(camera, renderer.domElement);
-    flyControls.movementSpeed = 10;
-    flyControls.rollSpeed = 0.5;
+    flyControls.movementSpeed = 5;
+    flyControls.rollSpeed = Math.PI / 8;
+    flyControls.dragToLook = true;
     flyControls.enabled = false;
 
     const pointerLockControls = new PointerLockControls(camera, renderer.domElement);
@@ -901,6 +1097,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const state = ensureState(nodeId);
     if (!state) return;
 
+    updateStatus(nodeId, 'Loading models…', 'pending');
     // Fetch available models from the API
     const models = await fetchModels(nodeId);
 
@@ -932,6 +1129,8 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       if (log) {
         log(`[Pointcloud:${nodeId}] Loaded ${models.length} models. Current: ${state.currentModel || 'none'}`);
       }
+    } else {
+      updateStatus(nodeId, 'No models available', 'err');
     }
 
     return state;
@@ -999,6 +1198,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   async function selectModel(nodeId, modelId) {
     const state = ensureState(nodeId);
     if (!state) return;
+    if (state.currentModel === modelId && state.modelReady) return;
 
     // Update config with selected model
     const rec = NodeStore.ensure(nodeId, 'Pointcloud');

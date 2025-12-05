@@ -49,6 +49,10 @@ const Net = {
     return this.nknFetch(base, path, 'POST', body, api, relay, timeout);
   },
 
+  async nknFetchForm(base, path, formData, api, relay, timeout = 60000) {
+    return this.nknFetch(base, path, 'POST_FORM', formData, api, relay, timeout);
+  },
+
   async fetchBlob(fullUrl, useNkn, relay, api) {
     const useRelay = useNkn && relay;
     if (!useRelay) {
@@ -280,7 +284,18 @@ const Net = {
       headers['Accept'] = 'application/json';
     }
     const req = { url: base.replace(/\/+$/, '') + path, method, headers, timeout_ms: timeout };
-    if (json !== null) req.json = json;
+    if (json !== null) {
+      if (method === 'POST_FORM') {
+        // NKN cannot stream binary form; send as JSON map (only works for text fields)
+        const obj = {};
+        if (json && typeof json.forEach === 'function') {
+          json.forEach((v, k) => { obj[k] = v; });
+        }
+        req.json = obj;
+      } else {
+        req.json = json;
+      }
+    }
     const res = await this.nknSend(req, relay, timeout);
     if (!res || res.ok === false) throw new Error((res && res.error) || ('HTTP ' + (res && res.status)));
     if (res.json !== undefined && res.json !== null) return res.json;

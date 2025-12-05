@@ -670,6 +670,19 @@ function refreshNodeResolution(force = false) {
     return isTruthy(cfg?.wasm);
   };
 
+  async function processPointcloudFile(nodeId, file) {
+    if (!file) return;
+    await processPointcloudPayload(nodeId, file);
+  }
+
+  async function processPointcloudPayload(nodeId, payload) {
+    const pc = await Pointcloud?.processImage?.(nodeId, payload);
+    if (!pc) return null;
+    const chunks = Pointcloud?.chunkPointcloudData?.(pc) || [{ chunk: 0, total: 1, data: pc }];
+    chunks.forEach((chunk) => Router.sendFrom(nodeId, 'pointcloud', chunk));
+    return pc;
+  }
+
   function initImageInputNode(node) {
     if (!node?.el || node.type !== 'ImageInput') return;
     const dropArea = node.el.querySelector('[data-image-drop]');
@@ -720,8 +733,6 @@ function refreshNodeResolution(force = false) {
         };
         NodeStore.update(node.id, {
           type: 'ImageInput',
-          image: dataUrl,
-          b64: base64,
           mime: payload.mime,
           width: img.width,
           height: img.height,
@@ -757,6 +768,13 @@ function refreshNodeResolution(force = false) {
     dropArea.addEventListener('click', () => {
       fileInput?.click();
     });
+    if (preview) {
+      preview.addEventListener('click', () => {
+        fileInput?.click();
+      });
+      preview.style.cursor = 'pointer';
+      preview.title = 'Click to replace image';
+    }
 
     if (fileInput) {
       fileInput.addEventListener('change', (e) => {
@@ -863,6 +881,55 @@ function refreshNodeResolution(force = false) {
     controlsWrap.style.marginBottom = '8px';
     controlsWrap.style.flexWrap = 'wrap';
 
+    const uploaderWrap = document.createElement('div');
+    uploaderWrap.className = 'pointcloud-uploader';
+    uploaderWrap.style.display = 'flex';
+    uploaderWrap.style.gap = '6px';
+    uploaderWrap.style.flexWrap = 'wrap';
+    uploaderWrap.style.marginBottom = '6px';
+
+    const uploadBtn = document.createElement('button');
+    uploadBtn.className = 'secondary';
+    uploadBtn.textContent = 'Upload';
+    uploadBtn.title = 'Upload image / video / GLB';
+    const hiddenInput = document.createElement('input');
+    hiddenInput.type = 'file';
+    hiddenInput.accept = 'image/*,.mp4,.avi,.mov,.mkv,.webm,.flv,.glb,.gltf,.json';
+    hiddenInput.style.display = 'none';
+    uploadBtn.addEventListener('click', () => hiddenInput.click());
+    hiddenInput.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      node._lastUploadFile = file;
+      node._lastImagePayload = file;
+      processPointcloudFile(node.id, file);
+      hiddenInput.value = '';
+    });
+    uploaderWrap.appendChild(uploadBtn);
+
+    const processBtn = document.createElement('button');
+    processBtn.className = 'secondary';
+    processBtn.textContent = 'Process';
+    processBtn.title = 'Process last uploaded/ingressed image';
+    processBtn.addEventListener('click', () => {
+      const file = node._lastUploadFile;
+      const payload = node._lastImagePayload;
+      if (file) processPointcloudFile(node.id, file);
+      else if (payload) processPointcloudPayload(node.id, payload);
+    });
+    uploaderWrap.appendChild(processBtn);
+
+    const playBtn = document.createElement('button');
+    playBtn.className = 'secondary';
+    playBtn.textContent = '▶';
+    playBtn.title = 'Trigger image input';
+    playBtn.onclick = () => {
+      const pending = node._lastImagePayload || null;
+      if (!pending) return;
+      Router.sendFrom(node.id, 'image', pending);
+      processPointcloudPayload(node.id, pending);
+    };
+
     const cameraModeBtn = document.createElement('button');
     cameraModeBtn.className = 'secondary camera-mode-btn';
     cameraModeBtn.innerHTML = '<span class="camera-mode-text">Orbit Mode</span>';
@@ -908,6 +975,7 @@ function refreshNodeResolution(force = false) {
       }
     };
 
+    controlsWrap.appendChild(playBtn);
     controlsWrap.appendChild(cameraModeBtn);
     controlsWrap.appendChild(floorSelectBtn);
     controlsWrap.appendChild(floorAutoBtn);
@@ -917,10 +985,28 @@ function refreshNodeResolution(force = false) {
     const ports = body.querySelector('.ports');
     if (ports && ports.parentElement === body) {
       body.insertBefore(viewerWrap, ports);
-      body.insertBefore(controlsWrap, viewerWrap.nextSibling);
+      body.insertBefore(uploaderWrap, viewerWrap.nextSibling);
+      body.insertBefore(controlsWrap, uploaderWrap.nextSibling);
+      const status = document.createElement('div');
+      status.className = 'pointcloud-status';
+      status.dataset.pointcloudStatus = node.id;
+      status.style.fontSize = '11px';
+      status.style.color = '#ccc';
+      status.style.margin = '4px 0 8px';
+      status.textContent = 'Model: —';
+      body.insertBefore(status, controlsWrap.nextSibling);
     } else {
       body.insertBefore(viewerWrap, body.firstChild);
-      body.insertBefore(controlsWrap, viewerWrap.nextSibling);
+      body.insertBefore(uploaderWrap, viewerWrap.nextSibling);
+      body.insertBefore(controlsWrap, uploaderWrap.nextSibling);
+      const status = document.createElement('div');
+      status.className = 'pointcloud-status';
+      status.dataset.pointcloudStatus = node.id;
+      status.style.fontSize = '11px';
+      status.style.color = '#ccc';
+      status.style.margin = '4px 0 8px';
+      status.textContent = 'Model: —';
+      body.insertBefore(status, controlsWrap.nextSibling);
     }
 
     if (Pointcloud && typeof Pointcloud.initViewer === 'function') {
@@ -1062,6 +1148,11 @@ function refreshNodeResolution(force = false) {
     if (node.type === 'LogicGate') {
       return handleLogicGateInput(node.id, portName, payload);
     }
+    if (node.type === 'Pointcloud' && portName === 'image') {
+      node._lastImagePayload = payload;
+      processPointcloudPayload(node.id, payload);
+      return;
+    }
     if (node.type === 'FaceLandmarks') {
       return Vision?.Face?.onInput?.(node.id, portName, payload);
     }
@@ -1147,6 +1238,26 @@ function refreshNodeResolution(force = false) {
     }
     if (node.type === 'Template') {
       if (portName === 'trigger') return handleTemplateTrigger(node.id, payload);
+      return;
+    }
+    if (node.type === 'Pointcloud') {
+      if (portName === 'image') {
+        const imageData = payload?.image || payload?.b64 || payload?.dataUrl || payload?.data || payload;
+        (async () => {
+          const pointcloud = await Pointcloud?.processImage?.(node.id, imageData);
+          if (!pointcloud) return;
+          const chunks = Pointcloud?.chunkPointcloudData?.(pointcloud) || [{ chunk: 0, total: 1, data: pointcloud }];
+          chunks.forEach((chunk) => Router.sendFrom(node.id, 'pointcloud', chunk));
+        })().catch(() => { /* swallow errors to avoid breaking graph loop */ });
+        return;
+      }
+      if (portName === 'model') {
+        const modelId = payload?.model || payload;
+        return Pointcloud?.selectModel?.(node.id, modelId);
+      }
+      if (portName === 'download') {
+        return Pointcloud?.exportGLB?.(node.id);
+      }
       return;
     }
   }
@@ -3199,6 +3310,7 @@ function refreshNodeResolution(force = false) {
           requestAnimationFrame(() => initPointcloudNode(node));
           requestAnimationFrame(() => Pointcloud?.init?.(node.id));
         }
+        if (node.type === 'ImageInput') requestAnimationFrame(() => initImageInputNode(node));
         if (node.type === 'MediaStream') requestAnimationFrame(() => Media.init(node.id));
         if (node.type === 'Orientation') requestAnimationFrame(() => Orientation.init(node.id));
         if (node.type === 'Location') requestAnimationFrame(() => Location.init(node.id));
@@ -6641,6 +6753,10 @@ function refreshNodeResolution(force = false) {
             baseInput.addEventListener('input', scheduleFetch);
             baseInput.addEventListener('blur', scheduleFetch);
           }
+          select.addEventListener('change', () => {
+            const chosen = select.value;
+            if (chosen) Pointcloud?.selectModel?.(node.id, chosen);
+          });
           fields.appendChild(label);
           fields.appendChild(select);
           convertBooleanSelectsIn(select.parentElement || select);

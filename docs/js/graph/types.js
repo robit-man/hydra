@@ -487,6 +487,11 @@ const GraphTypes = {
       { key: 'alignToInputScale', label: 'Align to Input Scale', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'includeConfidence', label: 'Include Confidence', type: 'select', options: ['false', 'true'], def: 'false' },
       { key: 'applyConfidenceFilter', label: 'Apply Confidence Filter', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'processResMethod', label: 'Process Res Method', type: 'select', options: ['upper_bound_resize', 'upper_bound_crop', 'lower_bound_resize', 'lower_bound_crop'], def: 'upper_bound_resize' },
+      { key: 'inferGs', label: 'Infer GS', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'confThreshPercentile', label: 'Confidence Percentile', type: 'number', def: 40, min: 0, max: 100, step: 1 },
+      { key: 'showCameras', label: 'Show Cameras', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'featVisFps', label: 'Feature Vis FPS', type: 'number', def: 15, min: 1, max: 60, step: 1 },
       { key: 'chunkSize', label: 'Chunk Size (KB)', type: 'number', def: 800, min: 100, max: 2000, step: 100 },
       { key: 'showViewer', label: 'Show 3D Viewer', type: 'select', options: ['true', 'false'], def: 'true' },
       { key: 'gridDistance', label: 'Grid Distance', type: 'number', def: 10, min: 3, max: 100, step: 1 }
