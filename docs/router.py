@@ -410,6 +410,60 @@ class ServiceWatchdog:
             self._repo_thread = threading.Thread(target=self._poll_core_repo_loop, daemon=True)
             self._repo_thread.start()
 
+    def start_service(self, name: str) -> None:
+        """Start (or restart) a single service supervisor loop."""
+        definition = next((d for d in self.DEFINITIONS if d.name == name), None)
+        if not definition:
+            return
+        with self._lock:
+            state = self._states.get(name)
+            if not state:
+                state = self._prepare_service(definition)
+                self._states[name] = state
+            state.stop_event.clear()
+            if not state.supervisor or not state.supervisor.is_alive():
+                t = threading.Thread(target=self._run_service_loop, args=(state,), daemon=True)
+                state.supervisor = t
+                t.start()
+        if not self._update_thread or not self._update_thread.is_alive():
+            self._update_thread = threading.Thread(target=self._poll_updates_loop, daemon=True)
+            self._update_thread.start()
+        if not self._repo_thread or not self._repo_thread.is_alive():
+            self._repo_thread = threading.Thread(target=self._poll_core_repo_loop, daemon=True)
+            self._repo_thread.start()
+
+    def stop_service(self, name: str, timeout: float = 10.0) -> None:
+        """Gracefully stop a single service supervisor loop and process."""
+        with self._lock:
+            state = self._states.get(name)
+            if not state:
+                return
+            state.stop_event.set()
+            proc = state.process
+            if proc and proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+            term = state.terminal_proc
+            if term and term.poll() is None:
+                with contextlib.suppress(Exception):
+                    term.terminate()
+                try:
+                    term.wait(timeout=timeout)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        term.kill()
+            state.process = None
+            state.terminal_proc = None
+            self._cleanup_terminal_tail(state)
+            if state.supervisor and state.supervisor.is_alive():
+                state.supervisor.join(timeout=timeout)
+            state.running_since = None
+
     def shutdown(self, timeout: float = 15.0) -> None:
         self._global_stop.set()
         if self._update_thread and self._update_thread.is_alive():
@@ -1784,6 +1838,7 @@ class EnhancedUI:
         direction: str = "→",
         service: Optional[str] = None,
         channel: Optional[str] = None,
+        blocked: bool = False,
     ) -> None:
         """Record a directional flow between a source and target for the Debug view."""
         ts = time.strftime("%H:%M:%S")
@@ -1795,6 +1850,7 @@ class EnhancedUI:
             "dir": direction,
             "service": service or "All",
             "channel": channel or "",
+            "blocked": bool(blocked),
         }
         self.flow_logs.append(entry)
         if channel:
@@ -2434,6 +2490,29 @@ class EnhancedUI:
 
     def _set_debug_scroll(self, tab: str, value: int) -> None:
         self.debug_scroll_offsets[tab] = max(0, value)
+    
+    def _short_label(self, label: str, max_label: int) -> str:
+        """
+        Compact long labels for the debug view.
+
+        - For NKN-style addresses like 'hydra.<40+ hex>', show 'hydra.xx…yy'
+          (first 2 and last 2 hex chars).
+        - For everything else, fall back to simple width-based truncation.
+        """
+        if len(label) <= max_label:
+            return label
+
+        try:
+            import re
+            m = re.match(r"^([a-zA-Z0-9_-]+)\.([0-9a-f]{8,})$", label)
+            if m:
+                prefix, hexpart = m.groups()
+                return f"{prefix}.{hexpart[:2]}…{hexpart[-2:]}"
+        except Exception:
+            pass
+
+        # Generic fallback: keep as much as fits
+        return label[: max_label - 1] + "…"
 
     def _render_debug_view(self, stdscr, h, w):
         """Render Debug/Activity Log view with directional flows and tabs."""
@@ -2504,8 +2583,8 @@ class EnhancedUI:
 
             # Compact source/target to fit on screen
             max_label = max(10, (w // 4))
-            src_short = src if len(src) <= max_label else src[: max_label - 1] + "…"
-            tgt_short = tgt if len(tgt) <= max_label else tgt[: max_label - 1] + "…"
+            src_short = self._short_label(src, max_label)
+            tgt_short = self._short_label(tgt, max_label)
 
             payload_space = max(10, w - len(ts) - len(src_short) - len(tgt_short) - 12)
             payload_short = payload if len(payload) <= payload_space else payload[: payload_space - 1] + "…"
@@ -2518,7 +2597,9 @@ class EnhancedUI:
             if channel:
                 line += f" @{channel}"
             attr = curses.color_pair(2)
-            if "err" in payload.lower():
+            if entry.get("blocked"):
+                attr = curses.color_pair(3) | curses.A_BOLD  # orange/yellow for blocked
+            elif "err" in payload.lower():
                 attr = curses.color_pair(4)
             self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
 
@@ -2618,9 +2699,20 @@ class EnhancedUI:
                     # Toggle service enabled/disabled
                     svc = services[self.main_menu_index]
                     self.service_config[svc] = not self.service_config.get(svc, True)
+                    if self.action_handler:
+                        self.action_handler({
+                            "type": "service_toggle",
+                            "service": svc,
+                            "enabled": self.service_config[svc],
+                        })
                 elif self.main_menu_index == len(services):
                     # Toggle port isolation (security section)
                     self.port_isolation_enabled = not self.port_isolation_enabled
+                    if self.action_handler:
+                        self.action_handler({
+                            "type": "port_isolation",
+                            "enabled": self.port_isolation_enabled,
+                        })
 
         elif ch in (ord('s'), ord('S')):
             if self.current_view == "config":
@@ -3722,11 +3814,18 @@ class RelayNode:
         self.ui = ui
         self.node_id = node_cfg.get("name") or node_cfg.get("id") or secrets.token_hex(4)
         self.ui.add_node(self.node_id, self.node_id)
+        # Always share the global targets map so detection updates propagate
+        global_targets = global_cfg.setdefault("targets", {})
+
         explicit_targets = node_cfg.get("targets") or {}
         if explicit_targets:
-            self.targets = {k: v for k, v in explicit_targets.items() if v}
-        else:
-            self.targets = global_cfg.get("targets", {}).copy()
+            # Seed/override global targets with explicit per-node config
+            for k, v in explicit_targets.items():
+                if v:
+                    global_targets[k] = v
+
+        self.targets = global_targets
+
         http_cfg = global_cfg.get("http", {})
         self.workers_count = int(node_cfg.get("workers") or http_cfg.get("workers") or 4)
         self.max_body = int(node_cfg.get("max_body_b") or http_cfg.get("max_body_b") or (2 * 1024 * 1024))
@@ -3845,6 +3944,65 @@ class RelayNode:
             }
             self.bridge.dm(src, info)
             return
+        if event in ("relay.health", "health"):
+            assign_map = self.assignment_lookup("__map__") if self.assignment_lookup else {}
+            targets_cfg = self.global_cfg.get("targets", {}) if isinstance(self.global_cfg, dict) else {}
+
+            def _assignment(entry):
+                if isinstance(entry, dict):
+                    return entry.get("node"), entry.get("addr")
+                if isinstance(entry, (list, tuple)) and entry:
+                    return entry[0], entry[1] if len(entry) > 1 else None
+                return None, None
+
+            def _port_of(url: str) -> Optional[int]:
+                try:
+                    parsed = urllib.parse.urlparse(url)
+                    port_val = parsed.port
+                    if port_val:
+                        return int(port_val)
+                    if parsed.scheme == "https":
+                        return 443
+                    if parsed.scheme == "http":
+                        return 80
+                except Exception:
+                    return None
+                return None
+
+            services_payload = []
+            for svc_name, info in SERVICE_TARGETS.items():
+                target_key = info.get("target") or svc_name
+                endpoint = (
+                    self.targets.get(target_key)
+                    or targets_cfg.get(target_key)
+                    or info.get("endpoint")
+                    or DEFAULT_TARGETS.get(target_key, "")
+                )
+                port = _port_of(endpoint) if endpoint else None
+                assigned = assign_map.get(svc_name) if isinstance(assign_map, dict) else None
+                assigned_node, assigned_addr = _assignment(assigned)
+                services_payload.append({
+                    "name": svc_name,
+                    "target": target_key,
+                    "aliases": info.get("aliases", []),
+                    "endpoint": endpoint,
+                    "port": port,
+                    "ports": sorted(dict.fromkeys(info.get("ports", []))),
+                    "assigned_node": assigned_node,
+                    "assigned_addr": assigned_addr,
+                    "this_node": self.node_id if svc_name == self.primary_service else None,
+                })
+
+            health = {
+                "event": "relay.health",
+                "ts": int(time.time() * 1000),
+                "node": self.node_id,
+                "addr": self.bridge.addr,
+                "port_isolation": self.ui.port_isolation_enabled,
+                "services": services_payload,
+            }
+            self.bridge.dm(src, health, DM_OPTS_SINGLE)
+            return
         try:
             if event == "asr.start":
                 req = req_from_asr_start(body)
@@ -3948,11 +4106,11 @@ class RelayNode:
         return self.alias_map.get(hint, hint)
 
     def _record_flow(self, source: str, target: str, payload: str, service: Optional[str] = None,
-                     channel: Optional[str] = None, direction: str = "→") -> None:
+                     channel: Optional[str] = None, direction: str = "→", blocked: bool = False) -> None:
         """Route flow events to the UI without breaking headless mode."""
         try:
             if hasattr(self.ui, "record_flow"):
-                self.ui.record_flow(source, target, payload, direction=direction, service=service, channel=channel)
+                self.ui.record_flow(source, target, payload, direction=direction, service=service, channel=channel, blocked=blocked)
         except Exception:
             pass
 
@@ -4041,44 +4199,243 @@ class RelayNode:
         if not self.ui.port_isolation_enabled:
             return True  # Port isolation disabled, allow all requests
 
-        # Extract port from URL
         try:
             from urllib.parse import urlparse
+
             parsed = urlparse(url)
             port = parsed.port
-
-            # If no explicit port, infer from scheme
             if port is None:
                 port = 443 if parsed.scheme == "https" else 80
 
-            # Check if this port is allowed for any service
-            for svc_key, target_info in SERVICE_TARGETS.items():
-                allowed_ports = target_info.get("ports", [])
-                # If service is specified, only check that service's ports
-                if service and service != svc_key and service not in target_info.get("aliases", []):
-                    continue
-                if port in allowed_ports:
-                    return True
+            # Canonicalize service so aliases map correctly
+            svc = self._canonical_service(service) if service else ""
 
-            # Port not in whitelist
-            return False
+            # Start with statically whitelisted ports
+            allowed_ports: set[int] = set()
+            for svc_key, target_info in SERVICE_TARGETS.items():
+                if svc and svc != svc_key and svc not in target_info.get("aliases", []):
+                    continue
+                for p in target_info.get("ports", []):
+                    allowed_ports.add(int(p))
+
+            # Add ports from configured targets (so custom endpoints are honored while isolation is on)
+            for target_name, base_url in (self.targets or {}).items():
+                if svc and svc != target_name and svc != self._canonical_service(target_name):
+                    continue
+                try:
+                    t_parsed = urlparse(base_url)
+                    t_port = t_parsed.port
+                    if t_port is None:
+                        t_port = 443 if t_parsed.scheme == "https" else 80
+                    if t_port:
+                        allowed_ports.add(int(t_port))
+                except Exception:
+                    continue
+
+            return port in allowed_ports
         except Exception:
             # If we can't parse the URL, reject it for security
             return False
+        
+    def _realign_service_target(self, service_name: Optional[str], failed_url: str) -> bool:
+        """
+        After a connection failure, try to detect the service's actual port from its log,
+        validate it's listening, and update self.targets / SERVICE_TARGETS.
+
+        Returns True if we updated the target and callers should re-resolve the URL.
+        """
+        if not service_name:
+            return False
+
+        svc = self._canonical_service(service_name)
+        if not svc or svc not in SERVICE_TARGETS:
+            return False
+
+        try:
+            parsed = urllib.parse.urlparse(failed_url)
+        except Exception:
+            parsed = None
+
+        # Prefer configured host hint, then the host from the failed URL, then loopback.
+        host_hint = self._service_host_hint(svc)
+        requested_host = parsed.hostname if parsed else None
+        host = host_hint or requested_host or "127.0.0.1"
+        scheme = (parsed.scheme if parsed and parsed.scheme else "http")
+
+        # Detect port from logs
+        detected_port = self._detect_service_port_from_log(svc)
+        if not detected_port:
+            return False
+
+        # This will probe host:port and, if successful, update SERVICE_TARGETS and self.targets
+        aligned = self._whitelist_service_port(svc, detected_port, host, scheme,
+                                               reason="egress-retry", require_probe=True)
+        if aligned:
+            LOGGER.info("Realigned %s to detected port %s after connection failure", svc, detected_port)
+        return aligned
+
+    def _detect_service_port_from_log(self, service_name: str) -> Optional[int]:
+        """Best-effort detection of a service port by tailing its log."""
+        log_file = LOGS_ROOT / f"{service_name}.log"
+        if not log_file.exists():
+            return None
+        try:
+            import re
+
+            with open(log_file, "r") as f:
+                lines = f.readlines()[-100:]
+            patterns = [
+                r"Running on .*:(\d+)",
+                r"listening on .*:(\d+)",
+                r"Listening on port (\d+)",
+                r"Server.*port (\d+)",
+                r"Started.*:(\d+)",
+                r"http://[^:]+:(\d+)",
+            ]
+            for line in reversed(lines):
+                for pattern in patterns:
+                    match = re.search(pattern, line, re.IGNORECASE)
+                    if match:
+                        port = int(match.group(1))
+                        if 1024 <= port <= 65535:
+                            return port
+        except Exception as exc:  # pragma: no cover
+            LOGGER.debug("On-demand port detection failed for %s: %s", service_name, exc)
+        return None
+
+    def _service_host_hint(self, service: str) -> Optional[str]:
+        """Extract a host hint from targets or endpoint config."""
+        info = SERVICE_TARGETS.get(service) or {}
+        target_key = info.get("target") or service
+        base = self.targets.get(target_key) or info.get("endpoint") or ""
+        try:
+            parsed = urllib.parse.urlparse(base)
+            return parsed.hostname
+        except Exception:
+            return None
+
+    def _hosts_equivalent(self, left: Optional[str], right: Optional[str]) -> bool:
+        """Treat loopback hostnames as equivalent when comparing."""
+        if not left or not right:
+            return False
+        loopbacks = {"127.0.0.1", "localhost"}
+        if left in loopbacks and right in loopbacks:
+            return True
+        return left == right
+
+    def _probe_service_port(self, host: str, port: int, timeout: float = 0.35) -> bool:
+        """Lightweight TCP probe to confirm the port is listening."""
+        try:
+            import socket
+
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _whitelist_service_port(self, service: str, port: int, host: Optional[str], scheme: Optional[str], reason: str, require_probe: bool = False) -> bool:
+        """Whitelist + align a service port and target endpoint immediately."""
+        svc = self._canonical_service(service) or service
+        if not svc or port <= 0:
+            return False
+        info = SERVICE_TARGETS.get(svc)
+        if not info:
+            return False
+
+        if require_probe and host:
+            if not self._probe_service_port(host, port):
+                LOGGER.debug("Port isolation: skip %s port %s (%s) probe failed", svc, port, reason)
+                return False
+
+        ports = info.setdefault("ports", [])
+        changed = False
+        if port not in ports:
+            ports.append(port)
+            LOGGER.info("Port isolation: added port %s for %s (%s)", port, svc, reason)
+            changed = True
+
+        target_key = info.get("target") or svc
+        base_hint = self.targets.get(target_key) or info.get("endpoint") or ""
+        base_host = None
+        base_scheme = None
+        try:
+            if base_hint:
+                parsed = urllib.parse.urlparse(base_hint)
+                base_host = parsed.hostname
+                base_scheme = parsed.scheme
+        except Exception:
+            pass
+        if not base_host and host:
+            base_host = host
+        if not base_scheme:
+            base_scheme = scheme
+        if not base_host:
+            return changed
+        new_base = f"{base_scheme or 'http'}://{base_host}:{port}"
+        if new_base != base_hint:
+            info["endpoint"] = new_base
+            self.targets[target_key] = new_base
+            self.global_cfg.setdefault("targets", {})[target_key] = new_base
+            try:
+                self.ui.update_service_info(svc, {"endpoint": new_base})
+            except Exception:
+                pass
+            LOGGER.info("Port isolation: aligned %s -> %s", svc, new_base)
+            changed = True
+        return changed
+
+    def _ensure_port_whitelisted(self, url: str, service: str) -> bool:
+        """On-demand detection/probe to avoid blocking first requests on new ports."""
+        if not self.ui.port_isolation_enabled:
+            return True
+        svc = self._canonical_service(service) if service else ""
+        if not svc:
+            return False
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        cfg_host = self._service_host_hint(svc)
+        requested_host = parsed.hostname
+        host_hint = cfg_host or requested_host or "127.0.0.1"
+        host_mismatch = bool(cfg_host and requested_host and not self._hosts_equivalent(cfg_host, requested_host))
+        scheme = parsed.scheme or "http"
+
+        detected_port = self._detect_service_port_from_log(svc)
+        if detected_port:
+            aligned = self._whitelist_service_port(svc, detected_port, host_hint, scheme, reason="log-detect", require_probe=True)
+            if aligned and not host_mismatch and self._validate_url_port(url, svc):
+                return True
+
+        if host_mismatch:
+            return False
+
+        if port and host_hint and self._probe_service_port(host_hint, port):
+            self._whitelist_service_port(svc, port, host_hint, scheme, reason="probe")
+            return self._validate_url_port(url, svc)
+        return False
 
     def _resolve_url(self, req: dict) -> str:
         url = (req.get("url") or "").strip()
-        svc = (req.get("service") or "").strip()
+        svc_raw = (req.get("service") or "").strip()
+        svc = self._canonical_service(svc_raw) if svc_raw else ""
+        target_key = svc
+        if svc in SERVICE_TARGETS:
+            target_key = SERVICE_TARGETS[svc].get("target") or svc
+        elif svc_raw:
+            target_key = svc_raw
 
         if url:
             # Validate URL port against known service endpoints
             if not self._validate_url_port(url, svc):
-                raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
+                if not self._ensure_port_whitelisted(url, svc):
+                    raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
             return url
 
-        base = self.targets.get(svc)
+        base = self.targets.get(target_key) or self.targets.get(svc)
         if not base:
-            raise ValueError(f"unknown service '{svc}'")
+            raise ValueError(f"unknown service '{svc or svc_raw or 'default'}'")
         path = req.get("path") or "/"
         if not path.startswith("/"):
             path = "/" + path
@@ -4086,7 +4443,8 @@ class RelayNode:
 
         # Validate resolved URL port
         if not self._validate_url_port(resolved_url, svc):
-            raise ValueError(f"port isolation: resolved URL '{resolved_url}' port not in whitelist for service '{svc}'")
+            if not self._ensure_port_whitelisted(resolved_url, svc):
+                raise ValueError(f"port isolation: resolved URL '{resolved_url}' port not in whitelist for service '{svc}'")
 
         return resolved_url
 
@@ -4117,6 +4475,48 @@ class RelayNode:
             try:
                 self._process_request(session, src, rid, req)
             except Exception as e:
+                blocked = isinstance(e, ValueError) and "port isolation" in str(e).lower()
+
+                # Derive a useful target label & payload with host:port if possible
+                url = req.get("url") or ""
+                try:
+                    if not url:
+                        # Recompute resolved URL just for logging; ignore validation
+                        tmp_req = dict(req)
+                        tmp_req.setdefault("path", req.get("path") or "/")
+                        url = self._resolve_url(tmp_req)
+                except Exception:
+                    pass
+
+                target_label = self._flow_target_label(service_name, url or (req.get("path") or service_name or ""))
+
+                method = (req.get("method") or "GET").upper()
+                path_snippet = req.get("path") or "/"
+                try:
+                    parsed = urllib.parse.urlparse(url) if url else None
+                    hostport = parsed.netloc if parsed else ""
+                except Exception:
+                    hostport = ""
+
+                if hostport:
+                    loc = f"{hostport}{path_snippet}"
+                else:
+                    loc = path_snippet
+
+                if blocked:
+                    payload = f"BLOCKED {method} {loc}: {e}"
+                else:
+                    payload = f"ERROR {type(e).__name__} {method} {loc}: {e}"
+
+                self._record_flow(
+                    src or "client",
+                    target_label,
+                    payload,
+                    service=service_name,
+                    channel=src,
+                    blocked=blocked,
+                )
+
                 self.bridge.dm(src, {
                     "event": "relay.response",
                     "id": rid,
@@ -4130,6 +4530,7 @@ class RelayNode:
                 }, DM_OPTS_SINGLE)
                 self.ui.bump(self.node_id, "ERR", f"http {type(e).__name__}: {e}")
                 self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=0, start_ts=start_ts)
+
             finally:
                 self.jobs.task_done()
                 try:
@@ -4143,6 +4544,7 @@ class RelayNode:
         method = (req.get("method") or "GET").upper()
         headers = req.get("headers") or {}
         timeout_s = float(req.get("timeout_ms") or 30000) / 1000.0
+
         verify = self.verify_default
         if isinstance(req.get("verify"), bool):
             verify = bool(req.get("verify"))
@@ -4150,19 +4552,45 @@ class RelayNode:
             verify = False
 
         service_name = self._canonical_service(req.get("service") or req.get("target")) or self.primary_service
+
+        # Look up service definition from the watchdog, not from RelayNode
         svc_def = None
         if service_name:
-            svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
+            try:
+                from router import ServiceWatchdog  # if this file is named differently, drop the import and just use ServiceWatchdog directly
+            except ImportError:
+                # Same module, name already in globals – safe to ignore
+                pass
+            try:
+                svc_def = next(
+                    (d for d in ServiceWatchdog.DEFINITIONS if d.name == service_name),
+                    None,
+                )
+            except Exception:
+                svc_def = None
 
+        # Derive target label + host:port + path for logging
         target_label = self._flow_target_label(service_name, url)
-        path_snippet = urllib.parse.urlparse(url).path or "/"
-        self._record_flow(src or "client", target_label, f"{method} {path_snippet} {rid}", service=service_name, channel=src)
+        try:
+            parsed = urllib.parse.urlparse(url)
+            path_snippet = parsed.path or "/"
+            port = parsed.port
+            if port is None:
+                port = 443 if parsed.scheme == "https" else 80
+            host_port = ""
+            if parsed.hostname:
+                host_port = f"{parsed.hostname}:{port}" if port else parsed.hostname
+            elif parsed.netloc:
+                host_port = parsed.netloc
+        except Exception:
+            path_snippet = "/"
+            host_port = ""
 
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
         if stream_mode in ("1", "true", "yes", "on", "chunks", "dm", "lines", "ndjson", "sse", "events"):
             want_stream = True
-        if svc_def and svc_def.default_stream:
+        if svc_def and getattr(svc_def, "default_stream", False):
             want_stream = True
             if "X-Relay-Stream" not in headers and "x-relay-stream" not in headers:
                 headers["X-Relay-Stream"] = "chunks"
@@ -4171,16 +4599,21 @@ class RelayNode:
         body_bytes = 0
         body_chunks = req.get("body_chunks_b64") or []
         json_chunks = req.get("json_chunks_b64") or []
+
         if body_chunks:
             try:
-                combined = b"".join(base64.b64decode(str(c), validate=False) for c in body_chunks if c is not None)
+                combined = b"".join(
+                    base64.b64decode(str(c), validate=False) for c in body_chunks if c is not None
+                )
             except Exception:
                 combined = b""
             params["data"] = combined
             body_bytes = len(combined)
         elif json_chunks:
             try:
-                combined = b"".join(base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None)
+                combined = b"".join(
+                    base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None
+                )
                 params["data"] = combined
                 headers.setdefault("Content-Type", "application/json")
             except Exception:
@@ -4201,27 +4634,114 @@ class RelayNode:
         elif "data" in req and req["data"] is not None:
             params["data"] = req["data"]
             try:
-                body_bytes = len(req["data"]) if isinstance(req["data"], (bytes, bytearray)) else len(str(req["data"]).encode("utf-8"))
+                body_bytes = (
+                    len(req["data"])
+                    if isinstance(req["data"], (bytes, bytearray))
+                    else len(str(req["data"]).encode("utf-8"))
+                )
             except Exception:
                 body_bytes = 0
 
+        realigned = False  # Ensure we only realign/retry once per request
+
+        def _retry_after_realign(exc: Exception, stream: bool = False) -> requests.Response:
+            nonlocal url, target_label, path_snippet, host_port, realigned
+
+            # Only trigger on connection-type issues, once
+            if realigned:
+                raise exc
+            if not isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+                raise exc
+            if not service_name:
+                raise exc
+
+            if not self._realign_service_target(service_name, url):
+                raise exc
+
+            realigned = True
+            # Re-resolve against updated self.targets (includes detection updates)
+            url = self._resolve_url(req)
+            target_label = self._flow_target_label(service_name, url)
+            try:
+                parsed2 = urllib.parse.urlparse(url)
+                path_snippet = parsed2.path or "/"
+                port2 = parsed2.port
+                if port2 is None:
+                    port2 = 443 if parsed2.scheme == "https" else 80
+                host_port = ""
+                if parsed2.hostname:
+                    host_port = f"{parsed2.hostname}:{port2}" if port2 else parsed2.hostname
+                elif parsed2.netloc:
+                    host_port = parsed2.netloc
+            except Exception:
+                path_snippet = "/"
+                host_port = ""
+
+            if stream:
+                return self._http_request_with_retry(session, method, url, stream=True, **params)
+            return self._http_request_with_retry(session, method, url, **params)
+
+        # --- streaming path ---
         if want_stream:
-            resp = self._http_request_with_retry(session, method, url, stream=True, **params)
+            try:
+                resp = self._http_request_with_retry(session, method, url, stream=True, **params)
+            except requests.RequestException as exc:
+                # Try one fast realign + retry on connection failure
+                resp = _retry_after_realign(exc, stream=True)
+
             if resp.status_code == 429:
                 self._register_rate_limit_hit()
                 self._send_simple_response(src, rid, resp, req)
-                self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=len(resp.content or b""), start_ts=start_ts)
+                self._record_usage_stats(
+                    service_name,
+                    src,
+                    bytes_in=body_bytes,
+                    bytes_out=len(resp.content or b""),
+                    start_ts=start_ts,
+                )
                 return
+
             self._reset_rate_limit()
-            stream_mode = self._infer_stream_mode(stream_mode, resp)
-            bytes_out = self._handle_stream(src, rid, resp, stream_mode, service_name, body_bytes, start_ts)
-            self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
+            stream_mode_resolved = self._infer_stream_mode(stream_mode, resp)
+            bytes_out = self._handle_stream(
+                src, rid, resp, stream_mode_resolved, service_name, body_bytes, start_ts
+            )
+            stream_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
+            self._record_flow(
+                target_label,
+                src or "client",
+                f"STREAM {resp.status_code} {method} {stream_loc} {rid}",
+                service=service_name,
+                channel=src,
+                direction="←",
+            )
+            self._record_usage_stats(
+                service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts
+            )
             return
 
-        resp = self._http_request_with_retry(session, method, url, **params)
+        # --- non-streaming path ---
+        try:
+            resp = self._http_request_with_retry(session, method, url, **params)
+        except requests.RequestException as exc:
+            resp = _retry_after_realign(exc, stream=False)
+
         self._handle_response_status(resp.status_code)
         bytes_out = self._send_simple_response(src, rid, resp, req)
-        self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
+        resp_loc = f"{host_port}{path_snippet}" if host_port else path_snippet
+        self._record_flow(
+            target_label,
+            src or "client",
+            f"RESP {resp.status_code} {method} {resp_loc} {rid}",
+            service=service_name,
+            channel=src,
+            direction="←",
+        )
+        self._record_usage_stats(
+            service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts
+        )
+
+
 
     def _handle_response_status(self, status_code: int) -> None:
         if status_code == 429:
@@ -4802,6 +5322,11 @@ class Router:
             kb = int(http_cfg.get("chunk_upload_b", 600 * 1024) // 1024)
             self.ui.set_chunk_upload_kb(kb)
 
+        # Shared target endpoints (defaults merged with config; kept shared so detections propagate)
+        self.targets: Dict[str, str] = self.cfg.setdefault("targets", {})
+        for k, v in DEFAULT_TARGETS.items():
+            self.targets.setdefault(k, v)
+
         self.watchdog = ServiceWatchdog(BASE_DIR)
         self.watchdog.ensure_sources(service_config=self.ui.service_config)
         self.latest_service_status: Dict[str, dict] = {
@@ -4843,6 +5368,8 @@ class Router:
             return None
 
         try:
+            import re
+
             # Read last 100 lines of log file (most recent startup info)
             with open(log_file, 'r') as f:
                 lines = f.readlines()[-100:]
@@ -4871,24 +5398,67 @@ class Router:
             LOGGER.debug(f"Port detection failed for {service_name}: {e}")
             return None
 
+    def _service_host_hint(self, service_name: str) -> str:
+        info = SERVICE_TARGETS.get(service_name) or {}
+        target_key = info.get("target") or service_name
+        base = self.targets.get(target_key) or info.get("endpoint") or DEFAULT_TARGETS.get(target_key) or ""
+        try:
+            parsed = urllib.parse.urlparse(base)
+            return parsed.hostname or "127.0.0.1"
+        except Exception:
+            return "127.0.0.1"
+
+    def _probe_service_port(self, host: str, port: int, timeout: float = 0.35) -> bool:
+        try:
+            import socket
+
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
     def _update_service_ports(self):
         """Update SERVICE_TARGETS with detected ports from running services."""
         for service_name in SERVICE_TARGETS.keys():
             detected_port = self._detect_service_port(service_name)
-            if detected_port:
-                current_ports = SERVICE_TARGETS[service_name].get("ports", [])
-                if detected_port not in current_ports:
-                    # Port not in whitelist, add it
-                    SERVICE_TARGETS[service_name]["ports"].append(detected_port)
-                    LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+            if not detected_port:
+                continue
 
-                # Update endpoint to show actual detected port
-                current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
-                if current_endpoint and f":{detected_port}" not in current_endpoint:
-                    # Update endpoint to reflect detected port
-                    base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
-                    SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
-                    LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
+            host = self._service_host_hint(service_name)
+            if not self._probe_service_port(host, detected_port):
+                LOGGER.debug("Skipping port update for %s: %s not listening on %s", service_name, host, detected_port)
+                continue
+
+            current_ports = SERVICE_TARGETS[service_name].get("ports", [])
+            if detected_port not in current_ports:
+                # Port not in whitelist, add it
+                SERVICE_TARGETS[service_name]["ports"].append(detected_port)
+                LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+
+            # Update endpoint to show actual detected port
+            current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
+            if current_endpoint and f":{detected_port}" not in current_endpoint:
+                # Update endpoint to reflect detected port
+                base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
+                SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
+                LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
+
+            # Update router targets/config to match detected port (no hard-coding)
+            target_key = SERVICE_TARGETS[service_name].get("target") or service_name
+            existing_base = self.targets.get(target_key) or SERVICE_TARGETS[service_name].get("endpoint") or ""
+            try:
+                parsed = urllib.parse.urlparse(existing_base or f"http://{host}:{detected_port}")
+                host = parsed.hostname or host or "127.0.0.1"
+                scheme = parsed.scheme or "http"
+                new_base = f"{scheme}://{host}:{detected_port}"
+                if new_base != existing_base:
+                    self.targets[target_key] = new_base
+                    self.cfg.setdefault("targets", {})[target_key] = new_base
+                    self.config_dirty = True
+                    self.ui.update_service_info(service_name, {"endpoint": new_base})
+                    LOGGER.info("Aligned target for %s -> %s", target_key, new_base)
+            except Exception as exc:
+                LOGGER.debug("Failed to align target for %s: %s", target_key, exc)
 
     def start(self):
         LOGGER.info("Starting services via watchdog")
@@ -5174,6 +5744,18 @@ class Router:
                 # Placeholder: extend with real health checks or request simulations.
                 status = self.latest_service_status.get(service, {})
                 LOGGER.info("Current status: %s", json.dumps(status, default=str))
+        elif typ == "service_toggle":
+            service = action.get("service")
+            enabled = bool(action.get("enabled", True))
+            if service:
+                self.ui.service_config[service] = enabled
+                if enabled:
+                    LOGGER.info("Enabling service %s", service)
+                    self.watchdog.start_service(service)
+                else:
+                    LOGGER.info("Disabling service %s", service)
+                    self.watchdog.stop_service(service)
+                self.config_dirty = True
         elif typ == "node" and action.get("op") == "diagnostics":
             node = action.get("node")
             LOGGER.info("Diagnostics requested for node %s", node)
@@ -5201,6 +5783,11 @@ class Router:
                     LOGGER.info("Updated chunk_upload_b to %dkB", kb)
                 except Exception as exc:
                     LOGGER.warning("Failed to update chunk_upload_kb: %s", exc)
+        elif typ == "port_isolation":
+            enabled = bool(action.get("enabled", True))
+            self.ui.port_isolation_enabled = enabled
+            self.config_dirty = True
+            LOGGER.info("Port isolation %s", "enabled" if enabled else "disabled")
 
     def _cycle_service(self, service: Optional[str]):
         if not service or service not in self.latest_service_status:
