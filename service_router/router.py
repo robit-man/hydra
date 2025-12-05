@@ -410,6 +410,60 @@ class ServiceWatchdog:
             self._repo_thread = threading.Thread(target=self._poll_core_repo_loop, daemon=True)
             self._repo_thread.start()
 
+    def start_service(self, name: str) -> None:
+        """Start (or restart) a single service supervisor loop."""
+        definition = next((d for d in self.DEFINITIONS if d.name == name), None)
+        if not definition:
+            return
+        with self._lock:
+            state = self._states.get(name)
+            if not state:
+                state = self._prepare_service(definition)
+                self._states[name] = state
+            state.stop_event.clear()
+            if not state.supervisor or not state.supervisor.is_alive():
+                t = threading.Thread(target=self._run_service_loop, args=(state,), daemon=True)
+                state.supervisor = t
+                t.start()
+        if not self._update_thread or not self._update_thread.is_alive():
+            self._update_thread = threading.Thread(target=self._poll_updates_loop, daemon=True)
+            self._update_thread.start()
+        if not self._repo_thread or not self._repo_thread.is_alive():
+            self._repo_thread = threading.Thread(target=self._poll_core_repo_loop, daemon=True)
+            self._repo_thread.start()
+
+    def stop_service(self, name: str, timeout: float = 10.0) -> None:
+        """Gracefully stop a single service supervisor loop and process."""
+        with self._lock:
+            state = self._states.get(name)
+            if not state:
+                return
+            state.stop_event.set()
+            proc = state.process
+            if proc and proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+            term = state.terminal_proc
+            if term and term.poll() is None:
+                with contextlib.suppress(Exception):
+                    term.terminate()
+                try:
+                    term.wait(timeout=timeout)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        term.kill()
+            state.process = None
+            state.terminal_proc = None
+            self._cleanup_terminal_tail(state)
+            if state.supervisor and state.supervisor.is_alive():
+                state.supervisor.join(timeout=timeout)
+            state.running_since = None
+
     def shutdown(self, timeout: float = 15.0) -> None:
         self._global_stop.set()
         if self._update_thread and self._update_thread.is_alive():
@@ -2618,9 +2672,20 @@ class EnhancedUI:
                     # Toggle service enabled/disabled
                     svc = services[self.main_menu_index]
                     self.service_config[svc] = not self.service_config.get(svc, True)
+                    if self.action_handler:
+                        self.action_handler({
+                            "type": "service_toggle",
+                            "service": svc,
+                            "enabled": self.service_config[svc],
+                        })
                 elif self.main_menu_index == len(services):
                     # Toggle port isolation (security section)
                     self.port_isolation_enabled = not self.port_isolation_enabled
+                    if self.action_handler:
+                        self.action_handler({
+                            "type": "port_isolation",
+                            "enabled": self.port_isolation_enabled,
+                        })
 
         elif ch in (ord('s'), ord('S')):
             if self.current_view == "config":
@@ -5187,6 +5252,18 @@ class Router:
                 # Placeholder: extend with real health checks or request simulations.
                 status = self.latest_service_status.get(service, {})
                 LOGGER.info("Current status: %s", json.dumps(status, default=str))
+        elif typ == "service_toggle":
+            service = action.get("service")
+            enabled = bool(action.get("enabled", True))
+            if service:
+                self.ui.service_config[service] = enabled
+                if enabled:
+                    LOGGER.info("Enabling service %s", service)
+                    self.watchdog.start_service(service)
+                else:
+                    LOGGER.info("Disabling service %s", service)
+                    self.watchdog.stop_service(service)
+                self.config_dirty = True
         elif typ == "node" and action.get("op") == "diagnostics":
             node = action.get("node")
             LOGGER.info("Diagnostics requested for node %s", node)
@@ -5214,6 +5291,11 @@ class Router:
                     LOGGER.info("Updated chunk_upload_b to %dkB", kb)
                 except Exception as exc:
                     LOGGER.warning("Failed to update chunk_upload_kb: %s", exc)
+        elif typ == "port_isolation":
+            enabled = bool(action.get("enabled", True))
+            self.ui.port_isolation_enabled = enabled
+            self.config_dirty = True
+            LOGGER.info("Port isolation %s", "enabled" if enabled else "disabled")
 
     def _cycle_service(self, service: Optional[str]):
         if not service or service not in self.latest_service_status:
