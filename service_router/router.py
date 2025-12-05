@@ -1552,13 +1552,16 @@ class UnifiedUI:
         elif rtype == "service":
             service_id = row.get("id")
             info = self.services.get(service_id, {})
-            addr = (info.get("assigned_addr") or "").strip()
+            raw_addr = (info.get("assigned_addr") or "").strip()
+            hex_part = raw_addr.split(".")[-1] if raw_addr and "." in raw_addr else raw_addr
+            base = self._clean_identifier(service_id)
+            addr = f"{base}.{hex_part}" if hex_part else base
             label = f"Service {service_id} ({addr or '—'})"
             if include_detail:
                 detail = (
                     f"Service: {service_id}\n"
                     f"Assigned node: {info.get('assigned_node','—')}\n"
-                    f"Address: {info.get('assigned_addr','—')}\n"
+                    f"Address: {addr or '—'}\n"
                     f"Status: {info.get('status','?')}"
                 )
                 detail_lines = detail.splitlines()
@@ -1590,18 +1593,22 @@ class UnifiedUI:
             self.qr_locked = True
 
     def _format_service_line(self, name: str, addr: str) -> str:
-        base = name
-        try:
-            import re
-            m = re.match(r"^(.*?-relay)(?:-[^.]+)?$", name)
-            if m:
-                base = m.group(1)
-        except Exception:
-            pass
+        base = self._clean_identifier(name)
         addr_hex = addr
         if isinstance(addr, str) and "." in addr:
             addr_hex = addr.split(".")[-1]
         return f"{base}.{addr_hex}" if addr_hex else base
+
+    @staticmethod
+    def _clean_identifier(name: str) -> str:
+        try:
+            import re
+            m = re.match(r"^(.*?-relay)(?:-[^.]+)?$", name)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        return name
 
     def _advance_qr_cycle(self, force_row: bool = False) -> None:
         if not self.qr_candidates:

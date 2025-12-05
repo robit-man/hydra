@@ -507,6 +507,7 @@ function createGraph({
     const t = `translate(${WS.view.x}px, ${WS.view.y}px) scale(${WS.view.scale})`;
     if (WS.canvas) WS.canvas.style.transform = t;
     if (WS.svgLayer) WS.svgLayer.setAttribute('transform', `translate(${WS.view.x},${WS.view.y}) scale(${WS.view.scale})`);
+    document.documentElement.style.setProperty('--graph-scale', WS.view.scale.toFixed(4));
     syncWorkspaceBackground();       // maintains grid vars
     broadcastViewportChange('zoom'); // tell every node to recompute + repaint
     scheduleZoomRefresh();           // bump canvas backing stores next frame
