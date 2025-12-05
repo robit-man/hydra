@@ -7,9 +7,17 @@ const NKN_SEED_KEY = 'graph.nkn.seed';
 
 const Net = {
   nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
+  uploadChunkBytes: 600 * 1024,
 
   setTransportUpdater(fn) {
     updateTransportButton = typeof fn === 'function' ? fn : () => {};
+  },
+
+  setUploadChunkKB(kb) {
+    const val = Number(kb);
+    if (Number.isFinite(val) && val > 4) {
+      this.uploadChunkBytes = Math.max(4 * 1024, Math.floor(val * 1024));
+    }
   },
 
   auth(headers = {}, apiKey) {
@@ -48,51 +56,105 @@ const Net = {
     if (!useRelay) {
       return this.postJSON(base, path, body, api, false, '', timeout);
     }
+    // Stream upload over NKN in multiple DMs
+    if (!this.nkn.client) this.ensureNkn();
+    const uploadId = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     const headers = this.auth({}, api);
-    headers['X-Relay-Stream'] = 'chunks';
+    headers['Content-Type'] = 'application/json';
     const payloadStr = JSON.stringify(body || {});
     const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
-    const chunks = this._chunkString(b64, chunkSize);
-    const req = {
-      url: base.replace(/\/+$/, '') + path,
-      method: 'POST',
-      headers,
-      timeout_ms: timeout,
-      json_chunks_b64: chunks,
-      stream: 'chunks'
+    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 600 * 1024, 4096), 900 * 1024);
+    const chunkChars = Math.max(1024, Math.floor(limitBytes * 1.3));
+    const chunks = this._chunkString(b64, chunkChars);
+    const total = chunks.length;
+    const url = base.replace(/\/+$/, '') + path;
+
+    const responsePromise = this._awaitResponseStream(uploadId, timeout);
+
+    const sendMsg = async (msg) => {
+      await this.nkn.client.send(relay, JSON.stringify(msg), { noReply: true, maxHoldingSeconds: 240 });
     };
-    let buf = [];
-    let ended = false;
-    let ok = false;
-    let status = 0;
-    let headersResp = {};
-    await this.nknStream(req, relay, {
-      onBegin: (meta) => {
-        ok = meta?.ok !== false;
-        status = meta?.status || 0;
-        headersResp = meta?.headers || {};
-      },
-      onChunk: (chunk) => {
-        if (ended) return;
-        buf.push(chunk);
-      },
-      onEnd: () => {
-        ended = true;
-      },
-      lingerEndMs: 50
-    }, timeout);
-    const merged = buf.length ? new Blob(buf) : new Blob([]);
-    const arrBuf = await merged.arrayBuffer();
-    const text = td.decode(new Uint8Array(arrBuf));
-    if (!ok) throw new Error(`HTTP ${status || 0}`);
-    try {
-      return JSON.parse(text);
-    } catch (err) {
-      if (headersResp['content-type'] && headersResp['content-type'].includes('application/json')) {
-        throw err;
-      }
-      return { body: text, status, headers: headersResp };
+
+    await sendMsg({
+      event: 'http.upload.begin',
+      id: uploadId,
+      upload_id: uploadId,
+      req: { url, method: 'POST', headers, timeout_ms: timeout },
+      total_chunks: total,
+      content_type: 'application/json'
+    });
+    let seq = 1;
+    for (const chunk of chunks) {
+      await sendMsg({
+        event: 'http.upload.chunk',
+        id: uploadId,
+        upload_id: uploadId,
+        seq,
+        total: total,
+        b64: chunk
+      });
+      seq += 1;
     }
+    await sendMsg({
+      event: 'http.upload.end',
+      id: uploadId,
+      upload_id: uploadId,
+      total: total
+    });
+
+    return responsePromise;
+  },
+
+  async _awaitResponseStream(id, timeout = 180000) {
+    if (!this.nkn.client) this.ensureNkn();
+    return new Promise((resolve, reject) => {
+      let buf = [];
+      let ok = false;
+      let status = 0;
+      let headers = {};
+      let timer = setTimeout(() => {
+        this.nkn.streams.delete(id);
+        reject(new Error('NKN stream timeout'));
+      }, timeout);
+      const handlers = {
+        onBegin: (meta) => {
+          ok = meta?.ok !== false;
+          status = meta?.status || 0;
+          headers = meta?.headers || {};
+        },
+        onChunk: (chunk) => buf.push(chunk),
+        onLine: (lineObj) => {
+          try {
+            const text = lineObj?.line || '';
+            buf.push(new TextEncoder().encode(text + '\\n'));
+          } catch (_) {}
+        },
+        onEnd: () => {
+          clearTimeout(timer);
+          this.nkn.streams.delete(id);
+          const merged = buf.length ? new Blob(buf) : new Blob([]);
+          merged.arrayBuffer().then((arr) => {
+            const text = td.decode(new Uint8Array(arr));
+            if (!ok) return reject(new Error(`HTTP ${status || 0}`));
+            try {
+              return resolve(JSON.parse(text));
+            } catch (err) {
+              if (headers && typeof headers['content-type'] === 'string' && headers['content-type'].includes('application/json')) {
+                return reject(err);
+              }
+              return resolve({ body: text, status, headers });
+            }
+          }).catch(reject);
+        },
+        onError: (err) => {
+          clearTimeout(timer);
+          this.nkn.streams.delete(id);
+          reject(err instanceof Error ? err : new Error(String(err || 'NKN stream error')));
+        },
+        lingerEndMs: 50
+      };
+      this.nkn.streams.set(id, handlers);
+    });
   },
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {

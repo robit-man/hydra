@@ -1039,6 +1039,7 @@ def load_config() -> dict:
     http.setdefault("max_body_b", 2 * 1024 * 1024)
     http.setdefault("verify_default", True)
     http.setdefault("chunk_raw_b", 12 * 1024)
+    http.setdefault("chunk_upload_b", 600 * 1024)
     http.setdefault("heartbeat_s", 10)
     http.setdefault("batch_lines", 24)
     http.setdefault("batch_latency", 0.08)
@@ -1195,6 +1196,7 @@ class UnifiedUI:
         self.qr_row_ref: Optional[dict] = None
         self._last_dims: Tuple[int, int] = (0, 0)
         self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=5)
+        self.chunk_upload_kb: int = 600
 
     def add_node(self, node_id: str, name: str):
         self.nodes.setdefault(node_id, {
@@ -1212,6 +1214,12 @@ class UnifiedUI:
 
     def set_action_handler(self, handler: Callable[[dict], None]):
         self.action_handler = handler
+
+    def set_chunk_upload_kb(self, kb: int):
+        try:
+            self.chunk_upload_kb = max(4, int(kb))
+        except Exception:
+            pass
 
     def set_addr(self, node_id: str, addr: Optional[str]):
         if node_id in self.nodes:
@@ -1303,7 +1311,7 @@ class UnifiedUI:
                 pass
 
             stdscr.erase()
-            stdscr.addnstr(0, 0, "Unified NKN Router — arrows: cycle services, e: pin QR, s: toggle activity, q: quit", max(0, curses.COLS - 1), header_attr)
+            stdscr.addnstr(0, 0, "Unified NKN Router — arrows: cycle services, e: pin QR, s: activity, c: config, q: quit", max(0, curses.COLS - 1), header_attr)
             if self.daemon_info:
                 daemon_line = f"Daemon: enabled at {self.daemon_info.get('path','?')}"
             else:
@@ -1400,6 +1408,8 @@ class UnifiedUI:
                         self._handle_enter(stdscr, selected_row)
                 elif ch in (ord('s'), ord('S')):
                     self.show_activity = not self.show_activity
+                elif ch in (ord('c'), ord('C')):
+                    self._handle_config_prompt(stdscr)
             except Exception:
                 pass
 
@@ -1410,6 +1420,11 @@ class UnifiedUI:
         self.qr_locked = False
         self._advance_qr_cycle(force_row=True)
 
+    def _handle_config_prompt(self, stdscr) -> None:
+        kb = self._prompt_number(stdscr, "Chunk upload size (KB)", self.chunk_upload_kb or 600)
+        if kb is not None and self.action_handler:
+            self.action_handler({"type": "config", "key": "chunk_upload_kb", "value": kb})
+
     def _build_rows(self) -> List[dict]:
         rows: List[dict] = []
         rows.append({"type": "section", "text": "Services", "selectable": False})
@@ -1417,7 +1432,7 @@ class UnifiedUI:
             name = self.service_names[self.service_index % len(self.service_names)]
             info = self.services.get(name, {})
             addr = info.get("assigned_addr") or "—"
-            rows.append({"type": "service", "id": name, "text": f"{name} {addr}", "selectable": True})
+            rows.append({"type": "service", "id": name, "text": self._format_service_line(name, addr), "selectable": True})
         else:
             rows.append({"type": "service", "id": "none", "text": "(no services yet)", "selectable": False})
 
@@ -1574,6 +1589,20 @@ class UnifiedUI:
         if lock:
             self.qr_locked = True
 
+    def _format_service_line(self, name: str, addr: str) -> str:
+        base = name
+        try:
+            import re
+            m = re.match(r"^(.*?-relay)(?:-[^.]+)?$", name)
+            if m:
+                base = m.group(1)
+        except Exception:
+            pass
+        addr_hex = addr
+        if isinstance(addr, str) and "." in addr:
+            addr_hex = addr.split(".")[-1]
+        return f"{base}.{addr_hex}" if addr_hex else base
+
     def _advance_qr_cycle(self, force_row: bool = False) -> None:
         if not self.qr_candidates:
             self.qr_cycle_lines = []
@@ -1638,6 +1667,29 @@ class UnifiedUI:
                 break
         win.clear()
         win.refresh()
+
+    def _prompt_number(self, stdscr, title: str, default_val: int) -> Optional[int]:
+        prompt = f"{title} (current: {default_val}): "
+        width = min(max(len(prompt) + 12, 30), curses.COLS - 2)
+        height = 5
+        y = max(1, (curses.LINES - height) // 2)
+        x = max(1, (curses.COLS - width) // 2)
+        win = curses.newwin(height, width, y, x)
+        win.box()
+        win.addnstr(1, 2, prompt[: width - 4], curses.A_BOLD)
+        curses.echo()
+        try:
+            win.move(2, 2)
+            s = win.getstr(2, 2, width - 4)
+            try:
+                val = int(s.decode('utf-8', errors='ignore') or default_val)
+            except Exception:
+                val = default_val
+            return val
+        finally:
+            curses.noecho()
+            win.clear()
+            win.refresh()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2150,6 +2202,7 @@ class RelayNode:
         self.max_body = int(node_cfg.get("max_body_b") or http_cfg.get("max_body_b") or (2 * 1024 * 1024))
         self.verify_default = bool(node_cfg.get("verify_default") if node_cfg.get("verify_default") is not None else http_cfg.get("verify_default", True))
         self.chunk_raw_b = int(http_cfg.get("chunk_raw_b", 12 * 1024))
+        self.chunk_upload_b = int(http_cfg.get("chunk_upload_b", 600 * 1024))
         self.heartbeat_s = float(http_cfg.get("heartbeat_s", 10))
         self.batch_lines = int(http_cfg.get("batch_lines", 24))
         self.batch_latency = float(http_cfg.get("batch_latency", 0.08))
@@ -2190,6 +2243,7 @@ class RelayNode:
         self.rate_limit_since: Optional[float] = None
         self.rate_limit_hits: Deque[float] = deque(maxlen=64)
         self.last_rate_limit: Optional[float] = None
+        self.upload_sessions: Dict[str, dict] = {}
 
     # lifecycle -------------------------------------------------
     def start(self):
@@ -2248,6 +2302,15 @@ class RelayNode:
                 req = req_from_asr_start(body)
                 if self._check_assignment("whisper_asr", src, rid):
                     self._enqueue_request(src, rid, req)
+                return
+            if event == "http.upload.begin":
+                self._handle_upload_begin(src, rid, body)
+                return
+            if event == "http.upload.chunk":
+                self._handle_upload_chunk(src, rid, body)
+                return
+            if event == "http.upload.end":
+                self._handle_upload_end(src, rid, body)
                 return
             if event == "asr.audio":
                 req = req_from_asr_audio(body)
@@ -2495,6 +2558,104 @@ class RelayNode:
             self._register_rate_limit_hit()
         else:
             self._reset_rate_limit()
+
+    def _send_upload_error(self, src: str, rid: str, message: str, status: int = 400) -> None:
+        payload = {
+            "event": "relay.response",
+            "id": rid,
+            "ok": False,
+            "status": status,
+            "headers": {},
+            "json": None,
+            "body_b64": None,
+            "truncated": False,
+            "error": message,
+        }
+        self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+        self.ui.bump(self.node_id, "ERR", f"upload {rid}: {message}")
+
+    def _handle_upload_begin(self, src: str, rid: str, body: dict) -> None:
+        uid = body.get("upload_id") or rid
+        if not uid:
+            return
+        req = body.get("req") or {}
+        total = int(body.get("total") or body.get("total_chunks") or 0)
+        ctype = body.get("content_type") or (req.get("headers") or {}).get("Content-Type") or ""
+        entry = {
+            "src": src,
+            "rid": rid,
+            "req": req,
+            "chunks": [None] * total if total > 0 else [],
+            "total": total,
+            "got": 0,
+            "ended": False,
+            "ctype": ctype,
+            "created": time.time(),
+        }
+        self.upload_sessions[uid] = entry
+        self.ui.bump(self.node_id, "IN", f"upload begin {rid} total={total}")
+
+    def _handle_upload_chunk(self, src: str, rid: str, body: dict) -> None:
+        uid = body.get("upload_id") or rid
+        entry = self.upload_sessions.get(uid)
+        if not entry:
+            self._send_upload_error(src, rid, "unknown upload id", 404)
+            return
+        b64 = body.get("b64") or ""
+        try:
+            raw = base64.b64decode(str(b64), validate=False)
+        except Exception:
+            self._send_upload_error(src, rid, "invalid chunk b64", 400)
+            return
+        if len(raw) > self.chunk_upload_b:
+            self._send_upload_error(src, rid, f"chunk too large ({len(raw)} > {self.chunk_upload_b})", 413)
+            self.upload_sessions.pop(uid, None)
+            return
+        seq = int(body.get("seq") or 0)
+        total = entry.get("total") or 0
+        if total > 0 and (seq < 1 or seq > total):
+            self._send_upload_error(src, rid, "chunk seq out of range", 400)
+            return
+        if total > 0:
+            if entry["chunks"][seq - 1] is None:
+                entry["got"] += 1
+            entry["chunks"][seq - 1] = raw
+        else:
+            entry["chunks"].append(raw)
+            entry["got"] += 1
+        entry["last"] = time.time()
+        if entry.get("ended") and ((total > 0 and entry["got"] >= total) or total == 0):
+            self._finalize_upload(uid, entry)
+
+    def _handle_upload_end(self, src: str, rid: str, body: dict) -> None:
+        uid = body.get("upload_id") or rid
+        entry = self.upload_sessions.get(uid)
+        if not entry:
+            self._send_upload_error(src, rid, "unknown upload id", 404)
+            return
+        entry["ended"] = True
+        total = entry.get("total") or 0
+        if total == 0 or entry["got"] >= total:
+            self._finalize_upload(uid, entry)
+
+    def _finalize_upload(self, uid: str, entry: dict) -> None:
+        try:
+            chunks = entry.get("chunks") or []
+            data = b"".join(ch for ch in chunks if ch is not None)
+            req = dict(entry.get("req") or {})
+            ctype = entry.get("ctype") or (req.get("headers") or {}).get("Content-Type") or ""
+            if "application/json" in ctype:
+                try:
+                    text = data.decode("utf-8", errors="ignore")
+                    req["json"] = json.loads(text)
+                except Exception:
+                    req["body_b64"] = base64.b64encode(data).decode("ascii")
+            else:
+                req["body_b64"] = base64.b64encode(data).decode("ascii")
+            self._enqueue_request(entry.get("src") or "", entry.get("rid") or "", req)
+            self.ui.bump(self.node_id, "IN", f"upload complete {entry.get('rid')}")
+        finally:
+            self.upload_sessions.pop(uid, None)
 
     def _register_rate_limit_hit(self) -> None:
         now = time.time()
@@ -2793,6 +2954,10 @@ class Router:
         self.ui = UnifiedUI(use_ui)
         self.ui.set_action_handler(self.handle_ui_action)
         ensure_bridge()
+        http_cfg = self.cfg.get("http", {})
+        if http_cfg:
+            kb = int(http_cfg.get("chunk_upload_b", 600 * 1024) // 1024)
+            self.ui.set_chunk_upload_kb(kb)
 
         self.watchdog = ServiceWatchdog(BASE_DIR)
         self.watchdog.ensure_sources()
@@ -3113,6 +3278,19 @@ class Router:
                 self.daemon_info = None
                 self.ui.set_daemon_info(None)
                 LOGGER.info("Daemon sentinel removed")
+        elif typ == "config":
+            key = action.get("key")
+            if key == "chunk_upload_kb":
+                try:
+                    kb = max(4, int(action.get("value")))
+                    self.cfg.setdefault("http", {})["chunk_upload_b"] = kb * 1024
+                    for node in self.nodes:
+                        node.chunk_upload_b = kb * 1024
+                    self.ui.set_chunk_upload_kb(kb)
+                    self.config_dirty = True
+                    LOGGER.info("Updated chunk_upload_b to %dkB", kb)
+                except Exception as exc:
+                    LOGGER.warning("Failed to update chunk_upload_kb: %s", exc)
 
     def _cycle_service(self, service: Optional[str]):
         if not service or service not in self.latest_service_status:
