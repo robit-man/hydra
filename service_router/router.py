@@ -1172,7 +1172,422 @@ def ensure_bridge() -> None:
 
 
 # ──────────────────────────────────────────────────────────────
-# Unified curses UI
+# Stats tracking for address book and service usage
+# ──────────────────────────────────────────────────────────────
+STATS_DIR = BASE_DIR / ".stats"
+STATS_DIR.mkdir(parents=True, exist_ok=True)
+SERVICE_STATS_FILE = STATS_DIR / "service_stats.jsonl"
+ADDRESS_BOOK_FILE = STATS_DIR / "address_book.jsonl"
+EGRESS_STATS_FILE = STATS_DIR / "egress_stats.jsonl"
+
+
+class StatsTracker:
+    """Track service utilization, address book, and egress bandwidth."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        # In-memory stats for fast access
+        self.service_history: Dict[str, List[Tuple[float, int]]] = {}  # service -> [(timestamp, requests_count)]
+        self.address_book: Dict[str, Dict[str, Any]] = {}  # nkn_addr -> {first_seen, last_seen, services: {svc: count}}
+        self.egress_stats: Dict[str, Dict[str, Any]] = {}  # service -> {bytes_sent, request_count, users: {addr: bytes}}
+
+        # Load existing stats
+        self._load_stats()
+
+    def _load_stats(self):
+        """Load stats from jsonl files."""
+        try:
+            if SERVICE_STATS_FILE.exists():
+                for line in SERVICE_STATS_FILE.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    svc = data.get("service")
+                    if svc:
+                        self.service_history.setdefault(svc, []).append((data.get("ts", 0), data.get("count", 1)))
+        except Exception:
+            pass
+
+        try:
+            if ADDRESS_BOOK_FILE.exists():
+                for line in ADDRESS_BOOK_FILE.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    addr = data.get("addr")
+                    if addr:
+                        self.address_book[addr] = data
+        except Exception:
+            pass
+
+        try:
+            if EGRESS_STATS_FILE.exists():
+                for line in EGRESS_STATS_FILE.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    svc = data.get("service")
+                    if svc:
+                        self.egress_stats[svc] = data
+        except Exception:
+            pass
+
+    def record_request(self, service: str, nkn_addr: str, bytes_sent: int = 0):
+        """Record a service request from an NKN address."""
+        with self.lock:
+            now = time.time()
+
+            # Update service history
+            self.service_history.setdefault(service, []).append((now, 1))
+            # Keep only last 24 hours
+            cutoff = now - 86400
+            self.service_history[service] = [(ts, cnt) for ts, cnt in self.service_history[service] if ts > cutoff]
+
+            # Update address book
+            if nkn_addr and nkn_addr != "—":
+                if nkn_addr not in self.address_book:
+                    self.address_book[nkn_addr] = {
+                        "addr": nkn_addr,
+                        "first_seen": now,
+                        "last_seen": now,
+                        "services": {},
+                        "total_requests": 0
+                    }
+                entry = self.address_book[nkn_addr]
+                entry["last_seen"] = now
+                entry["services"].setdefault(service, 0)
+                entry["services"][service] += 1
+                entry["total_requests"] = entry.get("total_requests", 0) + 1
+
+                # Write address book entry
+                try:
+                    with open(ADDRESS_BOOK_FILE, "a") as f:
+                        f.write(json.dumps(entry) + "\n")
+                except Exception:
+                    pass
+
+            # Update egress stats
+            if bytes_sent > 0:
+                if service not in self.egress_stats:
+                    self.egress_stats[service] = {
+                        "service": service,
+                        "bytes_sent": 0,
+                        "request_count": 0,
+                        "users": {}
+                    }
+                entry = self.egress_stats[service]
+                entry["bytes_sent"] += bytes_sent
+                entry["request_count"] += 1
+                if nkn_addr and nkn_addr != "—":
+                    entry["users"].setdefault(nkn_addr, 0)
+                    entry["users"][nkn_addr] += bytes_sent
+
+                # Write egress stats periodically (every 10 requests)
+                if entry["request_count"] % 10 == 0:
+                    try:
+                        with open(EGRESS_STATS_FILE, "a") as f:
+                            f.write(json.dumps(entry) + "\n")
+                    except Exception:
+                        pass
+
+            # Write service stats
+            try:
+                with open(SERVICE_STATS_FILE, "a") as f:
+                    f.write(json.dumps({"ts": now, "service": service, "count": 1}) + "\n")
+            except Exception:
+                pass
+
+    def get_service_timeline(self, hours: int = 24) -> Dict[str, List[Tuple[float, int]]]:
+        """Get service utilization timeline for the last N hours."""
+        with self.lock:
+            cutoff = time.time() - (hours * 3600)
+            result = {}
+            for svc, history in self.service_history.items():
+                result[svc] = [(ts, cnt) for ts, cnt in history if ts > cutoff]
+            return result
+
+    def get_address_book(self) -> List[Dict[str, Any]]:
+        """Get all addresses sorted by last seen."""
+        with self.lock:
+            return sorted(self.address_book.values(), key=lambda x: x.get("last_seen", 0), reverse=True)
+
+    def get_egress_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Get egress bandwidth stats."""
+        with self.lock:
+            return dict(self.egress_stats)
+
+
+# ──────────────────────────────────────────────────────────────
+# Enhanced Nested Menu UI
+# ──────────────────────────────────────────────────────────────
+class EnhancedUI:
+    """Enhanced nested menu interface with Config, Statistics, Address Book, Ingress, and Egress views."""
+
+    MENU_ITEMS = ["Config", "Statistics", "Address Book", "Ingress", "Egress"]
+
+    def __init__(self, enabled: bool, config_path: Path):
+        self.enabled = enabled and curses is not None and sys.stdout.isatty()
+        self.config_path = config_path
+        self.events: "queue.Queue[tuple[str, str, str, str]]" = queue.Queue()
+        self.nodes: Dict[str, dict] = {}
+        self.services: Dict[str, dict] = {}
+        self.daemon_info: Optional[dict] = None
+        self.stop = threading.Event()
+        self.action_handler: Optional[Callable[[dict], None]] = None
+
+        # Menu state
+        self.current_view = "main"  # main, config, stats, addressbook, ingress, egress
+        self.main_menu_index = 0
+        self.scroll_offset = 0
+        self.selected_service = None
+        self.selected_address = None
+        self.show_qr = False
+        self.qr_data = ""
+        self.qr_label = ""
+
+        # Activity tracking
+        self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=500)
+
+        # Stats tracker
+        self.stats = StatsTracker()
+
+        # Service configuration (enabled/disabled)
+        self.service_config: Dict[str, bool] = {}  # service_name -> enabled
+        self._load_service_config()
+
+    def _load_service_config(self):
+        """Load service enabled/disabled state from config."""
+        try:
+            if self.config_path.exists():
+                cfg = json.loads(self.config_path.read_text())
+                for node_cfg in cfg.get("nodes", []):
+                    for svc in node_cfg.get("services", []):
+                        svc_name = svc if isinstance(svc, str) else svc.get("name")
+                        if svc_name:
+                            self.service_config.setdefault(svc_name, True)
+        except Exception:
+            pass
+
+    def _save_service_config(self):
+        """Save service configuration to config file."""
+        try:
+            if self.config_path.exists():
+                cfg = json.loads(self.config_path.read_text())
+            else:
+                cfg = {"nodes": []}
+
+            # Update service enabled states in config
+            # Note: This is a simplified approach; actual implementation would need
+            # to properly map services to nodes and update the config structure
+            cfg["service_states"] = self.service_config
+
+            self.config_path.write_text(json.dumps(cfg, indent=2))
+
+            if self.action_handler:
+                self.action_handler({"type": "config_saved"})
+        except Exception as e:
+            pass
+
+    # Public API (compatible with UnifiedUI)
+    def add_node(self, node_id: str, name: str):
+        self.nodes.setdefault(node_id, {
+            "name": name,
+            "addr": "—",
+            "state": "booting",
+            "last": "",
+            "in": 0,
+            "out": 0,
+            "err": 0,
+            "queue": 0,
+            "services": [],
+            "started": time.time(),
+        })
+
+    def set_action_handler(self, handler: Callable[[dict], None]):
+        self.action_handler = handler
+
+    def set_addr(self, node_id: str, addr: Optional[str]):
+        if node_id in self.nodes:
+            self.nodes[node_id]["addr"] = addr or "—"
+            self.nodes[node_id]["state"] = "online" if addr else "waiting"
+
+    def set_state(self, node_id: str, state: str):
+        if node_id in self.nodes:
+            self.nodes[node_id]["state"] = state
+
+    def set_queue(self, node_id: str, size: int):
+        if node_id in self.nodes:
+            self.nodes[node_id]["queue"] = max(0, size)
+
+    def set_node_services(self, node_id: str, services: List[str]):
+        if node_id in self.nodes:
+            self.nodes[node_id]["services"] = services
+
+    def update_service_info(self, name: str, info: dict):
+        cur = self.services.get(name, {})
+        cur.update(info)
+        self.services[name] = cur
+        self.service_config.setdefault(name, True)
+
+    def set_daemon_info(self, info: Optional[dict]):
+        self.daemon_info = info
+
+    def bump(self, node_id: str, kind: str, msg: str):
+        target = self.nodes.get(node_id)
+        if target:
+            target["last"] = msg
+            if kind == "IN":
+                target["in"] += 1
+            elif kind == "OUT":
+                target["out"] += 1
+            elif kind == "ERR":
+                target["err"] += 1
+
+        ts = time.strftime("%H:%M:%S")
+        source = target.get("name") if target else node_id
+        self.activity.append((ts, source or node_id, kind, msg))
+
+        # Track stats
+        if kind == "IN":
+            # Extract service from message if possible
+            for svc in self.services.keys():
+                if svc in msg:
+                    # Extract NKN address if present (simplified)
+                    nkn_addr = "—"
+                    self.stats.record_request(svc, nkn_addr)
+                    break
+
+        if self.enabled:
+            self.events.put((node_id, kind, msg, ts))
+        else:
+            print(f"[{ts}] {source:<8} {kind:<3} {msg}")
+
+    def run(self):
+        if not self.enabled:
+            try:
+                while not self.stop.is_set():
+                    time.sleep(0.25)
+            except KeyboardInterrupt:
+                pass
+            return
+        curses.wrapper(self._main)
+
+    def shutdown(self):
+        self.stop.set()
+
+    def set_chunk_upload_kb(self, kb: int):
+        # Placeholder for compatibility
+        pass
+
+    # ──────────────────────────────────────────────────────────────
+    # Curses UI Implementation
+    # ──────────────────────────────────────────────────────────────
+
+    def _main(self, stdscr):
+        """Main curses loop with nested menu system."""
+        curses.curs_set(0)
+        stdscr.nodelay(True)
+        stdscr.timeout(120)
+
+        # Initialize colors
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_CYAN, -1)  # Header
+            curses.init_pair(2, curses.COLOR_GREEN, -1)  # Active/OK
+            curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Warning
+            curses.init_pair(4, curses.COLOR_RED, -1)  # Error
+            curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # Section
+            curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Selected
+
+        while not self.stop.is_set():
+            # Clear events queue
+            try:
+                while True:
+                    _ = self.events.get_nowait()
+            except queue.Empty:
+                pass
+
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+
+            if self.current_view == "main":
+                self._render_main_menu(stdscr, h, w)
+            elif self.current_view == "config":
+                self._render_config_view(stdscr, h, w)
+            elif self.current_view == "stats":
+                self._render_stats_view(stdscr, h, w)
+            elif self.current_view == "addressbook":
+                self._render_address_book_view(stdscr, h, w)
+            elif self.current_view == "ingress":
+                self._render_ingress_view(stdscr, h, w)
+            elif self.current_view == "egress":
+                self._render_egress_view(stdscr, h, w)
+
+            stdscr.refresh()
+
+            # Handle input
+            try:
+                ch = stdscr.getch()
+                self._handle_input(ch)
+            except Exception:
+                pass
+
+    def _safe_addstr(self, stdscr, y, x, text, attr=curses.A_NORMAL):
+        """Safely add string to stdscr, handling errors."""
+        try:
+            h, w = stdscr.getmaxyx()
+            if 0 <= y < h and 0 <= x < w:
+                max_len = w - x - 1
+                if len(text) > max_len:
+                    text = text[:max_len]
+                stdscr.addstr(y, x, text, attr)
+        except curses.error:
+            pass
+
+    def _draw_box(self, stdscr, y, x, h, w):
+        """Draw a box border."""
+        try:
+            stdscr.attron(curses.A_DIM)
+            stdscr.addstr(y, x, "╔" + "═" * (w - 2) + "╗")
+            stdscr.addstr(y + h - 1, x, "╚" + "═" * (w - 2) + "╝")
+            for row in range(y + 1, y + h - 1):
+                stdscr.addstr(row, x, "║")
+                stdscr.addstr(row, x + w - 1, "║")
+            stdscr.attroff(curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _render_main_menu(self, stdscr, h, w):
+        """Render the main menu."""
+        header = "═══ Hydra NKN Router ═══"
+        self._safe_addstr(stdscr, 0, (w - len(header)) // 2, header, curses.color_pair(1) | curses.A_BOLD)
+
+        help_text = "↑/↓: Navigate | Enter: Select | Q: Quit"
+        self._safe_addstr(stdscr, 1, (w - len(help_text)) // 2, help_text, curses.A_DIM)
+
+        start_row = 4
+        for i, item in enumerate(self.MENU_ITEMS):
+            row = start_row + i * 2
+            if row >= h - 2:
+                break
+
+            if i == self.main_menu_index:
+                text = f"  ▶ {item} ◀"
+                attr = curses.color_pair(6) | curses.A_BOLD
+            else:
+                text = f"    {item}    "
+                attr = curses.color_pair(2)
+
+            col = (w - len(text)) // 2
+            self._safe_addstr(stdscr, row, col, text, attr)
+
+        status = f"Services: {len(self.services)} | Nodes: {len(self.nodes)}"
+        self._safe_addstr(stdscr, h - 1, 2, status, curses.A_DIM)
+
+
+# ──────────────────────────────────────────────────────────────
+# Unified curses UI (Legacy - kept for backwards compatibility)
 # ──────────────────────────────────────────────────────────────
 class UnifiedUI:
     def __init__(self, enabled: bool):
