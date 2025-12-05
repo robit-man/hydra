@@ -3394,61 +3394,6 @@ class RelayNode:
         except Exception:
             pass
 
-    # Port Detection -------------------------------------------
-    def _detect_service_port(self, service_name: str) -> Optional[int]:
-        """Detect actual port a service is running on by parsing its log file."""
-        log_file = LOGS_ROOT / f"{service_name}.log"
-        if not log_file.exists():
-            return None
-
-        try:
-            # Read last 100 lines of log file (most recent startup info)
-            with open(log_file, 'r') as f:
-                lines = f.readlines()[-100:]
-
-            # Look for common port announcement patterns
-            patterns = [
-                r'Running on .*:(\d+)',  # Flask: "Running on http://127.0.0.1:5000"
-                r'listening on .*:(\d+)',  # Generic: "listening on 0.0.0.0:8080"
-                r'Listening on port (\d+)',  # Generic: "Listening on port 8080"
-                r'Server.*port (\d+)',  # Generic: "Server started on port 8080"
-                r'Started.*:(\d+)',  # Generic: "Started on :8080"
-                r'http://[^:]+:(\d+)',  # URL pattern: "http://127.0.0.1:8080"
-            ]
-
-            for line in reversed(lines):  # Start from most recent
-                for pattern in patterns:
-                    match = re.search(pattern, line, re.IGNORECASE)
-                    if match:
-                        port = int(match.group(1))
-                        # Sanity check: port should be in reasonable range
-                        if 1024 <= port <= 65535:
-                            return port
-
-            return None
-        except Exception as e:
-            LOGGER.debug(f"Port detection failed for {service_name}: {e}")
-            return None
-
-    def _update_service_ports(self):
-        """Update SERVICE_TARGETS with detected ports from running services."""
-        for service_name in SERVICE_TARGETS.keys():
-            detected_port = self._detect_service_port(service_name)
-            if detected_port:
-                current_ports = SERVICE_TARGETS[service_name].get("ports", [])
-                if detected_port not in current_ports:
-                    # Port not in whitelist, add it
-                    SERVICE_TARGETS[service_name]["ports"].append(detected_port)
-                    LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
-
-                # Update endpoint to show actual detected port
-                current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
-                if current_endpoint and f":{detected_port}" not in current_endpoint:
-                    # Update endpoint to reflect detected port
-                    base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
-                    SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
-                    LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
-
     # HTTP workers ---------------------------------------------
     def _validate_url_port(self, url: str, service: str = "") -> bool:
         """Validate URL port against known service endpoints (port isolation security)."""
@@ -4215,6 +4160,61 @@ class Router:
             self.node_addresses[node.node_id] = None
 
         self._refresh_node_assignments()
+
+    # Port Detection -------------------------------------------
+    def _detect_service_port(self, service_name: str) -> Optional[int]:
+        """Detect actual port a service is running on by parsing its log file."""
+        log_file = LOGS_ROOT / f"{service_name}.log"
+        if not log_file.exists():
+            return None
+
+        try:
+            # Read last 100 lines of log file (most recent startup info)
+            with open(log_file, 'r') as f:
+                lines = f.readlines()[-100:]
+
+            # Look for common port announcement patterns
+            patterns = [
+                r'Running on .*:(\d+)',  # Flask: "Running on http://127.0.0.1:5000"
+                r'listening on .*:(\d+)',  # Generic: "listening on 0.0.0.0:8080"
+                r'Listening on port (\d+)',  # Generic: "Listening on port 8080"
+                r'Server.*port (\d+)',  # Generic: "Server started on port 8080"
+                r'Started.*:(\d+)',  # Generic: "Started on :8080"
+                r'http://[^:]+:(\d+)',  # URL pattern: "http://127.0.0.1:8080"
+            ]
+
+            for line in reversed(lines):  # Start from most recent
+                for pattern in patterns:
+                    match = re.search(pattern, line, re.IGNORECASE)
+                    if match:
+                        port = int(match.group(1))
+                        # Sanity check: port should be in reasonable range
+                        if 1024 <= port <= 65535:
+                            return port
+
+            return None
+        except Exception as e:
+            LOGGER.debug(f"Port detection failed for {service_name}: {e}")
+            return None
+
+    def _update_service_ports(self):
+        """Update SERVICE_TARGETS with detected ports from running services."""
+        for service_name in SERVICE_TARGETS.keys():
+            detected_port = self._detect_service_port(service_name)
+            if detected_port:
+                current_ports = SERVICE_TARGETS[service_name].get("ports", [])
+                if detected_port not in current_ports:
+                    # Port not in whitelist, add it
+                    SERVICE_TARGETS[service_name]["ports"].append(detected_port)
+                    LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+
+                # Update endpoint to show actual detected port
+                current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
+                if current_endpoint and f":{detected_port}" not in current_endpoint:
+                    # Update endpoint to reflect detected port
+                    base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
+                    SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
+                    LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
 
     def start(self):
         LOGGER.info("Starting services via watchdog")
