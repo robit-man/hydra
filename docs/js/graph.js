@@ -8437,6 +8437,8 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
         const maxX = cur.scrollWidth - cur.clientWidth;
         if ((dx < 0 && left > 0) || (dx > 0 && left < maxX - 1)) return true;
       }
+      // If a Three.js viewport is under the cursor, let it consume wheel
+      if (cur.matches?.('[data-pointcloud-viewer], [data-face-viewer]')) return true;
       if (isNode) {
         cur = cur.parentElement;
         break;

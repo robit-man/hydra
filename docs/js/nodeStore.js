@@ -235,6 +235,27 @@ const NodeStore = {
       lastEventTs: 0,
       running: false
     },
+    Pointcloud: {
+      base: 'http://127.0.0.1:5000',
+      relay: '',
+      api: '',
+      endpointMode: 'auto',
+      defaultModel: '',
+      autoLoadModel: true,
+      resolution: 504,
+      maxPoints: 1000000,
+      alignToInputScale: true,
+      includeConfidence: false,
+      applyConfidenceFilter: false,
+      processResMethod: 'upper_bound_resize',
+      inferGs: false,
+      confThreshPercentile: 40,
+      showCameras: true,
+      featVisFps: 15,
+      pointSize: 0.05,
+      gridDistance: 10,
+      showViewer: true
+    },
     Location: {
       format: 'raw',
       precision: 6,

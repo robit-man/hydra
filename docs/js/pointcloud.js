@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from 'three/addons/controls/FlyControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { Net } from './net.js';
 
 function createPointcloud({ Router, NodeStore, setBadge, log }) {
   const STATE = new Map();
@@ -79,6 +80,29 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     else el.style.color = '#ccc';
   }
 
+  function resolveEndpointConfig(nodeId, override = {}) {
+    const cfg = Object.assign({}, getConfig(nodeId) || {}, override || {});
+    const baseRaw = String(cfg.base || 'http://127.0.0.1:5000').trim();
+    const relayRaw = String(cfg.relay || '').trim();
+    const api = String(cfg.api || '').trim();
+    const modeRaw = String(cfg.endpointMode || 'auto').toLowerCase();
+    const viaNkn = !!relayRaw && (modeRaw === 'auto' || modeRaw === 'remote' || modeRaw === 'nkn');
+    return {
+      base: (baseRaw || 'http://127.0.0.1:5000').replace(/\/+$/, ''),
+      api,
+      relay: viaNkn ? relayRaw : '',
+      viaNkn,
+      mode: modeRaw
+    };
+  }
+
+  const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(blob);
+  });
+
   async function maybeAutoLoadModel(nodeId, models) {
     const state = ensureState(nodeId);
     if (!state || state.modelReady) return;
@@ -120,13 +144,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
 
     const cfg = getConfig(nodeId);
     const baseOverride = opts?.baseOverride || opts?.baseUrl;
-    const baseUrl = (baseOverride || cfg.base || 'http://127.0.0.1:5000').replace(/\/$/, '');
+    const endpoint = resolveEndpointConfig(nodeId, baseOverride ? { base: baseOverride } : {});
+    const baseUrl = endpoint.base;
 
     try {
-      const response = await fetch(`${baseUrl}/api/models/list`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const data = await response.json();
+      const data = await Net.getJSON(baseUrl, '/api/models/list', endpoint.api, endpoint.viaNkn, endpoint.relay);
       state.availableModels = data.models || [];
 
       const current = state.availableModels.find(m => m.current);
@@ -158,46 +180,33 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       return state.modelLoadPromise;
     }
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const endpoint = resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     const doLoad = async () => {
       state.modelLoading = true;
       state.modelReady = false;
       try {
         updateStatus(nodeId, `Selecting ${modelId}…`, 'pending');
-        const selectResponse = await fetch(`${baseUrl}/api/models/select`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model_id: modelId })
-        });
-
-        if (!selectResponse.ok) throw new Error(`Select failed: ${selectResponse.status}`);
-
+        await Net.postJSON(baseUrl, '/api/models/select', { model_id: modelId }, endpoint.api, endpoint.viaNkn, endpoint.relay);
         state.currentModel = modelId;
         updateStatus(nodeId, `Loading ${modelId}…`, 'pending');
-        const loadResponse = await fetch(`${baseUrl}/api/load_model`, {
-          method: 'POST'
-        });
-
-        if (!loadResponse.ok) {
-          let message = '';
-          try {
-            const j = await loadResponse.json();
-            message = j?.message || j?.error || '';
-          } catch (_) { /* ignore */ }
-          if (loadResponse.status === 400 && /already loading/i.test(message)) {
-            const ready = await pollModelStatus(nodeId);
+        try {
+          await Net.postJSON(baseUrl, '/api/load_model', {}, endpoint.api, endpoint.viaNkn, endpoint.relay);
+        } catch (err) {
+          const message = err?.message || '';
+          if (/already loading/i.test(message)) {
+            const ready = await pollModelStatus(nodeId, { endpoint });
             if (ready) {
               state.currentModel = modelId;
               updateStatus(nodeId, `Model ready: ${modelId}`, 'ok');
               return true;
             }
           }
-          throw new Error(message || `Load failed (${loadResponse.status})`);
+          throw err;
         }
 
-        const ready = await pollModelStatus(nodeId);
+        const ready = await pollModelStatus(nodeId, { endpoint });
         if (!ready) throw new Error('Model did not become ready');
         updateStatus(nodeId, `Model ready: ${modelId}`, 'ok');
 
@@ -217,23 +226,17 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     return state.modelLoadPromise;
   }
 
-  async function pollModelStatus(nodeId, { once = false } = {}) {
+  async function pollModelStatus(nodeId, { once = false, endpoint: endpointOverride = null } = {}) {
     const state = ensureState(nodeId);
     if (!state) return false;
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = (cfg.base || 'http://127.0.0.1:5000').replace(/\/+$/, '');
+    const endpoint = endpointOverride || resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     return new Promise((resolve) => {
       const checkStatus = async () => {
         try {
-          const response = await fetch(`${baseUrl}/api/model_status`);
-          if (!response.ok) {
-            resolve(false);
-            return;
-          }
-
-          const data = await response.json();
+          const data = await Net.getJSON(baseUrl, '/api/model_status', endpoint.api, endpoint.viaNkn, endpoint.relay);
           const status = data.status;
           const progress = data.progress || 0;
           if (status === 'ready') {
@@ -263,9 +266,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
   async function ensureModelReady(nodeId) {
     const state = ensureState(nodeId);
     if (!state) return false;
-    const ready = await pollModelStatus(nodeId, { once: true });
+    const endpoint = resolveEndpointConfig(nodeId);
+    const ready = await pollModelStatus(nodeId, { once: true, endpoint });
     if (ready) return true;
-    const statusCheck = await pollModelStatus(nodeId, { once: true });
+    const statusCheck = await pollModelStatus(nodeId, { once: true, endpoint });
     if (statusCheck) return true;
     if (state.currentModel) {
       const loaded = await loadModel(nodeId, state.currentModel);
@@ -281,7 +285,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     // If still not ready, try polling for a short period
     const maxAttempts = 20;
     for (let i = 0; i < maxAttempts; i++) {
-      const ok = await pollModelStatus(nodeId, { once: true });
+      const ok = await pollModelStatus(nodeId, { once: true, endpoint });
       if (ok) return true;
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -293,10 +297,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     if (!state) return null;
 
     const cfg = getConfig(nodeId);
-    const baseUrlRaw = cfg.base || 'http://127.0.0.1:5000';
-    const baseUrl = (baseUrlRaw || '').replace(/\/+$/, '');
-    const apiKey = cfg.api || '';
-    // Force direct HTTP for uploads (NKN relay not supported for multipart here)
+    const endpoint = resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
+    const apiKey = cfg.api || endpoint.api || '';
+    const useRelay = endpoint.viaNkn && endpoint.relay;
 
     if (state.processing) {
       if (setBadge) setBadge('Already processing', false);
@@ -353,40 +357,79 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         return null;
       }
 
-      const formData = new FormData();
       const filename = imageData?.name || 'image.png';
       const mime = (typeof imageData === 'object' && imageData?.type) ? imageData.type : (mimeGuess || 'image/png');
-      formData.append('file', blob, filename);
+      const params = {
+        resolution: cfg.resolution,
+        max_points: cfg.maxPoints,
+        align_to_input_ext_scale: cfg.alignToInputScale,
+        include_confidence: cfg.includeConfidence,
+        apply_confidence_filter: cfg.applyConfidenceFilter,
+        process_res_method: cfg.processResMethod || 'upper_bound_resize',
+        infer_gs: cfg.inferGs ?? 'false',
+        conf_thresh_percentile: cfg.confThreshPercentile ?? 40,
+        show_cameras: cfg.showCameras ?? 'true',
+        feat_vis_fps: cfg.featVisFps ?? 15
+      };
 
-      if (cfg.resolution) formData.append('resolution', cfg.resolution);
-      if (cfg.maxPoints) formData.append('max_points', cfg.maxPoints);
-      if (cfg.alignToInputScale) formData.append('align_to_input_ext_scale', cfg.alignToInputScale);
-      if (cfg.includeConfidence) formData.append('include_confidence', cfg.includeConfidence);
-      if (cfg.applyConfidenceFilter) formData.append('apply_confidence_filter', cfg.applyConfidenceFilter);
-      formData.append('process_res_method', cfg.processResMethod || 'upper_bound_resize');
-      formData.append('infer_gs', cfg.inferGs ?? 'false');
-      formData.append('conf_thresh_percentile', cfg.confThreshPercentile ?? 40);
-      formData.append('show_cameras', cfg.showCameras ?? 'true');
-      formData.append('feat_vis_fps', cfg.featVisFps ?? 15);
-
-      const response = await fetch(`${baseUrl}/api/process`, {
-        method: 'POST',
-        body: formData,
-        headers: apiKey ? { Authorization: apiKey } : undefined
-      });
-
-      if (!response.ok) {
-        let reason = `HTTP ${response.status}`;
-        try {
-          const errJson = await response.json();
-          reason = errJson?.error || errJson?.message || reason;
-        } catch (_) {
-          try { reason = await response.text(); } catch (_) { /* ignore */ }
+      let result = null;
+      if (useRelay) {
+        let dataUrl = null;
+        if (typeof imageData === 'string') {
+          dataUrl = imageData.startsWith('data:') ? imageData : `data:${mime};base64,${imageData}`;
+        } else if (imageData && typeof imageData === 'object') {
+          if (imageData.dataUrl) dataUrl = imageData.dataUrl;
+          else if (imageData.b64 || imageData.image || imageData.data) {
+            const b64 = imageData.b64 || imageData.image || imageData.data;
+            dataUrl = `data:${imageData.mime || mime};base64,${b64}`;
+          }
         }
-        throw new Error(reason);
-      }
+        if (!dataUrl) {
+          try {
+            dataUrl = await blobToDataUrl(blob);
+          } catch (_) {
+            dataUrl = null;
+          }
+        }
+        if (!dataUrl) {
+          updateStatus(nodeId, 'Unable to encode image', 'err');
+          if (setBadge) setBadge('Unable to encode image for relay', false);
+          return null;
+        }
+        const b64Payload = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const body = { dataUrl, b64: b64Payload, filename, mime };
+        Object.entries(params).forEach(([k, v]) => {
+          if (v !== undefined && v !== null && v !== '') body[k] = v;
+        });
+        result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000);
+      } else {
+        const formData = new FormData();
+        formData.append('file', blob, filename);
+        Object.entries(params).forEach(([key, val]) => {
+          if (val !== undefined && val !== null && val !== '') {
+            formData.append(key, val);
+          }
+        });
 
-      const result = await response.json();
+        const response = await fetch(`${baseUrl}/api/process`, {
+          method: 'POST',
+          body: formData,
+          headers: apiKey ? { Authorization: apiKey } : undefined
+        });
+
+        if (!response.ok) {
+          let reason = `HTTP ${response.status}`;
+          try {
+            const errJson = await response.json();
+            reason = errJson?.error || errJson?.message || reason;
+          } catch (_) {
+            try { reason = await response.text(); } catch (_) { /* ignore */ }
+          }
+          throw new Error(reason);
+        }
+
+        result = await response.json();
+      }
 
       const directPc = result.pointcloud;
       if (result.status === 'completed' && directPc) {
@@ -396,7 +439,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         return directPc;
       } else if (result.job_id) {
         state.lastJobId = result.job_id;
-        const pointcloud = await pollJobStatus(nodeId, result.job_id);
+        const pointcloud = await pollJobStatus(nodeId, result.job_id, endpoint);
         if (pointcloud) {
           updatePointcloudViewer(nodeId, pointcloud);
           updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
@@ -414,23 +457,17 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     }
   }
 
-  async function pollJobStatus(nodeId, jobId) {
+  async function pollJobStatus(nodeId, jobId, endpointOverride = null) {
     const state = ensureState(nodeId);
     if (!state) return null;
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const endpoint = endpointOverride || resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     return new Promise((resolve) => {
       const checkJob = async () => {
         try {
-          const response = await fetch(`${baseUrl}/api/job/${jobId}`);
-          if (!response.ok) {
-            resolve(null);
-            return;
-          }
-
-          const data = await response.json();
+          const data = await Net.getJSON(baseUrl, `/api/job/${jobId}`, endpoint.api, endpoint.viaNkn, endpoint.relay);
 
           const pointcloud = data.pointcloud || data.result?.pointcloud;
           if (data.status === 'completed' && pointcloud) {
@@ -462,14 +499,12 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const state = ensureState(nodeId);
     if (!state || !state.currentPointcloud) return null;
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const endpoint = resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     try {
-      const response = await fetch(`${baseUrl}/api/export/glb`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const blob = await response.blob();
+      const fullUrl = `${baseUrl}/api/export/glb`;
+      const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api);
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
@@ -489,14 +524,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const state = ensureState(nodeId);
     if (!state || !state.currentPointcloud) return false;
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const endpoint = resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     try {
-      const response = await fetch(`${baseUrl}/api/floor_align`, { method: 'POST' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const data = await response.json();
+      const data = await Net.postJSON(baseUrl, '/api/floor_align', {}, endpoint.api, endpoint.viaNkn, endpoint.relay);
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);
@@ -514,19 +546,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const state = ensureState(nodeId);
     if (!state || !state.currentPointcloud) return false;
 
-    const cfg = getConfig(nodeId);
-    const baseUrl = cfg.base || 'http://127.0.0.1:5000';
+    const endpoint = resolveEndpointConfig(nodeId);
+    const baseUrl = endpoint.base;
 
     try {
-      const response = await fetch(`${baseUrl}/api/floor_align/manual`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ points })
-      });
-
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const data = await response.json();
+      const data = await Net.postJSON(baseUrl, '/api/floor_align/manual', { points }, endpoint.api, endpoint.viaNkn, endpoint.relay);
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);
