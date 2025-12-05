@@ -2674,8 +2674,14 @@ class RelayNode:
             # If the chunk includes req (first chunk) recover by creating a session on the fly
             req = body.get("req")
             if not req:
-                # Late or duplicate chunk after completion; ignore quietly
-                self._log_upload(rid, "chunk received with no active upload; ignoring")
+                # Late or duplicate chunk after completion; ignore quietly (common after retry)
+                # Only log at debug level to avoid spam from expected retry duplicates
+                seq = int(body.get("seq") or 0)
+                if seq > 0:
+                    # This is normal - chunk arrived after upload completed (from retry mechanism)
+                    pass  # Silent ignore
+                else:
+                    self._log_upload(rid, "chunk received with no active upload; ignoring")
                 return
             total_chunks = int(body.get("total") or body.get("total_chunks") or 0)
             ctype = body.get("content_type") or (req.get("headers") or {}).get("Content-Type") or ""
@@ -2726,6 +2732,7 @@ class RelayNode:
             self._send_upload_error(src, rid, "unknown upload id", 404)
             return
         entry["ended"] = True
+        entry["end_received_time"] = time.time()  # Track when end was received
         total = entry.get("total") or 0
         self._log_upload(rid, f"end received got={entry['got']} total={total}")
         if total == 0 or entry["got"] >= total:
@@ -2737,7 +2744,23 @@ class RelayNode:
         chunks = entry.get("chunks") or []
         missing = [i + 1 for i, ch in enumerate(chunks) if ch is None]
         if missing and not allow_partial:
-            entry["missing_requested"] = time.time()
+            # Add grace period: don't request missing chunks if we just received 'end'
+            # Give in-flight packets 2-3 seconds to arrive before requesting resend
+            now = time.time()
+            missing_req_time = entry.get("missing_requested") or 0
+            end_received_time = entry.get("end_received_time") or now
+            time_since_end = now - end_received_time
+
+            # If we haven't requested missing yet and end was recent, wait a bit
+            if not missing_req_time and time_since_end < 2.0:
+                # Don't request yet - let cleanup loop handle it after grace period
+                return
+
+            # If we already requested and not enough time passed, wait
+            if missing_req_time and (now - missing_req_time) < 1.0:
+                return
+
+            entry["missing_requested"] = now
             self._request_missing(uid, entry, missing)
             return
         data = b"".join(ch for ch in chunks if ch is not None)
@@ -2782,6 +2805,7 @@ class RelayNode:
             try:
                 now = time.time()
                 to_finish: List[Tuple[str, dict]] = []
+                to_retry: List[Tuple[str, dict]] = []  # For grace period retry
                 to_error: List[Tuple[str, dict]] = []
                 for uid, entry in list(self.upload_sessions.items()):
                     created = float(entry.get("created") or now)
@@ -2790,21 +2814,35 @@ class RelayNode:
                     ended = bool(entry.get("ended"))
                     total = int(entry.get("total") or 0)
                     missing_requested = float(entry.get("missing_requested") or 0)
+                    end_received_time = float(entry.get("end_received_time") or 0)
+                    time_since_end = now - end_received_time if end_received_time else age
+
                     # If we got something but never saw end within 20s, finalize partial
                     if got > 0 and age >= 20 and not ended:
                         to_finish.append((uid, entry))
-                    # If we saw end but missing chunks and 10s elapsed since missing request, finalize partial
+                    # If we saw end but missing chunks, handle grace period logic
                     elif ended and (total == 0 or got < total):
-                        if missing_requested and (now - missing_requested) >= 10:
+                        # If missing not yet requested and grace period (2s) elapsed, trigger request
+                        if not missing_requested and time_since_end >= 2.0:
+                            to_retry.append((uid, entry))
+                        # If missing requested and 10s elapsed since request, give up with partial
+                        elif missing_requested and (now - missing_requested) >= 10:
                             to_finish.append((uid, entry))
-                        elif not missing_requested and age >= 10:
+                        # Legacy: if no end timestamp and age >= 10s, finalize
+                        elif not missing_requested and not end_received_time and age >= 10:
                             to_finish.append((uid, entry))
                     # If nothing arrived within 20s, give up with an error
                     elif got == 0 and age >= 20:
                         to_error.append((uid, entry))
+                # Retry finalization for sessions past grace period
+                for uid, entry in to_retry:
+                    self._log_upload(entry.get("rid") or uid, f"grace period elapsed, retry finalize")
+                    self._finalize_upload(uid, entry, allow_partial=False)
+                # Finalize partial uploads that timed out
                 for uid, entry in to_finish:
                     self._log_upload(entry.get("rid") or uid, f"cleanup finalize got={entry.get('got')} total={entry.get('total')}")
                     self._finalize_upload(uid, entry, allow_partial=True)
+                # Error out uploads that never received any chunks
                 for uid, entry in to_error:
                     rid = entry.get("rid") or uid
                     src = entry.get("src") or ""
