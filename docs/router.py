@@ -1597,6 +1597,8 @@ class EnhancedUI:
         # Animated Hydra
         self.hydra = Hydra(base_x=8, base_y=20)
         self.brutalist_mode = True  # Use brutalist UI layout
+        self.network_state: str = "online"  # online, offline, hard_offline
+        self.offline_since: float = 0.0
 
     def _load_service_config(self):
         """Load service enabled/disabled state from config."""
@@ -1671,6 +1673,22 @@ class EnhancedUI:
         except Exception:
             pass
 
+    def _recompute_network_state(self):
+        """Derive network state from node statuses for hydra animation."""
+        any_online = any(info.get("state") == "online" for info in self.nodes.values())
+        now = time.time()
+        if any_online:
+            self.network_state = "online"
+            self.offline_since = 0.0
+            return
+        if self.offline_since == 0.0:
+            self.offline_since = now
+        offline_dur = now - self.offline_since
+        if offline_dur > 20:
+            self.network_state = "hard_offline"
+        else:
+            self.network_state = "offline"
+
     # Public API (compatible with UnifiedUI)
     def add_node(self, node_id: str, name: str):
         self.nodes.setdefault(node_id, {
@@ -1693,10 +1711,12 @@ class EnhancedUI:
         if node_id in self.nodes:
             self.nodes[node_id]["addr"] = addr or "—"
             self.nodes[node_id]["state"] = "online" if addr else "waiting"
+        self._recompute_network_state()
 
     def set_state(self, node_id: str, state: str):
         if node_id in self.nodes:
             self.nodes[node_id]["state"] = state
+        self._recompute_network_state()
 
     def set_queue(self, node_id: str, size: int):
         if node_id in self.nodes:
@@ -1938,29 +1958,43 @@ class EnhancedUI:
         self.hydra.base_y = base_y
         activity_lvl = self.hydra.current_activity()
 
+        net_state = self.network_state
+        if net_state == "online":
+            base_color = curses.color_pair(6)
+        elif net_state == "offline":
+            base_color = curses.color_pair(3)  # orange/yellow
+        else:
+            base_color = curses.color_pair(4)  # red
+
+        # Make offline hydra more frantic
+        if net_state == "offline":
+            activity_lvl = max(activity_lvl, 0.4)
+        elif net_state == "hard_offline":
+            activity_lvl = max(activity_lvl, 0.8)
+
         # Draw stalk with varied thickness
-        stalk_color = curses.color_pair(6) | (curses.A_BOLD if activity_lvl > 0.6 else curses.A_DIM)
+        stalk_color = base_color | (curses.A_BOLD if activity_lvl > 0.6 else curses.A_DIM)
         for seg in range(self.hydra.stalk_segments):
             y = base_y - seg
             ch = "┃" if seg % 2 == 0 else "│"
             self._safe_addstr(stdscr, y, base_x, ch, stalk_color)
             if activity_lvl > 0.5 and seg % 3 == 0:
-                self._safe_addstr(stdscr, y, base_x - 1, "╱", curses.color_pair(6))
-                self._safe_addstr(stdscr, y, base_x + 1, "╲", curses.color_pair(6))
+                self._safe_addstr(stdscr, y, base_x - 1, "╱", base_color)
+                self._safe_addstr(stdscr, y, base_x + 1, "╲", base_color)
 
         # Draw root offshoots reacting to connections
         root_count = min(6, 2 + int(activity_lvl * 6))
         for r in range(root_count):
             ry = base_y - (r * 2 + 1)
             rx = base_x - (2 + (r % 3))
-            self._safe_addstr(stdscr, ry, rx, "╱", curses.color_pair(6))
-            self._safe_addstr(stdscr, ry + 1, rx + 1, "╱", curses.color_pair(6))
+            self._safe_addstr(stdscr, ry, rx, "╱", base_color)
+            self._safe_addstr(stdscr, ry + 1, rx + 1, "╱", base_color)
             rx2 = base_x + (2 + (r % 2))
-            self._safe_addstr(stdscr, ry, rx2, "╲", curses.color_pair(6))
-            self._safe_addstr(stdscr, ry + 1, rx2 - 1, "╲", curses.color_pair(6))
+            self._safe_addstr(stdscr, ry, rx2, "╲", base_color)
+            self._safe_addstr(stdscr, ry + 1, rx2 - 1, "╲", base_color)
 
         # Position polyps with sway
-        sway = int(max(1, int(activity_lvl * 3)))
+        sway = int(max(1, int(activity_lvl * 3))) + (2 if net_state == "hard_offline" else 0)
         for idx, polyp in enumerate(self.hydra.polyps):
             offset = int(math.sin(time.time() * 0.8 + idx) * sway)
             polyp.x = base_x + offset
@@ -1968,14 +2002,15 @@ class EnhancedUI:
             polyp.update(max(activity_lvl, polyp.activity))
             # Draw head
             head_char = "◉" if polyp.activity > 0.4 else "○"
-            head_attr = curses.color_pair(7) | curses.A_BOLD if polyp.activity > 0.5 else curses.color_pair(6)
+            head_attr = (curses.color_pair(7) | curses.A_BOLD) if net_state == "online" and polyp.activity > 0.5 else base_color | curses.A_BOLD
             self._safe_addstr(stdscr, polyp.y, polyp.x, head_char, head_attr)
             # Draw tentacles and buds
             for tx, ty in polyp.get_tentacle_positions():
                 char = "~" if (tx + ty) % 3 else "⌇"
-                self._safe_addstr(stdscr, ty, tx, char, curses.color_pair(6))
+                self._safe_addstr(stdscr, ty, tx, char, base_color)
             bud_char = "✶" if polyp.activity > 0.6 else "·"
-            self._safe_addstr(stdscr, polyp.y - 1, polyp.x + 1, bud_char, curses.color_pair(7))
+            bud_color = curses.color_pair(4) if net_state == "hard_offline" else curses.color_pair(7)
+            self._safe_addstr(stdscr, polyp.y - 1, polyp.x + 1, bud_char, bud_color)
 
         # Label
         label = "[ hydra ]"
