@@ -7,7 +7,7 @@ const NKN_SEED_KEY = 'graph.nkn.seed';
 
 const Net = {
   nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
-  uploadChunkBytes: 80 * 1024, // conservative default to fit under most NKN DM limits
+  uploadChunkBytes: 80 * 1024, // default; per-call chunkSize can override
 
   setTransportUpdater(fn) {
     updateTransportButton = typeof fn === 'function' ? fn : () => {};
@@ -102,7 +102,7 @@ const Net = {
     }
   },
 
-  async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000) {
+  async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000, progressCb = null) {
     const useRelay = useNkn && relay;
     if (!useRelay) {
       return this.postJSON(base, path, body, api, false, '', timeout);
@@ -117,7 +117,7 @@ const Net = {
     const payloadStr = JSON.stringify(body || {});
     const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
     // Keep chunk size small to survive stricter relays (router default limit is set separately)
-    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 80 * 1024, 8 * 1024), 120 * 1024);
+    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 80 * 1024, 8 * 1024), 96 * 1024);
     const chunkChars = Math.max(2048, Math.floor(limitBytes * 4 / 3));
     const chunks = this._chunkString(b64, chunkChars);
     const total = chunks.length;
@@ -131,6 +131,9 @@ const Net = {
       if (throttleMs) await this._sleep(throttleMs);
     };
 
+    if (typeof progressCb === 'function') {
+      try { progressCb(0, total, 'begin'); } catch (_) { /* ignore */ }
+    }
     await sendMsg({
       event: 'http.upload.begin',
       id: uploadId,
@@ -149,6 +152,9 @@ const Net = {
         total: total,
         b64: chunk
       });
+      if (typeof progressCb === 'function') {
+        try { progressCb(seq, total, 'chunk'); } catch (_) { /* ignore */ }
+      }
       seq += 1;
     }
     await sendMsg({
@@ -157,6 +163,9 @@ const Net = {
       upload_id: uploadId,
       total: total
     });
+    if (typeof progressCb === 'function') {
+      try { progressCb(total, total, 'end'); } catch (_) { /* ignore */ }
+    }
 
     try {
       return await responsePromise;

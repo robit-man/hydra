@@ -58,7 +58,8 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         floorPoints: [],
         autoLoadStarted: false,
         modelLoading: false,
-        modelLoadPromise: null
+        modelLoadPromise: null,
+        uploadProgress: ''
       });
     }
     return STATE.get(key);
@@ -78,6 +79,13 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     else if (tone === 'pending') el.style.color = '#ffd479';
     else if (tone === 'err') el.style.color = '#ff9b9b';
     else el.style.color = '#ccc';
+  }
+
+  function updateUploadProgress(nodeId, text) {
+    const el = document.querySelector(`.pointcloud-upload[data-pointcloud-upload="${nodeId}"]`);
+    if (el) el.textContent = text || '';
+    const st = ensureState(nodeId);
+    if (st) st.uploadProgress = text || '';
   }
 
   function resolveEndpointConfig(nodeId, override = {}) {
@@ -324,6 +332,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     try {
       state.processing = true;
       updateStatus(nodeId, 'Processing image…', 'pending');
+      updateUploadProgress(nodeId, '');
 
       const normalizeImage = async (val, mimeHint = 'image/png') => {
         if (val instanceof Blob) return val;
@@ -403,9 +412,15 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         });
         // If payload is large, chunk the JSON to stay within DM limits
         const useChunked = b64Payload && b64Payload.length > 60000;
+        const progressCb = (seq, total, phase) => {
+          const label = phase === 'end' ? 'finishing' : 'uploading';
+          updateUploadProgress(nodeId, `Relay ${label} ${seq}/${total}`);
+        };
         if (useChunked && Net.postJSONChunked) {
-          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 60000);
+          // Use conservative chunk size to stay under relay DM limits
+          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 16000, progressCb);
         } else {
+          updateUploadProgress(nodeId, 'Sending request…');
           result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000);
         }
       } else {
@@ -442,6 +457,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         state.currentPointcloud = directPc;
         updatePointcloudViewer(nodeId, directPc);
         updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
+        updateUploadProgress(nodeId, '');
         return directPc;
       } else if (result.job_id) {
         state.lastJobId = result.job_id;
@@ -449,14 +465,16 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         if (pointcloud) {
           updatePointcloudViewer(nodeId, pointcloud);
           updateStatus(nodeId, `Pointcloud ready (${state.currentModel || 'model'})`, 'ok');
+          updateUploadProgress(nodeId, '');
         }
         return pointcloud;
       } else {
         throw new Error('Unexpected response format');
       }
     } catch (err) {
-      if (setBadge) setBadge(`Processing failed: ${err.message}`, false);
+      if (setBadge) setBadge(`Processing failed: ${err?.message || err}`, false);
       updateStatus(nodeId, 'Processing failed', 'err');
+      updateUploadProgress(nodeId, `Upload failed: ${err?.message || err}`);
       return null;
     } finally {
       state.processing = false;

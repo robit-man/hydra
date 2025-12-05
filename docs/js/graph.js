@@ -996,9 +996,17 @@ function refreshNodeResolution(force = false) {
       status.dataset.pointcloudStatus = node.id;
       status.style.fontSize = '11px';
       status.style.color = '#ccc';
-      status.style.margin = '4px 0 8px';
+      status.style.margin = '4px 0 4px';
       status.textContent = 'Model: —';
       body.insertBefore(status, controlsWrap.nextSibling);
+      const upload = document.createElement('div');
+      upload.className = 'pointcloud-upload';
+      upload.dataset.pointcloudUpload = node.id;
+      upload.style.fontSize = '11px';
+      upload.style.color = '#9cc8ff';
+      upload.style.margin = '0 0 8px';
+      upload.textContent = '';
+      body.insertBefore(upload, status.nextSibling);
     } else {
       body.insertBefore(viewerWrap, body.firstChild);
       body.insertBefore(uploaderWrap, viewerWrap.nextSibling);
@@ -1008,9 +1016,17 @@ function refreshNodeResolution(force = false) {
       status.dataset.pointcloudStatus = node.id;
       status.style.fontSize = '11px';
       status.style.color = '#ccc';
-      status.style.margin = '4px 0 8px';
+      status.style.margin = '4px 0 4px';
       status.textContent = 'Model: —';
       body.insertBefore(status, controlsWrap.nextSibling);
+      const upload = document.createElement('div');
+      upload.className = 'pointcloud-upload';
+      upload.dataset.pointcloudUpload = node.id;
+      upload.style.fontSize = '11px';
+      upload.style.color = '#9cc8ff';
+      upload.style.margin = '0 0 8px';
+      upload.textContent = '';
+      body.insertBefore(upload, status.nextSibling);
     }
 
     if (Pointcloud && typeof Pointcloud.initViewer === 'function') {
