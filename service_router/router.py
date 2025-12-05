@@ -2610,6 +2610,22 @@ class RelayNode:
     def _log_upload(self, rid: str, text: str) -> None:
         self.ui.bump(self.node_id, "IN", f"upload {rid}: {text}")
 
+    def _request_missing(self, uid: str, entry: dict, missing: list[int]) -> None:
+        if not missing:
+            return
+        src = entry.get("src") or ""
+        rid = entry.get("rid") or uid
+        payload = {
+            "event": "http.upload.missing",
+            "id": rid,
+            "upload_id": uid,
+            "missing": missing,
+            "total": entry.get("total") or len(entry.get("chunks") or []),
+            "got": entry.get("got") or 0,
+        }
+        self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+        self._log_upload(rid, f"request missing {len(missing)}")
+
     def _handle_upload_begin(self, src: str, rid: str, body: dict) -> None:
         uid = body.get("upload_id") or rid
         if not uid:
@@ -2706,14 +2722,15 @@ class RelayNode:
         if total == 0 or entry["got"] >= total:
             self._finalize_upload(uid, entry)
         else:
-            # finalize partial to avoid stalling forever
-            self._finalize_upload(uid, entry, allow_partial=True)
+            self._finalize_upload(uid, entry, allow_partial=False)
 
     def _finalize_upload(self, uid: str, entry: dict, allow_partial: bool = False) -> None:
         try:
             chunks = entry.get("chunks") or []
-            missing = [i for i, ch in enumerate(chunks) if ch is None]
+            missing = [i + 1 for i, ch in enumerate(chunks) if ch is None]
             if missing and not allow_partial:
+                entry["missing_requested"] = time.time()
+                self._request_missing(uid, entry, missing)
                 return
             data = b"".join(ch for ch in chunks if ch is not None)
             req = dict(entry.get("req") or {})
@@ -2745,12 +2762,16 @@ class RelayNode:
                     got = int(entry.get("got") or 0)
                     ended = bool(entry.get("ended"))
                     total = int(entry.get("total") or 0)
+                    missing_requested = float(entry.get("missing_requested") or 0)
                     # If we got something but never saw end within 20s, finalize partial
                     if got > 0 and age >= 20 and not ended:
                         to_finish.append((uid, entry))
-                    # If we saw end but missing chunks and 10s elapsed, finalize partial
-                    elif ended and age >= 10 and (total == 0 or got < total):
-                        to_finish.append((uid, entry))
+                    # If we saw end but missing chunks and 10s elapsed since missing request, finalize partial
+                    elif ended and (total == 0 or got < total):
+                        if missing_requested and (now - missing_requested) >= 10:
+                            to_finish.append((uid, entry))
+                        elif not missing_requested and age >= 10:
+                            to_finish.append((uid, entry))
                     # If nothing arrived within 20s, give up with an error
                     elif got == 0 and age >= 20:
                         to_error.append((uid, entry))

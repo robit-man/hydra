@@ -8,6 +8,7 @@ const NKN_SEED_KEY = 'graph.nkn.seed';
 const Net = {
   nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
   uploadChunkBytes: 80 * 1024, // default; per-call chunkSize can override
+  uploadCache: new Map(), // uploadId -> { chunks, total, url, headers, timeout },
 
   setTransportUpdater(fn) {
     updateTransportButton = typeof fn === 'function' ? fn : () => {};
@@ -75,10 +76,59 @@ const Net = {
     throw lastErr || new Error('NKN send failed');
   },
 
-  _chunkString(str, size = 60000) {
+  _clearUploadCache(id) {
+    if (!id) return;
+    this.uploadCache.delete(id);
+  },
+
+  async _handleUploadMissing(uploadId, msg) {
+    if (!uploadId) return;
+    const entry = this.uploadCache.get(uploadId);
+    if (!entry) return;
+    const missing = Array.isArray(msg.missing) ? msg.missing.map((n) => Number(n) || 0).filter((n) => n > 0) : [];
+    if (!missing.length) return;
+    const { relay, timeout = 120000, url, headers, chunks, total } = entry;
+    const reqMeta = { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' };
+    for (const seq of missing) {
+      const chunk = chunks[seq - 1];
+      if (!chunk) continue;
+      const payload = {
+        event: 'http.upload.chunk',
+        id: uploadId,
+        upload_id: uploadId,
+        seq,
+        total: total,
+        b64: chunk
+      };
+      if (seq === 1) {
+        payload.req = reqMeta;
+        payload.content_type = headers['Content-Type'] || headers['content-type'] || 'application/json';
+      }
+      try {
+        await this._sendNkn(relay, payload, { noReply: true, maxHoldingSeconds: 240 }, timeout);
+        await this._sleep(4);
+      } catch (err) {
+        // swallow resend errors; cleanup will handle if still missing
+      }
+    }
+  },
+
+  _chunkBase64(b64, maxChars = 60000) {
+    // Split base64 text at boundaries that are multiples of 4 chars to keep each chunk decodable
     const chunks = [];
-    for (let i = 0; i < str.length; i += size) {
-      chunks.push(str.slice(i, i + size));
+    const len = b64.length;
+    let i = 0;
+    const safeSize = Math.max(4, Math.floor(maxChars / 4) * 4); // ensure divisible by 4
+    while (i < len) {
+      let end = Math.min(len, i + safeSize);
+      // ensure end - i is a multiple of 4 (except possibly final which is still valid)
+      const span = end - i;
+      const mod = span % 4;
+      if (mod !== 0 && end < len) {
+        end = Math.max(i + 4, end - mod);
+      }
+      chunks.push(b64.slice(i, end));
+      i = end;
     }
     return chunks;
   },
@@ -119,9 +169,10 @@ const Net = {
     // Keep chunk size small to survive stricter relays (router default limit is set separately)
     const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 80 * 1024, 8 * 1024), 96 * 1024);
     const chunkChars = Math.max(2048, Math.floor(limitBytes * 4 / 3));
-    const chunks = this._chunkString(b64, chunkChars);
+    const chunks = this._chunkBase64(b64, chunkChars);
     const total = chunks.length;
     const url = base.replace(/\/+$/, '') + path;
+    this.uploadCache.set(uploadId, { chunks, total, url, headers, relay, timeout });
 
     const responsePromise = this._awaitResponseStream(uploadId, timeout);
 
@@ -182,6 +233,8 @@ const Net = {
     } catch (err) {
       // fallback to direct HTTP if relay upload fails
       return this.postJSON(base, path, body, api, false, '', timeout);
+    } finally {
+      this._clearUploadCache(uploadId);
     }
   },
 
@@ -212,6 +265,7 @@ const Net = {
         onEnd: () => {
           clearTimeout(timer);
           this.nkn.streams.delete(id);
+          this._clearUploadCache(id);
           const merged = buf.length ? new Blob(buf) : new Blob([]);
           merged.arrayBuffer().then((arr) => {
             const text = td.decode(new Uint8Array(arr));
@@ -229,6 +283,7 @@ const Net = {
         onError: (err) => {
           clearTimeout(timer);
           this.nkn.streams.delete(id);
+          this._clearUploadCache(id);
           reject(err instanceof Error ? err : new Error(String(err || 'NKN stream error')));
         },
         lingerEndMs: 50
@@ -336,6 +391,11 @@ const Net = {
         const msg = JSON.parse((payload && payload.toString) ? payload.toString() : String(payload));
         const ev = msg.event || '';
         const id = msg.id;
+        if (ev === 'http.upload.missing') {
+          const uid = msg.upload_id || id;
+          this._handleUploadMissing(uid, msg);
+          return;
+        }
         if (ev === 'relay.response' && id) {
           const pending = this.nkn.pend.get(id);
           if (pending) {
