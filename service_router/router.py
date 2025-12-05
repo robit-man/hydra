@@ -105,26 +105,38 @@ SERVICE_TARGETS = {
     "whisper_asr": {
         "target": "asr",
         "aliases": ["whisper_asr", "asr", "whisper"],
+        "ports": [8126],
+        "endpoint": "http://127.0.0.1:8126",
     },
     "piper_tts": {
         "target": "tts",
         "aliases": ["piper_tts", "tts", "piper"],
+        "ports": [8123],
+        "endpoint": "http://127.0.0.1:8123",
     },
     "ollama_farm": {
         "target": "ollama",
         "aliases": ["ollama_farm", "ollama", "llm"],
+        "ports": [11434, 8080],
+        "endpoint": "http://127.0.0.1:11434",
     },
     "mcp_server": {
         "target": "mcp",
         "aliases": ["mcp_server", "mcp", "context"],
+        "ports": [9003],
+        "endpoint": "http://127.0.0.1:9003",
     },
     "web_scrape": {
         "target": "web_scrape",
         "aliases": ["web_scrape", "browser", "chrome", "scrape"],
+        "ports": [8130],
+        "endpoint": "http://127.0.0.1:8130",
     },
     "depth_any": {
         "target": "depth_any",
         "aliases": ["depth_any", "depth", "pointcloud"],
+        "ports": [5000],
+        "endpoint": "http://127.0.0.1:5000",
     },
 }
 
@@ -1355,6 +1367,10 @@ class EnhancedUI:
         self.service_config: Dict[str, bool] = {}  # service_name -> enabled
         self._load_service_config()
 
+        # Security settings
+        self.port_isolation_enabled = True  # Default ON for security
+        self._load_security_config()
+
     def _load_service_config(self):
         """Load service enabled/disabled state from config."""
         try:
@@ -1380,12 +1396,25 @@ class EnhancedUI:
             # Note: This is a simplified approach; actual implementation would need
             # to properly map services to nodes and update the config structure
             cfg["service_states"] = self.service_config
+            cfg["security"] = {
+                "port_isolation_enabled": self.port_isolation_enabled
+            }
 
             self.config_path.write_text(json.dumps(cfg, indent=2))
 
             if self.action_handler:
                 self.action_handler({"type": "config_saved"})
         except Exception as e:
+            pass
+
+    def _load_security_config(self):
+        """Load security settings from config."""
+        try:
+            if self.config_path.exists():
+                cfg = json.loads(self.config_path.read_text())
+                security = cfg.get("security", {})
+                self.port_isolation_enabled = security.get("port_isolation_enabled", True)
+        except Exception:
             pass
 
     # Public API (compatible with UnifiedUI)
@@ -1643,8 +1672,32 @@ class EnhancedUI:
             if len(addr) > 20:
                 addr = addr[:17] + "..."
             state = info.get("status", "unknown")
-            detail = f"{state} | {addr}"
+
+            # Get endpoint info from SERVICE_TARGETS (module-level constant)
+            endpoint = "—"
+            for svc_key, target_info in SERVICE_TARGETS.items():
+                if svc in target_info.get("aliases", []) or svc == svc_key:
+                    endpoint = target_info.get("endpoint", "—")
+                    break
+            if len(endpoint) > 25:
+                endpoint = endpoint[:22] + "..."
+
+            detail = f"{state} | {endpoint}"
             self._safe_addstr(stdscr, row, 40, detail, curses.A_DIM)
+
+        # Add security settings section
+        security_row = start_row + (end_idx - self.scroll_offset) + 2
+        if security_row < h - 3:
+            self._safe_addstr(stdscr, security_row, 2, "Security:", curses.color_pair(5) | curses.A_BOLD)
+            security_row += 2
+
+            # Port Isolation toggle (index == len(services))
+            is_selected = (self.main_menu_index == len(services))
+            isolation_status = "[✓]" if self.port_isolation_enabled else "[ ]"
+            isolation_text = f"{'▶ ' if is_selected else '  '}{isolation_status} Port Isolation (restrict to known endpoints)"
+            isolation_icon = " 🔒" if self.port_isolation_enabled else " 🔓"
+            isolation_attr = curses.color_pair(6) if is_selected else (curses.color_pair(2) if self.port_isolation_enabled else curses.A_DIM)
+            self._safe_addstr(stdscr, security_row, 4, isolation_text + isolation_icon, isolation_attr)
 
     def _render_stats_view(self, stdscr, h, w):
         """Render Statistics view with ASCII bar graphs."""
@@ -1982,7 +2035,8 @@ class EnhancedUI:
             else:
                 max_idx = 0
                 if self.current_view == "config":
-                    max_idx = max(0, len(self.services) - 1)
+                    # Services + 1 for security section (port isolation)
+                    max_idx = max(0, len(self.services))
                 elif self.current_view == "addressbook":
                     max_idx = max(0, len(self.stats.get_address_book()) - 1)
                 elif self.current_view == "ingress":
@@ -1997,8 +2051,12 @@ class EnhancedUI:
             if self.current_view == "config":
                 services = sorted(self.services.keys())
                 if 0 <= self.main_menu_index < len(services):
+                    # Toggle service enabled/disabled
                     svc = services[self.main_menu_index]
                     self.service_config[svc] = not self.service_config.get(svc, True)
+                elif self.main_menu_index == len(services):
+                    # Toggle port isolation (security section)
+                    self.port_isolation_enabled = not self.port_isolation_enabled
 
         elif ch in (ord('s'), ord('S')):
             if self.current_view == "config":
@@ -3337,18 +3395,59 @@ class RelayNode:
             pass
 
     # HTTP workers ---------------------------------------------
+    def _validate_url_port(self, url: str, service: str = "") -> bool:
+        """Validate URL port against known service endpoints (port isolation security)."""
+        if not self.ui.port_isolation_enabled:
+            return True  # Port isolation disabled, allow all requests
+
+        # Extract port from URL
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            port = parsed.port
+
+            # If no explicit port, infer from scheme
+            if port is None:
+                port = 443 if parsed.scheme == "https" else 80
+
+            # Check if this port is allowed for any service
+            for svc_key, target_info in SERVICE_TARGETS.items():
+                allowed_ports = target_info.get("ports", [])
+                # If service is specified, only check that service's ports
+                if service and service != svc_key and service not in target_info.get("aliases", []):
+                    continue
+                if port in allowed_ports:
+                    return True
+
+            # Port not in whitelist
+            return False
+        except Exception:
+            # If we can't parse the URL, reject it for security
+            return False
+
     def _resolve_url(self, req: dict) -> str:
         url = (req.get("url") or "").strip()
-        if url:
-            return url
         svc = (req.get("service") or "").strip()
+
+        if url:
+            # Validate URL port against known service endpoints
+            if not self._validate_url_port(url, svc):
+                raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
+            return url
+
         base = self.targets.get(svc)
         if not base:
             raise ValueError(f"unknown service '{svc}'")
         path = req.get("path") or "/"
         if not path.startswith("/"):
             path = "/" + path
-        return base.rstrip("/") + path
+        resolved_url = base.rstrip("/") + path
+
+        # Validate resolved URL port
+        if not self._validate_url_port(resolved_url, svc):
+            raise ValueError(f"port isolation: resolved URL '{resolved_url}' port not in whitelist for service '{svc}'")
+
+        return resolved_url
 
     def _http_request_with_retry(self, session: requests.Session, method: str, url: str, **kwargs):
         last_exc = None

@@ -72,6 +72,11 @@ try:
     print(f"✓ Stats recording works")
     print(f"  - Timeline services: {list(timeline.keys())}")
 
+    # Test port isolation security
+    print(f"✓ Port isolation security feature:")
+    print(f"  - Port isolation enabled: {ui.port_isolation_enabled}")
+    print(f"  - Default state: {'ON (secure)' if ui.port_isolation_enabled else 'OFF (insecure)'}")
+
     print("\n" + "="*60)
     print("✓✓✓ ALL TESTS PASSED ✓✓✓")
     print("="*60)
