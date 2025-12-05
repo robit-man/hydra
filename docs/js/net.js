@@ -7,7 +7,7 @@ const NKN_SEED_KEY = 'graph.nkn.seed';
 
 const Net = {
   nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
-  uploadChunkBytes: 600 * 1024,
+  uploadChunkBytes: 120 * 1024,
 
   setTransportUpdater(fn) {
     updateTransportButton = typeof fn === 'function' ? fn : () => {};
@@ -28,6 +28,51 @@ const Net = {
       else out['X-API-Key'] = apiKey;
     }
     return out;
+  },
+
+  _sleep(ms = 0) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  async waitForReady(timeout = 15000) {
+    if (this.nkn.ready && this.nkn.client) return;
+    this.ensureNkn();
+    if (this.nkn.ready && this.nkn.client) return;
+    return new Promise((resolve, reject) => {
+      const to = setTimeout(() => reject(new Error('NKN not ready')), timeout);
+      const check = () => {
+        if (this.nkn.ready && this.nkn.client) {
+          clearTimeout(to);
+          resolve();
+        } else {
+          setTimeout(check, 150);
+        }
+      };
+      check();
+    });
+  },
+
+  async _sendNkn(relay, payload, opts = {}, timeout = 15000) {
+    if (!relay) throw new Error('No relay');
+    await this.waitForReady(timeout);
+    const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.nkn.client.send(relay, data, { noReply: true, maxHoldingSeconds: 240, ...opts });
+        return;
+      } catch (err) {
+        lastErr = err;
+        const msg = String(err || '');
+        if (msg.includes('readyState') || msg.includes('not open') || msg.toLowerCase().includes('connection')) {
+          await this._sleep(200 * (attempt + 1));
+          await this.waitForReady(timeout);
+          continue;
+        }
+        if (attempt < 2) await this._sleep(150 * (attempt + 1));
+      }
+    }
+    throw lastErr || new Error('NKN send failed');
   },
 
   _chunkString(str, size = 60000) {
@@ -68,18 +113,21 @@ const Net = {
     const headers = this.auth({}, api);
     headers['Content-Type'] = 'application/json';
     headers['X-Relay-Stream'] = 'chunks';
+    await this.waitForReady(20000);
     const payloadStr = JSON.stringify(body || {});
     const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
-    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 600 * 1024, 4096), 900 * 1024);
-    const chunkChars = Math.max(1024, Math.floor(limitBytes * 1.3));
+    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 120 * 1024, 8 * 1024), 180 * 1024);
+    const chunkChars = Math.max(2048, Math.floor(limitBytes * 4 / 3));
     const chunks = this._chunkString(b64, chunkChars);
     const total = chunks.length;
     const url = base.replace(/\/+$/, '') + path;
 
     const responsePromise = this._awaitResponseStream(uploadId, timeout);
 
+    const throttleMs = total > 8 ? 6 : 0;
     const sendMsg = async (msg) => {
-      await this.nkn.client.send(relay, JSON.stringify(msg), { noReply: true, maxHoldingSeconds: 240 });
+      await this._sendNkn(relay, msg, { noReply: true, maxHoldingSeconds: 240 }, timeout);
+      if (throttleMs) await this._sleep(throttleMs);
     };
 
     await sendMsg({
@@ -341,8 +389,7 @@ const Net = {
         reject(new Error('NKN relay timeout'));
       }, timeout);
       this.nkn.pend.set(id, { res: resolve, rej: reject, t: timer });
-      this.nkn.client
-        .send(relay, JSON.stringify({ event: 'http.request', id, req }), { noReply: true, maxHoldingSeconds: 120 })
+      this._sendNkn(relay, { event: 'http.request', id, req }, { noReply: true, maxHoldingSeconds: 120 }, timeout)
         .catch((err) => {
           clearTimeout(timer);
           this.nkn.pend.delete(id);
@@ -397,11 +444,7 @@ const Net = {
       wrapped.lingerEndMs = handlers.lingerEndMs ?? 150;
       this.nkn.streams.set(id, wrapped);
       try {
-        await this.nkn.client.send(
-          relay,
-          JSON.stringify({ event: 'http.request', id, req: Object.assign({ stream: 'chunks' }, req) }),
-          { noReply: true, maxHoldingSeconds: 120 }
-        );
+        await this._sendNkn(relay, { event: 'http.request', id, req: Object.assign({ stream: 'chunks' }, req) }, { noReply: true, maxHoldingSeconds: 120 }, timeout);
       } catch (err) {
         this.nkn.streams.delete(id);
         return reject(err);

@@ -2601,6 +2601,9 @@ class RelayNode:
         self.bridge.dm(src, payload, DM_OPTS_SINGLE)
         self.ui.bump(self.node_id, "ERR", f"upload {rid}: {message}")
 
+    def _log_upload(self, rid: str, text: str) -> None:
+        self.ui.bump(self.node_id, "IN", f"upload {rid}: {text}")
+
     def _handle_upload_begin(self, src: str, rid: str, body: dict) -> None:
         uid = body.get("upload_id") or rid
         if not uid:
@@ -2620,7 +2623,7 @@ class RelayNode:
             "created": time.time(),
         }
         self.upload_sessions[uid] = entry
-        self.ui.bump(self.node_id, "IN", f"upload begin {rid} total={total}")
+        self._log_upload(rid, f"begin total={total}")
 
     def _handle_upload_chunk(self, src: str, rid: str, body: dict) -> None:
         uid = body.get("upload_id") or rid
@@ -2651,6 +2654,7 @@ class RelayNode:
             entry["chunks"].append(raw)
             entry["got"] += 1
         entry["last"] = time.time()
+        self._log_upload(rid, f"chunk {seq}/{total or '?'} got={entry['got']}")
         if entry.get("ended") and ((total > 0 and entry["got"] >= total) or total == 0):
             self._finalize_upload(uid, entry)
 
@@ -2662,12 +2666,19 @@ class RelayNode:
             return
         entry["ended"] = True
         total = entry.get("total") or 0
+        self._log_upload(rid, f"end received got={entry['got']} total={total}")
         if total == 0 or entry["got"] >= total:
             self._finalize_upload(uid, entry)
+        else:
+            # finalize partial to avoid stalling forever
+            self._finalize_upload(uid, entry, allow_partial=True)
 
-    def _finalize_upload(self, uid: str, entry: dict) -> None:
+    def _finalize_upload(self, uid: str, entry: dict, allow_partial: bool = False) -> None:
         try:
             chunks = entry.get("chunks") or []
+            missing = [i for i, ch in enumerate(chunks) if ch is None]
+            if missing and not allow_partial:
+                return
             data = b"".join(ch for ch in chunks if ch is not None)
             req = dict(entry.get("req") or {})
             ctype = entry.get("ctype") or (req.get("headers") or {}).get("Content-Type") or ""
@@ -2680,7 +2691,8 @@ class RelayNode:
             else:
                 req["body_b64"] = base64.b64encode(data).decode("ascii")
             self._enqueue_request(entry.get("src") or "", entry.get("rid") or "", req)
-            self.ui.bump(self.node_id, "IN", f"upload complete {entry.get('rid')}")
+            missing_note = f" missing={len(missing)}" if missing else ""
+            self._log_upload(entry.get("rid") or uid, f"complete bytes={len(data)}{missing_note}")
         finally:
             self.upload_sessions.pop(uid, None)
 
