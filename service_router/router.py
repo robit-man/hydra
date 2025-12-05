@@ -93,6 +93,7 @@ except Exception:  # pragma: no cover
 # Configuration bootstrap
 # ──────────────────────────────────────────────────────────────
 CONFIG_PATH = BASE_DIR / "router_config.json"
+STATE_CONFIG_PATH = BASE_DIR / ".router_config.json"
 DEFAULT_TARGETS = {
     "ollama": "http://127.0.0.1:11434",
     "asr": "http://127.0.0.1:8126",
@@ -251,6 +252,7 @@ SERVICES_ROOT = BASE_DIR / ".services"
 LOGS_ROOT = BASE_DIR / ".logs"
 METADATA_ROOT = SERVICES_ROOT / "meta"
 BACKUP_ROOT = BASE_DIR / ".backups"
+BACKUP_KEEP = 5
 
 
 @dataclass
@@ -383,11 +385,13 @@ class ServiceWatchdog:
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
 
-    def ensure_sources(self) -> None:
+    def ensure_sources(self, service_config: Optional[Dict[str, bool]] = None) -> None:
         if not shutil.which("git"):
             raise SystemExit("git is required for ServiceWatchdog; please install git")
 
         for definition in self.DEFINITIONS:
+            if service_config is not None and not service_config.get(definition.name, True):
+                continue
             state = self._prepare_service(definition)
             self._states[definition.name] = state
 
@@ -547,9 +551,19 @@ class ServiceWatchdog:
             if backup_dir.exists():
                 shutil.rmtree(backup_dir, ignore_errors=True)
             shutil.copytree(repo_dir, backup_dir, dirs_exist_ok=False)
+            self._prune_backups()
             return backup_dir
         except Exception:
             return None
+
+    def _prune_backups(self) -> None:
+        """Keep only the most recent BACKUP_KEEP backups to limit disk usage."""
+        try:
+            backups = sorted([p for p in BACKUP_ROOT.glob("hydra_*") if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
+            for stale in backups[BACKUP_KEEP:]:
+                shutil.rmtree(stale, ignore_errors=True)
+        except Exception:
+            pass
 
     def _restore_repo(self, repo_dir: Path, backup_dir: Path) -> bool:
         try:
@@ -1246,7 +1260,7 @@ class StatsTracker:
         self.lock = threading.Lock()
         # In-memory stats for fast access
         self.service_history: Dict[str, List[Tuple[float, int]]] = {}  # service -> [(timestamp, requests_count)]
-        self.address_book: Dict[str, Dict[str, Any]] = {}  # nkn_addr -> {first_seen, last_seen, services: {svc: count}}
+        self.address_book: Dict[str, Dict[str, Any]] = {}  # nkn_addr -> {first_seen, last_seen, services: {svc: {...}}}
         self.egress_stats: Dict[str, Dict[str, Any]] = {}  # service -> {bytes_sent, request_count, users: {addr: bytes}}
 
         # Load existing stats
@@ -1274,6 +1288,12 @@ class StatsTracker:
                     data = json.loads(line)
                     addr = data.get("addr")
                     if addr:
+                        # Normalize legacy entries
+                        data.setdefault("services", {})
+                        data.setdefault("total_requests", 0)
+                        data.setdefault("bytes_in", 0)
+                        data.setdefault("bytes_out", 0)
+                        data.setdefault("active_seconds", 0.0)
                         self.address_book[addr] = data
         except Exception:
             pass
@@ -1290,8 +1310,31 @@ class StatsTracker:
         except Exception:
             pass
 
-    def record_request(self, service: str, nkn_addr: str, bytes_sent: int = 0):
-        """Record a service request from an NKN address."""
+    def touch_address(self, nkn_addr: str, service: Optional[str] = None) -> None:
+        """Ensure an address is present in the address book."""
+        if not nkn_addr:
+            return
+        with self.lock:
+            now = time.time()
+            entry = self.address_book.setdefault(
+                nkn_addr,
+                {
+                    "addr": nkn_addr,
+                    "first_seen": now,
+                    "last_seen": now,
+                    "services": {},
+                    "total_requests": 0,
+                    "bytes_in": 0,
+                    "bytes_out": 0,
+                    "active_seconds": 0.0,
+                },
+            )
+            entry["last_seen"] = now
+            if service:
+                entry["services"].setdefault(service, {}).setdefault("count", 0)
+
+    def record_request(self, service: str, nkn_addr: str, bytes_out: int = 0, bytes_in: int = 0, duration_s: float = 0.0):
+        """Record a service request from an NKN address with byte/duration detail."""
         with self.lock:
             now = time.time()
 
@@ -1303,21 +1346,37 @@ class StatsTracker:
 
             # Update address book
             if nkn_addr and nkn_addr != "—":
-                if nkn_addr not in self.address_book:
-                    self.address_book[nkn_addr] = {
+                entry = self.address_book.setdefault(
+                    nkn_addr,
+                    {
                         "addr": nkn_addr,
                         "first_seen": now,
                         "last_seen": now,
                         "services": {},
-                        "total_requests": 0
-                    }
-                entry = self.address_book[nkn_addr]
+                        "total_requests": 0,
+                        "bytes_in": 0,
+                        "bytes_out": 0,
+                        "active_seconds": 0.0,
+                    },
+                )
                 entry["last_seen"] = now
-                entry["services"].setdefault(service, 0)
-                entry["services"][service] += 1
                 entry["total_requests"] = entry.get("total_requests", 0) + 1
+                entry["bytes_in"] = entry.get("bytes_in", 0) + bytes_in
+                entry["bytes_out"] = entry.get("bytes_out", 0) + bytes_out
+                entry["active_seconds"] = entry.get("active_seconds", 0.0) + max(0.0, duration_s)
 
-                # Write address book entry
+                svc_entry = entry["services"].setdefault(
+                    service,
+                    {"count": 0, "bytes_in": 0, "bytes_out": 0, "first_seen": now, "last_seen": now, "active_seconds": 0.0},
+                )
+                svc_entry["count"] = svc_entry.get("count", 0) + 1
+                svc_entry["bytes_in"] = svc_entry.get("bytes_in", 0) + bytes_in
+                svc_entry["bytes_out"] = svc_entry.get("bytes_out", 0) + bytes_out
+                svc_entry["last_seen"] = now
+                svc_entry["active_seconds"] = svc_entry.get("active_seconds", 0.0) + max(0.0, duration_s)
+                svc_entry.setdefault("first_seen", now)
+
+                # Write address book entry (append for durability)
                 try:
                     with open(ADDRESS_BOOK_FILE, "a") as f:
                         f.write(json.dumps(entry) + "\n")
@@ -1325,7 +1384,7 @@ class StatsTracker:
                     pass
 
             # Update egress stats
-            if bytes_sent > 0:
+            if bytes_out > 0:
                 if service not in self.egress_stats:
                     self.egress_stats[service] = {
                         "service": service,
@@ -1334,11 +1393,11 @@ class StatsTracker:
                         "users": {}
                     }
                 entry = self.egress_stats[service]
-                entry["bytes_sent"] += bytes_sent
+                entry["bytes_sent"] += bytes_out
                 entry["request_count"] += 1
                 if nkn_addr and nkn_addr != "—":
                     entry["users"].setdefault(nkn_addr, 0)
-                    entry["users"][nkn_addr] += bytes_sent
+                    entry["users"][nkn_addr] += bytes_out
 
                 # Write egress stats periodically (every 10 requests)
                 if entry["request_count"] % 10 == 0:
@@ -1384,7 +1443,7 @@ class HydraPolyp:
         self.x = x
         self.y = y
         self.polyp_id = polyp_id
-        self.tentacle_count = 6
+        self.tentacle_count = 7
         self.phase = (polyp_id * math.pi / 3) + (time.time() * 0.5)  # Offset phases
         self.activity = 0.0  # 0.0 to 1.0
         self.size = 1.0
@@ -1397,13 +1456,15 @@ class HydraPolyp:
     def get_tentacle_positions(self) -> List[Tuple[int, int]]:
         """Calculate animated tentacle tip positions."""
         positions = []
-        wiggle = math.sin(self.phase) * (1 + self.activity)
+        wiggle = math.sin(self.phase) * (1 + self.activity * 1.5)
         for i in range(self.tentacle_count):
             angle = (i / self.tentacle_count) * 2 * math.pi
-            length = 2 + self.activity
-            tx = int(self.x + math.cos(angle + wiggle * 0.3) * length)
-            ty = int(self.y + math.sin(angle + wiggle * 0.3) * length * 0.5)  # Squash Y
-            positions.append((tx, ty))
+            segs = 2 + int(self.activity * 3)
+            for seg in range(1, segs + 1):
+                length = seg + 1 + self.activity
+                tx = int(self.x + math.cos(angle + wiggle * 0.4) * length)
+                ty = int(self.y + math.sin(angle + wiggle * 0.3) * length * 0.6)  # Squash Y
+                positions.append((tx, ty))
         return positions
 
 class Hydra:
@@ -1412,11 +1473,11 @@ class Hydra:
         self.base_x = base_x
         self.base_y = base_y
         self.polyps = [HydraPolyp(base_x, base_y - 10, 0)]
-        self.stalk_segments = 10
+        self.stalk_segments = 14
         self.activity_history = deque(maxlen=100)
         self.last_activity_time = time.time()
         self.division_threshold = 0.8  # Activity level to trigger polyp division
-        self.max_polyps = 3
+        self.max_polyps = 5
 
     def feed_activity(self, kind: str, intensity: float = 0.5):
         """Feed router activity to the hydra."""
@@ -1436,6 +1497,14 @@ class Hydra:
         if activity_level > self.division_threshold and len(self.polyps) < self.max_polyps:
             if len([i for t, k, i in self.activity_history if now - t < 5.0]) > 20:
                 self._divide_polyp()
+        else:
+            if now - self.last_activity_time > 30 and len(self.polyps) > 1:
+                self.polyps.pop()
+
+    def current_activity(self) -> float:
+        now = time.time()
+        recent = [i for t, _, i in self.activity_history if now - t < 3.0]
+        return min(1.0, sum(recent) / max(1, len(recent))) if recent else 0.0
 
     def _divide_polyp(self):
         """Bud a new polyp (biological division)."""
@@ -1534,11 +1603,22 @@ class EnhancedUI:
         try:
             if self.config_path.exists():
                 cfg = json.loads(self.config_path.read_text())
+                # Normalize services entries that may be raw counts
+                svc_states = cfg.get("service_states", {})
+                if isinstance(svc_states, dict):
+                    for svc_name, enabled in svc_states.items():
+                        self.service_config[svc_name] = bool(enabled)
+                for svc_name, enabled in cfg.get("service_states", {}).items():
+                    self.service_config[svc_name] = bool(enabled)
                 for node_cfg in cfg.get("nodes", []):
                     for svc in node_cfg.get("services", []):
                         svc_name = svc if isinstance(svc, str) else svc.get("name")
                         if svc_name:
                             self.service_config.setdefault(svc_name, True)
+            elif CONFIG_PATH.exists():
+                cfg = json.loads(CONFIG_PATH.read_text())
+                for svc_name, enabled in cfg.get("service_states", {}).items():
+                    self.service_config[svc_name] = bool(enabled)
         except Exception:
             pass
 
@@ -1559,6 +1639,18 @@ class EnhancedUI:
             }
 
             self.config_path.write_text(json.dumps(cfg, indent=2))
+            # Mirror to main CONFIG_PATH for compatibility (best-effort)
+            try:
+                if CONFIG_PATH.exists():
+                    base_cfg = json.loads(CONFIG_PATH.read_text())
+                else:
+                    base_cfg = {"nodes": []}
+                base_cfg["service_states"] = self.service_config
+                base_cfg.setdefault("security", {})
+                base_cfg["security"]["port_isolation_enabled"] = self.port_isolation_enabled
+                CONFIG_PATH.write_text(json.dumps(base_cfg, indent=2))
+            except Exception:
+                pass
 
             if self.action_handler:
                 self.action_handler({"type": "config_saved"})
@@ -1570,6 +1662,10 @@ class EnhancedUI:
         try:
             if self.config_path.exists():
                 cfg = json.loads(self.config_path.read_text())
+                security = cfg.get("security", {})
+                self.port_isolation_enabled = security.get("port_isolation_enabled", True)
+            elif CONFIG_PATH.exists():
+                cfg = json.loads(CONFIG_PATH.read_text())
                 security = cfg.get("security", {})
                 self.port_isolation_enabled = security.get("port_isolation_enabled", True)
         except Exception:
@@ -1619,7 +1715,8 @@ class EnhancedUI:
     def set_daemon_info(self, info: Optional[dict]):
         self.daemon_info = info
 
-    def bump(self, node_id: str, kind: str, msg: str, nkn_addr: str = "", bytes_sent: int = 0):
+    def bump(self, node_id: str, kind: str, msg: str, nkn_addr: str = "", bytes_sent: int = 0,
+             service: Optional[str] = None, bytes_in: int = 0, duration_s: float = 0.0):
         target = self.nodes.get(node_id)
         if target:
             target["last"] = msg
@@ -1638,14 +1735,20 @@ class EnhancedUI:
         intensity = {"IN": 0.6, "OUT": 0.4, "ERR": 0.9}.get(kind, 0.3)
         self.hydra.feed_activity(kind, intensity)
 
+        # Ensure address is captured in address book
+        if nkn_addr:
+            self.stats.touch_address(nkn_addr, service)
+
         # Track stats for requests
-        if kind in ("IN", "OUT"):
-            # Extract service from message
+        if service:
+            addr = nkn_addr if nkn_addr else self._extract_nkn_addr(msg)
+            self.stats.record_request(service, addr, bytes_out=bytes_sent, bytes_in=bytes_in, duration_s=duration_s)
+        elif kind in ("IN", "OUT"):
+            # Extract service from message if provided (best-effort)
             for svc in self.services.keys():
                 if svc in msg or svc in str(node_id):
-                    # Use provided NKN address or try to extract from message
                     addr = nkn_addr if nkn_addr else self._extract_nkn_addr(msg)
-                    self.stats.record_request(svc, addr, bytes_sent)
+                    self.stats.record_request(svc, addr, bytes_out=bytes_sent, bytes_in=bytes_in, duration_s=duration_s)
                     break
 
         if self.enabled:
@@ -1674,6 +1777,10 @@ class EnhancedUI:
             "channel": channel or "",
         }
         self.flow_logs.append(entry)
+        if channel:
+            self.stats.touch_address(channel, service)
+        # Nudge hydra based on flow density
+        self.hydra.feed_activity("IN", 0.5 if direction == "→" else 0.4)
 
     def _extract_nkn_addr(self, msg: str) -> str:
         """Extract NKN address from message string."""
@@ -1738,23 +1845,37 @@ class EnhancedUI:
 
             stdscr.erase()
             h, w = stdscr.getmaxyx()
+            hydra_w = max(28, w // 3)
+            hydra_w = min(hydra_w, w - 24)  # leave room for content
+            hydra_win = stdscr.derwin(h, hydra_w, 0, 0)
+            content_win = stdscr.derwin(h, w - hydra_w, 0, hydra_w)
+            content_h, content_w = content_win.getmaxyx()
+
+            hydra_win.erase()
+            content_win.erase()
+
+            self._render_hydra_panel(hydra_win, h, hydra_w)
+            self._render_frame_chrome(stdscr, hydra_w, h, w)
 
             if self.current_view == "main":
-                self._render_main_menu(stdscr, h, w)
+                self._render_main_menu(content_win, content_h, content_w)
             elif self.current_view == "config":
-                self._render_config_view(stdscr, h, w)
+                self._render_config_view(content_win, content_h, content_w)
             elif self.current_view == "stats":
-                self._render_stats_view(stdscr, h, w)
+                self._render_stats_view(content_win, content_h, content_w)
             elif self.current_view == "addressbook":
-                self._render_address_book_view(stdscr, h, w)
+                self._render_address_book_view(content_win, content_h, content_w)
             elif self.current_view == "ingress":
-                self._render_ingress_view(stdscr, h, w)
+                self._render_ingress_view(content_win, content_h, content_w)
             elif self.current_view == "egress":
-                self._render_egress_view(stdscr, h, w)
+                self._render_egress_view(content_win, content_h, content_w)
             elif self.current_view == "debug":
-                self._render_debug_view(stdscr, h, w)
+                self._render_debug_view(content_win, content_h, content_w)
 
-            stdscr.refresh()
+            hydra_win.noutrefresh()
+            content_win.noutrefresh()
+            stdscr.noutrefresh()
+            curses.doupdate()
 
             # Handle input
             try:
@@ -1788,32 +1909,113 @@ class EnhancedUI:
         except curses.error:
             pass
 
+    def _render_frame_chrome(self, stdscr, divider_x: int, h: int, w: int):
+        """Brutalist chrome: heavy top/bottom bars and a vertical divider."""
+        try:
+            bar = "┏" + "━" * (w - 2) + "┓"
+            self._safe_addstr(stdscr, 0, 0, bar, curses.A_BOLD)
+            bottom = "┗" + "━" * (w - 2) + "┛"
+            self._safe_addstr(stdscr, h - 1, 0, bottom, curses.A_DIM)
+            for row in range(1, h - 1):
+                self._safe_addstr(stdscr, row, divider_x, "┃", curses.A_DIM)
+        except Exception:
+            pass
+
+    def _render_hydra_panel(self, stdscr, h: int, w: int):
+        """Render the animated hydra on the left side."""
+        try:
+            stdscr.attrset(curses.A_DIM)
+            for row in range(h):
+                if row % 2 == 0:
+                    self._safe_addstr(stdscr, row, 1, "▌" + " " * max(0, w - 4) + "▐")
+            stdscr.attrset(curses.A_NORMAL)
+        except Exception:
+            pass
+
+        base_x = max(4, w // 2)
+        base_y = h - 3
+        self.hydra.base_x = base_x
+        self.hydra.base_y = base_y
+        activity_lvl = self.hydra.current_activity()
+
+        # Draw stalk with varied thickness
+        stalk_color = curses.color_pair(6) | (curses.A_BOLD if activity_lvl > 0.6 else curses.A_DIM)
+        for seg in range(self.hydra.stalk_segments):
+            y = base_y - seg
+            ch = "┃" if seg % 2 == 0 else "│"
+            self._safe_addstr(stdscr, y, base_x, ch, stalk_color)
+            if activity_lvl > 0.5 and seg % 3 == 0:
+                self._safe_addstr(stdscr, y, base_x - 1, "╱", curses.color_pair(6))
+                self._safe_addstr(stdscr, y, base_x + 1, "╲", curses.color_pair(6))
+
+        # Draw root offshoots reacting to connections
+        root_count = min(6, 2 + int(activity_lvl * 6))
+        for r in range(root_count):
+            ry = base_y - (r * 2 + 1)
+            rx = base_x - (2 + (r % 3))
+            self._safe_addstr(stdscr, ry, rx, "╱", curses.color_pair(6))
+            self._safe_addstr(stdscr, ry + 1, rx + 1, "╱", curses.color_pair(6))
+            rx2 = base_x + (2 + (r % 2))
+            self._safe_addstr(stdscr, ry, rx2, "╲", curses.color_pair(6))
+            self._safe_addstr(stdscr, ry + 1, rx2 - 1, "╲", curses.color_pair(6))
+
+        # Position polyps with sway
+        sway = int(max(1, int(activity_lvl * 3)))
+        for idx, polyp in enumerate(self.hydra.polyps):
+            offset = int(math.sin(time.time() * 0.8 + idx) * sway)
+            polyp.x = base_x + offset
+            polyp.y = base_y - (idx * 4 + 2)
+            polyp.update(max(activity_lvl, polyp.activity))
+            # Draw head
+            head_char = "◉" if polyp.activity > 0.4 else "○"
+            head_attr = curses.color_pair(7) | curses.A_BOLD if polyp.activity > 0.5 else curses.color_pair(6)
+            self._safe_addstr(stdscr, polyp.y, polyp.x, head_char, head_attr)
+            # Draw tentacles and buds
+            for tx, ty in polyp.get_tentacle_positions():
+                char = "~" if (tx + ty) % 3 else "⌇"
+                self._safe_addstr(stdscr, ty, tx, char, curses.color_pair(6))
+            bud_char = "✶" if polyp.activity > 0.6 else "·"
+            self._safe_addstr(stdscr, polyp.y - 1, polyp.x + 1, bud_char, curses.color_pair(7))
+
+        # Label
+        label = "[ hydra ]"
+        self._safe_addstr(stdscr, 1, max(1, w - len(label) - 2), label, curses.color_pair(7) | curses.A_BOLD)
+
     def _render_main_menu(self, stdscr, h, w):
         """Render the main menu."""
-        header = "═══ Hydra NKN Router ═══"
-        self._safe_addstr(stdscr, 0, (w - len(header)) // 2, header, curses.color_pair(1) | curses.A_BOLD)
+        self._draw_box(stdscr, 0, 0, h, w)
+        title = "[HYDRA ROUTER]"
+        self._safe_addstr(stdscr, 0, 2, title, curses.color_pair(1) | curses.A_BOLD)
+        help_text = "↑/↓ choose • Enter select • Q quit"
+        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
 
-        help_text = "↑/↓: Navigate | Enter: Select | Q: Quit"
-        self._safe_addstr(stdscr, 1, (w - len(help_text)) // 2, help_text, curses.A_DIM)
+        split = (len(self.MENU_ITEMS) + 1) // 2
+        top_items = self.MENU_ITEMS[:split]
+        bottom_items = self.MENU_ITEMS[split:]
 
-        start_row = 4
-        for i, item in enumerate(self.MENU_ITEMS):
-            row = start_row + i * 2
-            if row >= h - 2:
-                break
+        row = 3
+        for i, item in enumerate(top_items):
+            selected = (i == self.main_menu_index)
+            bullet = "►" if selected else " "
+            attr = curses.color_pair(6) | curses.A_BOLD if selected else curses.A_NORMAL
+            pad = "━" if selected else "─"
+            line = f"{bullet} [{item.upper():<12}] {pad*max(4, w - 24)}"
+            self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
+            row += 2
 
-            if i == self.main_menu_index:
-                text = f"  ▶ {item} ◀"
-                attr = curses.color_pair(6) | curses.A_BOLD
-            else:
-                text = f"    {item}    "
-                attr = curses.color_pair(2)
+        row = h - (len(bottom_items) * 2 + 2)
+        for j, item in enumerate(bottom_items):
+            idx = split + j
+            selected = (idx == self.main_menu_index)
+            bullet = "►" if selected else " "
+            attr = curses.color_pair(6) | curses.A_BOLD if selected else curses.A_DIM
+            pad = "▏" if selected else ":"
+            line = f"{bullet} {item:<14} {pad*4}"
+            self._safe_addstr(stdscr, row, w - len(line) - 3, line[: max(0, w - 6)], attr)
+            row += 2
 
-            col = (w - len(text)) // 2
-            self._safe_addstr(stdscr, row, col, text, attr)
-
-        status = f"Services: {len(self.services)} | Nodes: {len(self.nodes)}"
-        self._safe_addstr(stdscr, h - 1, 2, status, curses.A_DIM)
+        status = f"{len(self.services)} svc / {len(self.nodes)} nodes"
+        self._safe_addstr(stdscr, h - 2, 2, status, curses.A_DIM)
 
     def _render_config_view(self, stdscr, h, w):
         """Render the Config view with service enable/disable."""
@@ -1853,7 +2055,7 @@ class EnhancedUI:
             self._safe_addstr(stdscr, row, 4, text, attr)
 
             info = self.services.get(svc, {})
-            addr = info.get("assigned_addr", "—")
+            addr = info.get("assigned_addr") or "—"
             if len(addr) > 20:
                 addr = addr[:17] + "..."
             state = info.get("status", "unknown")
@@ -1938,50 +2140,127 @@ class EnhancedUI:
             self._safe_addstr(stdscr, row + 1, 22, "←24h", curses.A_DIM)
             self._safe_addstr(stdscr, row + 1, w - 8, "now→", curses.A_DIM)
 
+    def _fmt_bytes(self, n: int) -> str:
+        if n >= 1024 * 1024:
+            return f"{n / (1024*1024):.1f} MB"
+        if n >= 1024:
+            return f"{n / 1024:.1f} KB"
+        return f"{n} B"
+
+    def _fmt_minutes(self, seconds: float) -> str:
+        return f"{seconds/60:.1f}m"
+
+    def _render_address_detail(self, stdscr, entry: Dict[str, Any], y: int, x: int, h: int, w: int):
+        """Render detail panel for a selected address."""
+        self._draw_box(stdscr, y, x, h, w)
+        inner_y = y + 1
+        inner_x = x + 2
+        addr = entry.get("addr", "—")
+        total = entry.get("total_requests", 0)
+        last = entry.get("last_seen", 0)
+        first = entry.get("first_seen", last)
+        span_s = max(0.0, last - first)
+        span_label = self._fmt_minutes(span_s) if span_s else "—"
+        bytes_in = entry.get("bytes_in", 0)
+        bytes_out = entry.get("bytes_out", 0)
+        active_s = entry.get("active_seconds", 0.0)
+        active_label = self._fmt_minutes(active_s)
+
+        self._safe_addstr(stdscr, inner_y, inner_x, "addr:", curses.color_pair(5) | curses.A_BOLD)
+        self._safe_addstr(stdscr, inner_y, inner_x + 6, addr[: max(8, w - 10)], curses.A_NORMAL)
+        inner_y += 1
+        self._safe_addstr(stdscr, inner_y, inner_x, f"first: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(first))}", curses.A_DIM)
+        inner_y += 1
+        self._safe_addstr(stdscr, inner_y, inner_x, f"last : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last))}", curses.A_DIM)
+        inner_y += 2
+        self._safe_addstr(stdscr, inner_y, inner_x, f"requests: {total}   span: {span_label}   active: {active_label}", curses.color_pair(2))
+        inner_y += 1
+        self._safe_addstr(stdscr, inner_y, inner_x, f"in : {self._fmt_bytes(bytes_in)}   out: {self._fmt_bytes(bytes_out)}", curses.A_NORMAL)
+        inner_y += 2
+
+        services_raw = entry.get("services", {})
+        services: Dict[str, Dict[str, Any]] = {}
+        for svc, info in services_raw.items():
+            if isinstance(info, dict):
+                services[svc] = info
+            else:
+                # Legacy int count
+                services[svc] = {"count": int(info or 0), "bytes_in": 0, "bytes_out": 0, "active_seconds": 0.0, "first_seen": entry.get("first_seen", first), "last_seen": last}
+        if not services:
+            self._safe_addstr(stdscr, inner_y, inner_x, "(no service usage)", curses.A_DIM)
+            return
+
+        self._safe_addstr(stdscr, inner_y, inner_x, "services:", curses.color_pair(5) | curses.A_BOLD)
+        inner_y += 1
+        for svc, info in sorted(services.items(), key=lambda kv: kv[1].get("count", 0), reverse=True):
+            if inner_y >= y + h - 1:
+                break
+            cnt = info.get("count", 0)
+            bin_val = info.get("bytes_in", 0)
+            bout_val = info.get("bytes_out", 0)
+            active = info.get("active_seconds", 0.0)
+            line = f" - {svc:<14} {cnt:>4}x  in {self._fmt_bytes(bin_val):>8}  out {self._fmt_bytes(bout_val):>8}  act {self._fmt_minutes(active):>6}"
+            self._safe_addstr(stdscr, inner_y, inner_x, line[: max(10, w - 4)], curses.A_NORMAL)
+            inner_y += 1
+
     def _render_address_book_view(self, stdscr, h, w):
         """Render Address Book with NKN addresses and usage stats."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Address Book ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        help_text = "↑/↓: Navigate | Enter: Details | ESC: Back"
+        title = "⌈ Address Book ⌋"
+        self._safe_addstr(stdscr, 0, 2, title, curses.color_pair(1) | curses.A_BOLD)
+        help_text = "↑/↓ select • detail pane on the right • ESC back"
         self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
 
         addresses = self.stats.get_address_book()
-
         if not addresses:
             self._safe_addstr(stdscr, 3, 2, "(No visitors yet)", curses.A_DIM)
             return
 
-        start_row = 3
-        header = f"{'Address':<45} {'Requests':>10} {'Last Seen':>20}"
-        self._safe_addstr(stdscr, start_row, 2, header, curses.color_pair(5) | curses.A_BOLD)
-        start_row += 1
-        self._safe_addstr(stdscr, start_row, 2, "─" * (w - 4), curses.A_DIM)
-        start_row += 1
+        list_w = max(32, w // 2)
+        detail_w = w - list_w - 3
+        list_start_row = 3
+        visible_rows = h - list_start_row - 2
 
-        visible_rows = h - start_row - 2
+        # Clamp selection
+        self.main_menu_index = min(self.main_menu_index, max(0, len(addresses) - 1))
+        if self.main_menu_index < self.scroll_offset:
+            self.scroll_offset = self.main_menu_index
+        if self.main_menu_index >= self.scroll_offset + visible_rows:
+            self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
         end_idx = min(len(addresses), self.scroll_offset + visible_rows)
+
+        # List header
+        header = f"{'addr':<28} {'reqs':>6} {'last':>16}"
+        self._safe_addstr(stdscr, list_start_row, 1, header, curses.color_pair(5) | curses.A_BOLD)
+        self._safe_addstr(stdscr, list_start_row + 1, 1, "─" * (list_w - 2), curses.A_DIM)
 
         for i in range(self.scroll_offset, end_idx):
             addr_info = addresses[i]
-            addr = addr_info["addr"]
+            addr = addr_info.get("addr", "—")
             total = addr_info.get("total_requests", 0)
             last_seen = addr_info.get("last_seen", 0)
-            last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_seen))
+            last_str = time.strftime("%m-%d %H:%M", time.localtime(last_seen))
 
-            addr_display = (addr[:42] + "...") if len(addr) > 45 else addr
+            addr_display = (addr[:24] + "...") if len(addr) > 27 else addr
 
-            row = start_row + (i - self.scroll_offset)
+            row = list_start_row + 2 + (i - self.scroll_offset)
+            if row >= h - 1:
+                break
+
             if i == self.main_menu_index:
-                attr = curses.color_pair(6)
-                prefix = "▶ "
+                attr = curses.color_pair(6) | curses.A_BOLD
+                prefix = "►"
             else:
                 attr = curses.A_NORMAL
-                prefix = "  "
+                prefix = " "
 
-            line = f"{prefix}{addr_display:<45} {total:>10} {last_str:>20}"
-            self._safe_addstr(stdscr, row, 2, line, attr)
+            line = f"{prefix} {addr_display:<27} {total:>6} {last_str:>16}"
+            self._safe_addstr(stdscr, row, 1, line[: list_w - 2], attr)
+
+        # Detail panel
+        selected = addresses[self.main_menu_index] if addresses else {}
+        detail_h = h - 4
+        detail_x = list_w + 2
+        self._render_address_detail(stdscr, selected, 2, detail_x, detail_h, detail_w)
 
     def _render_ingress_view(self, stdscr, h, w):
         """Render Ingress view with QR codes for service addresses."""
@@ -3654,6 +3933,18 @@ class RelayNode:
             return service
         return host or "service"
 
+    def _record_usage_stats(self, service: Optional[str], addr: str, bytes_in: int = 0, bytes_out: int = 0,
+                            start_ts: Optional[float] = None) -> None:
+        if not service:
+            return
+        duration_s = 0.0
+        if start_ts is not None:
+            duration_s = max(0.0, time.time() - start_ts)
+        try:
+            self.ui.stats.record_request(service, addr or "unknown", bytes_out=bytes_out, bytes_in=bytes_in, duration_s=duration_s)
+        except Exception:
+            pass
+
     def _check_assignment(self, service_name: Optional[str], src: str, rid: str) -> bool:
         if not service_name:
             return True
@@ -3790,6 +4081,7 @@ class RelayNode:
                     pass
 
     def _process_request(self, session: requests.Session, src: str, rid: str, req: dict):
+        start_ts = time.time()
         url = self._resolve_url(req)
         method = (req.get("method") or "GET").upper()
         headers = req.get("headers") or {}
@@ -3819,6 +4111,7 @@ class RelayNode:
                 headers["X-Relay-Stream"] = "chunks"
 
         params: Dict[str, Any] = {"headers": headers, "timeout": timeout_s, "verify": verify}
+        body_bytes = 0
         body_chunks = req.get("body_chunks_b64") or []
         json_chunks = req.get("json_chunks_b64") or []
         if body_chunks:
@@ -3827,6 +4120,7 @@ class RelayNode:
             except Exception:
                 combined = b""
             params["data"] = combined
+            body_bytes = len(combined)
         elif json_chunks:
             try:
                 combined = b"".join(base64.b64decode(str(c), validate=False) for c in json_chunks if c is not None)
@@ -3834,30 +4128,43 @@ class RelayNode:
                 headers.setdefault("Content-Type", "application/json")
             except Exception:
                 params["data"] = b""
+            body_bytes = len(params.get("data") or b"")
         elif "json" in req and req["json"] is not None:
             params["json"] = req["json"]
+            try:
+                body_bytes = len(json.dumps(req["json"]).encode("utf-8"))
+            except Exception:
+                body_bytes = 0
         elif "body_b64" in req and req["body_b64"] is not None:
             try:
                 params["data"] = base64.b64decode(str(req["body_b64"]), validate=False)
             except Exception:
                 params["data"] = b""
+            body_bytes = len(params.get("data") or b"")
         elif "data" in req and req["data"] is not None:
             params["data"] = req["data"]
+            try:
+                body_bytes = len(req["data"]) if isinstance(req["data"], (bytes, bytearray)) else len(str(req["data"]).encode("utf-8"))
+            except Exception:
+                body_bytes = 0
 
         if want_stream:
             resp = self._http_request_with_retry(session, method, url, stream=True, **params)
             if resp.status_code == 429:
                 self._register_rate_limit_hit()
                 self._send_simple_response(src, rid, resp, req)
+                self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=len(resp.content or b""), start_ts=start_ts)
                 return
             self._reset_rate_limit()
             stream_mode = self._infer_stream_mode(stream_mode, resp)
-            self._handle_stream(src, rid, resp, stream_mode)
+            bytes_out = self._handle_stream(src, rid, resp, stream_mode, service_name, body_bytes, start_ts)
+            self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
             return
 
         resp = self._http_request_with_retry(session, method, url, **params)
         self._handle_response_status(resp.status_code)
-        self._send_simple_response(src, rid, resp, req)
+        bytes_out = self._send_simple_response(src, rid, resp, req)
+        self._record_usage_stats(service_name, src, bytes_in=body_bytes, bytes_out=bytes_out, start_ts=start_ts)
 
     def _handle_response_status(self, status_code: int) -> None:
         if status_code == 429:
@@ -4137,7 +4444,7 @@ class RelayNode:
             self.rate_limit_hits.clear()
             self.last_rate_limit = None
 
-    def _send_simple_response(self, src: str, rid: str, resp: requests.Response, req: Optional[dict] = None) -> None:
+    def _send_simple_response(self, src: str, rid: str, resp: requests.Response, req: Optional[dict] = None) -> int:
         raw = resp.content or b""
         truncated = False
         if len(raw) > self.max_body:
@@ -4172,6 +4479,7 @@ class RelayNode:
         service_name = self._canonical_service((req or {}).get("service") or (req or {}).get("target"))
         origin = service_name or "service"
         self._record_flow(origin, src, f"{payload['status']} {rid}", service=service_name, channel=src, direction="←")
+        return bytes_sent
 
     def _sanitize_response_json(self, req: Optional[dict], data: Any) -> Any:
         try:
@@ -4236,7 +4544,8 @@ class RelayNode:
             return "lines"
         return "chunks"
 
-    def _handle_stream(self, src: str, rid: str, resp: requests.Response, mode: str):
+    def _handle_stream(self, src: str, rid: str, resp: requests.Response, mode: str,
+                      service_name: Optional[str], bytes_in: int, start_ts: float) -> int:
         headers = {k.lower(): v for k, v in resp.headers.items()}
         filename = None
         cd = resp.headers.get("Content-Disposition") or resp.headers.get("content-disposition") or ""
@@ -4266,11 +4575,13 @@ class RelayNode:
         self.ui.bump(self.node_id, "OUT", f"stream begin {rid}")
 
         if mode == "lines":
-            self._stream_lines(src, rid, resp)
+            total_bytes = self._stream_lines(src, rid, resp)
         else:
-            self._stream_chunks(src, rid, resp)
+            total_bytes = self._stream_chunks(src, rid, resp)
 
-    def _stream_lines(self, src: str, rid: str, resp: requests.Response):
+        return total_bytes
+
+    def _stream_lines(self, src: str, rid: str, resp: requests.Response) -> int:
         decoder = codecs.getincrementaldecoder("utf-8")()
         text_buf = ""
         batch = []
@@ -4340,18 +4651,19 @@ class RelayNode:
             }, DM_OPTS_STREAM)
             self.ui.bump(self.node_id, "ERR", f"stream lines {e}")
             return
-        self.bridge.dm(src, {
-            "event": "relay.response.end",
-            "id": rid,
-            "ok": True,
-            "bytes": total_bytes,
-            "last_seq": seq,
-            "lines": total_lines,
-            "done_seen": done_seen,
-        }, DM_OPTS_STREAM)
-        self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+            self.bridge.dm(src, {
+                "event": "relay.response.end",
+                "id": rid,
+                "ok": True,
+                "bytes": total_bytes,
+                "last_seq": seq,
+                "lines": total_lines,
+                "done_seen": done_seen,
+            }, DM_OPTS_STREAM)
+            self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+        return total_bytes
 
-    def _stream_chunks(self, src: str, rid: str, resp: requests.Response):
+    def _stream_chunks(self, src: str, rid: str, resp: requests.Response) -> int:
         total = 0
         seq = 0
         last_send = time.time()
@@ -4401,6 +4713,7 @@ class RelayNode:
         # keep cache briefly for resend handling; cleanup after short delay
         threading.Timer(5.0, lambda: self.response_cache.pop(rid, None)).start()
         self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+        return total
 
 
 # ──────────────────────────────────────────────────────────────
@@ -4424,7 +4737,7 @@ class Router:
     def __init__(self, cfg: dict, use_ui: bool):
         self.cfg = cfg
         self.use_ui = use_ui
-        self.ui = EnhancedUI(use_ui, CONFIG_PATH)
+        self.ui = EnhancedUI(use_ui, STATE_CONFIG_PATH)
         self.ui.set_action_handler(self.handle_ui_action)
         ensure_bridge()
         http_cfg = self.cfg.get("http", {})
@@ -4433,7 +4746,7 @@ class Router:
             self.ui.set_chunk_upload_kb(kb)
 
         self.watchdog = ServiceWatchdog(BASE_DIR)
-        self.watchdog.ensure_sources()
+        self.watchdog.ensure_sources(service_config=self.ui.service_config)
         self.latest_service_status: Dict[str, dict] = {
             snap["name"]: snap for snap in self.watchdog.get_snapshot()
         }
