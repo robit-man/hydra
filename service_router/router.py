@@ -4148,6 +4148,139 @@ class RelayNode:
             # If we can't parse the URL, reject it for security
             return False
 
+    def _detect_service_port_from_log(self, service_name: str) -> Optional[int]:
+        """Best-effort detection of a service port by tailing its log."""
+        log_file = LOGS_ROOT / f"{service_name}.log"
+        if not log_file.exists():
+            return None
+        try:
+            import re
+
+            with open(log_file, "r") as f:
+                lines = f.readlines()[-100:]
+            patterns = [
+                r"Running on .*:(\d+)",
+                r"listening on .*:(\d+)",
+                r"Listening on port (\d+)",
+                r"Server.*port (\d+)",
+                r"Started.*:(\d+)",
+                r"http://[^:]+:(\d+)",
+            ]
+            for line in reversed(lines):
+                for pattern in patterns:
+                    match = re.search(pattern, line, re.IGNORECASE)
+                    if match:
+                        port = int(match.group(1))
+                        if 1024 <= port <= 65535:
+                            return port
+        except Exception as exc:  # pragma: no cover
+            LOGGER.debug("On-demand port detection failed for %s: %s", service_name, exc)
+        return None
+
+    def _service_host_hint(self, service: str) -> Optional[str]:
+        """Extract a host hint from targets or endpoint config."""
+        info = SERVICE_TARGETS.get(service) or {}
+        target_key = info.get("target") or service
+        base = self.targets.get(target_key) or info.get("endpoint") or ""
+        try:
+            parsed = urllib.parse.urlparse(base)
+            return parsed.hostname
+        except Exception:
+            return None
+
+    def _hosts_equivalent(self, left: Optional[str], right: Optional[str]) -> bool:
+        """Treat loopback hostnames as equivalent when comparing."""
+        if not left or not right:
+            return False
+        loopbacks = {"127.0.0.1", "localhost"}
+        if left in loopbacks and right in loopbacks:
+            return True
+        return left == right
+
+    def _probe_service_port(self, host: str, port: int, timeout: float = 0.35) -> bool:
+        """Lightweight TCP probe to confirm the port is listening."""
+        try:
+            import socket
+
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _whitelist_service_port(self, service: str, port: int, host: Optional[str], scheme: Optional[str], reason: str) -> None:
+        """Whitelist + align a service port and target endpoint immediately."""
+        svc = self._canonical_service(service) or service
+        if not svc or port <= 0:
+            return
+        info = SERVICE_TARGETS.get(svc)
+        if not info:
+            return
+
+        ports = info.setdefault("ports", [])
+        if port not in ports:
+            ports.append(port)
+            LOGGER.info("Port isolation: added port %s for %s (%s)", port, svc, reason)
+
+        target_key = info.get("target") or svc
+        base_hint = self.targets.get(target_key) or info.get("endpoint") or ""
+        base_host = None
+        base_scheme = None
+        try:
+            if base_hint:
+                parsed = urllib.parse.urlparse(base_hint)
+                base_host = parsed.hostname
+                base_scheme = parsed.scheme
+        except Exception:
+            pass
+        if not base_host and host:
+            base_host = host
+        if not base_scheme:
+            base_scheme = scheme
+        if not base_host:
+            return
+        new_base = f"{base_scheme or 'http'}://{base_host}:{port}"
+        if new_base != base_hint:
+            info["endpoint"] = new_base
+            self.targets[target_key] = new_base
+            self.global_cfg.setdefault("targets", {})[target_key] = new_base
+            try:
+                self.ui.update_service_info(svc, {"endpoint": new_base})
+            except Exception:
+                pass
+            LOGGER.info("Port isolation: aligned %s -> %s", svc, new_base)
+
+    def _ensure_port_whitelisted(self, url: str, service: str) -> bool:
+        """On-demand detection/probe to avoid blocking first requests on new ports."""
+        if not self.ui.port_isolation_enabled:
+            return True
+        svc = self._canonical_service(service) if service else ""
+        if not svc:
+            return False
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        cfg_host = self._service_host_hint(svc)
+        requested_host = parsed.hostname
+        host_hint = cfg_host or requested_host or "127.0.0.1"
+        host_mismatch = bool(cfg_host and requested_host and not self._hosts_equivalent(cfg_host, requested_host))
+        scheme = parsed.scheme or "http"
+
+        detected_port = self._detect_service_port_from_log(svc)
+        if detected_port:
+            self._whitelist_service_port(svc, detected_port, host_hint, scheme, reason="log-detect")
+            if not host_mismatch and self._validate_url_port(url, svc):
+                return True
+
+        if host_mismatch:
+            return False
+
+        if port and host_hint and self._probe_service_port(host_hint, port):
+            self._whitelist_service_port(svc, port, host_hint, scheme, reason="probe")
+            return self._validate_url_port(url, svc)
+        return False
+
     def _resolve_url(self, req: dict) -> str:
         url = (req.get("url") or "").strip()
         svc_raw = (req.get("service") or "").strip()
@@ -4161,7 +4294,8 @@ class RelayNode:
         if url:
             # Validate URL port against known service endpoints
             if not self._validate_url_port(url, svc):
-                raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
+                if not self._ensure_port_whitelisted(url, svc):
+                    raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
             return url
 
         base = self.targets.get(target_key) or self.targets.get(svc)
@@ -4174,7 +4308,8 @@ class RelayNode:
 
         # Validate resolved URL port
         if not self._validate_url_port(resolved_url, svc):
-            raise ValueError(f"port isolation: resolved URL '{resolved_url}' port not in whitelist for service '{svc}'")
+            if not self._ensure_port_whitelisted(resolved_url, svc):
+                raise ValueError(f"port isolation: resolved URL '{resolved_url}' port not in whitelist for service '{svc}'")
 
         return resolved_url
 
