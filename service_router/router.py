@@ -1838,6 +1838,7 @@ class EnhancedUI:
         direction: str = "→",
         service: Optional[str] = None,
         channel: Optional[str] = None,
+        blocked: bool = False,
     ) -> None:
         """Record a directional flow between a source and target for the Debug view."""
         ts = time.strftime("%H:%M:%S")
@@ -1849,6 +1850,7 @@ class EnhancedUI:
             "dir": direction,
             "service": service or "All",
             "channel": channel or "",
+            "blocked": bool(blocked),
         }
         self.flow_logs.append(entry)
         if channel:
@@ -2572,7 +2574,9 @@ class EnhancedUI:
             if channel:
                 line += f" @{channel}"
             attr = curses.color_pair(2)
-            if "err" in payload.lower():
+            if entry.get("blocked"):
+                attr = curses.color_pair(3) | curses.A_BOLD  # orange/yellow for blocked
+            elif "err" in payload.lower():
                 attr = curses.color_pair(4)
             self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
 
@@ -4013,11 +4017,11 @@ class RelayNode:
         return self.alias_map.get(hint, hint)
 
     def _record_flow(self, source: str, target: str, payload: str, service: Optional[str] = None,
-                     channel: Optional[str] = None, direction: str = "→") -> None:
+                     channel: Optional[str] = None, direction: str = "→", blocked: bool = False) -> None:
         """Route flow events to the UI without breaking headless mode."""
         try:
             if hasattr(self.ui, "record_flow"):
-                self.ui.record_flow(source, target, payload, direction=direction, service=service, channel=channel)
+                self.ui.record_flow(source, target, payload, direction=direction, service=service, channel=channel, blocked=blocked)
         except Exception:
             pass
 
@@ -4195,6 +4199,12 @@ class RelayNode:
             try:
                 self._process_request(session, src, rid, req)
             except Exception as e:
+                blocked = isinstance(e, ValueError) and "port isolation" in str(e).lower()
+                if blocked:
+                    target_label = self._flow_target_label(service_name, req.get("url") or req.get("path") or service_name or "")
+                    method = (req.get("method") or "GET").upper()
+                    path_snippet = req.get("path") or "/"
+                    self._record_flow(src or "client", target_label, f"BLOCKED {method} {path_snippet}: {e}", service=service_name, channel=src, blocked=True)
                 self.bridge.dm(src, {
                     "event": "relay.response",
                     "id": rid,
