@@ -4207,19 +4207,26 @@ class RelayNode:
         except Exception:
             return False
 
-    def _whitelist_service_port(self, service: str, port: int, host: Optional[str], scheme: Optional[str], reason: str) -> None:
+    def _whitelist_service_port(self, service: str, port: int, host: Optional[str], scheme: Optional[str], reason: str, require_probe: bool = False) -> bool:
         """Whitelist + align a service port and target endpoint immediately."""
         svc = self._canonical_service(service) or service
         if not svc or port <= 0:
-            return
+            return False
         info = SERVICE_TARGETS.get(svc)
         if not info:
-            return
+            return False
+
+        if require_probe and host:
+            if not self._probe_service_port(host, port):
+                LOGGER.debug("Port isolation: skip %s port %s (%s) probe failed", svc, port, reason)
+                return False
 
         ports = info.setdefault("ports", [])
+        changed = False
         if port not in ports:
             ports.append(port)
             LOGGER.info("Port isolation: added port %s for %s (%s)", port, svc, reason)
+            changed = True
 
         target_key = info.get("target") or svc
         base_hint = self.targets.get(target_key) or info.get("endpoint") or ""
@@ -4237,7 +4244,7 @@ class RelayNode:
         if not base_scheme:
             base_scheme = scheme
         if not base_host:
-            return
+            return changed
         new_base = f"{base_scheme or 'http'}://{base_host}:{port}"
         if new_base != base_hint:
             info["endpoint"] = new_base
@@ -4248,6 +4255,8 @@ class RelayNode:
             except Exception:
                 pass
             LOGGER.info("Port isolation: aligned %s -> %s", svc, new_base)
+            changed = True
+        return changed
 
     def _ensure_port_whitelisted(self, url: str, service: str) -> bool:
         """On-demand detection/probe to avoid blocking first requests on new ports."""
@@ -4269,8 +4278,8 @@ class RelayNode:
 
         detected_port = self._detect_service_port_from_log(svc)
         if detected_port:
-            self._whitelist_service_port(svc, detected_port, host_hint, scheme, reason="log-detect")
-            if not host_mismatch and self._validate_url_port(url, svc):
+            aligned = self._whitelist_service_port(svc, detected_port, host_hint, scheme, reason="log-detect", require_probe=True)
+            if aligned and not host_mismatch and self._validate_url_port(url, svc):
                 return True
 
         if host_mismatch:
@@ -5074,6 +5083,8 @@ class Router:
             return None
 
         try:
+            import re
+
             # Read last 100 lines of log file (most recent startup info)
             with open(log_file, 'r') as f:
                 lines = f.readlines()[-100:]
@@ -5102,41 +5113,67 @@ class Router:
             LOGGER.debug(f"Port detection failed for {service_name}: {e}")
             return None
 
+    def _service_host_hint(self, service_name: str) -> str:
+        info = SERVICE_TARGETS.get(service_name) or {}
+        target_key = info.get("target") or service_name
+        base = self.targets.get(target_key) or info.get("endpoint") or DEFAULT_TARGETS.get(target_key) or ""
+        try:
+            parsed = urllib.parse.urlparse(base)
+            return parsed.hostname or "127.0.0.1"
+        except Exception:
+            return "127.0.0.1"
+
+    def _probe_service_port(self, host: str, port: int, timeout: float = 0.35) -> bool:
+        try:
+            import socket
+
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
     def _update_service_ports(self):
         """Update SERVICE_TARGETS with detected ports from running services."""
         for service_name in SERVICE_TARGETS.keys():
             detected_port = self._detect_service_port(service_name)
-            if detected_port:
-                current_ports = SERVICE_TARGETS[service_name].get("ports", [])
-                if detected_port not in current_ports:
-                    # Port not in whitelist, add it
-                    SERVICE_TARGETS[service_name]["ports"].append(detected_port)
-                    LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+            if not detected_port:
+                continue
 
-                # Update endpoint to show actual detected port
-                current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
-                if current_endpoint and f":{detected_port}" not in current_endpoint:
-                    # Update endpoint to reflect detected port
-                    base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
-                    SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
-                    LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
+            host = self._service_host_hint(service_name)
+            if not self._probe_service_port(host, detected_port):
+                LOGGER.debug("Skipping port update for %s: %s not listening on %s", service_name, host, detected_port)
+                continue
 
-                # Update router targets/config to match detected port (no hard-coding)
-                target_key = SERVICE_TARGETS[service_name].get("target") or service_name
-                existing_base = self.targets.get(target_key) or SERVICE_TARGETS[service_name].get("endpoint") or ""
-                try:
-                    parsed = urllib.parse.urlparse(existing_base or f"http://127.0.0.1:{detected_port}")
-                    host = parsed.hostname or "127.0.0.1"
-                    scheme = parsed.scheme or "http"
-                    new_base = f"{scheme}://{host}:{detected_port}"
-                    if new_base != existing_base:
-                        self.targets[target_key] = new_base
-                        self.cfg.setdefault("targets", {})[target_key] = new_base
-                        self.config_dirty = True
-                        self.ui.update_service_info(service_name, {"endpoint": new_base})
-                        LOGGER.info("Aligned target for %s -> %s", target_key, new_base)
-                except Exception as exc:
-                    LOGGER.debug("Failed to align target for %s: %s", target_key, exc)
+            current_ports = SERVICE_TARGETS[service_name].get("ports", [])
+            if detected_port not in current_ports:
+                # Port not in whitelist, add it
+                SERVICE_TARGETS[service_name]["ports"].append(detected_port)
+                LOGGER.info(f"Detected {service_name} running on port {detected_port} (added to whitelist)")
+
+            # Update endpoint to show actual detected port
+            current_endpoint = SERVICE_TARGETS[service_name].get("endpoint", "")
+            if current_endpoint and f":{detected_port}" not in current_endpoint:
+                # Update endpoint to reflect detected port
+                base_url = current_endpoint.rsplit(":", 1)[0]  # Remove old port
+                SERVICE_TARGETS[service_name]["endpoint"] = f"{base_url}:{detected_port}"
+                LOGGER.debug(f"Updated {service_name} endpoint to port {detected_port}")
+
+            # Update router targets/config to match detected port (no hard-coding)
+            target_key = SERVICE_TARGETS[service_name].get("target") or service_name
+            existing_base = self.targets.get(target_key) or SERVICE_TARGETS[service_name].get("endpoint") or ""
+            try:
+                parsed = urllib.parse.urlparse(existing_base or f"http://{host}:{detected_port}")
+                host = parsed.hostname or host or "127.0.0.1"
+                scheme = parsed.scheme or "http"
+                new_base = f"{scheme}://{host}:{detected_port}"
+                if new_base != existing_base:
+                    self.targets[target_key] = new_base
+                    self.cfg.setdefault("targets", {})[target_key] = new_base
+                    self.config_dirty = True
+                    self.ui.update_service_info(service_name, {"endpoint": new_base})
+                    LOGGER.info("Aligned target for %s -> %s", target_key, new_base)
+            except Exception as exc:
+                LOGGER.debug("Failed to align target for %s: %s", target_key, exc)
 
     def start(self):
         LOGGER.info("Starting services via watchdog")
