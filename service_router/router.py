@@ -5203,19 +5203,41 @@ class RelayNode:
                                 done_seen = True
                         except Exception:
                             pass
-                        batch.append({"seq": seq, "ts": int(time.time() * 1000), "line": line})
-                        if len(batch) >= self.batch_lines or (time.time() - last_flush) >= self.batch_latency:
+                        batch.append({
+                            "seq": seq,
+                            "ts": int(time.time() * 1000),
+                            "line": line,
+                        })
+                        if (
+                            len(batch) >= self.batch_lines
+                            or (time.time() - last_flush) >= self.batch_latency
+                        ):
                             flush_batch()
                 if time.time() >= hb_deadline:
-                    self.bridge.dm(src, {"event": "relay.response.keepalive", "id": rid, "ts": int(time.time() * 1000)}, DM_OPTS_STREAM)
+                    self.bridge.dm(
+                        src,
+                        {
+                            "event": "relay.response.keepalive",
+                            "id": rid,
+                            "ts": int(time.time() * 1000),
+                        },
+                        DM_OPTS_STREAM,
+                    )
                     hb_deadline = time.time() + self.heartbeat_s
+
+            # flush any remaining text
             tail = decoder.decode(b"", final=True)
             if tail.strip():
                 seq += 1
                 total_lines += 1
-                batch.append({"seq": seq, "ts": int(time.time() * 1000), "line": tail})
+                batch.append({
+                    "seq": seq,
+                    "ts": int(time.time() * 1000),
+                    "line": tail,
+                })
             flush_batch()
         except Exception as e:
+            # error path: end with ok = False
             self.bridge.dm(src, {
                 "event": "relay.response.end",
                 "id": rid,
@@ -5227,18 +5249,21 @@ class RelayNode:
                 "done_seen": done_seen,
             }, DM_OPTS_STREAM)
             self.ui.bump(self.node_id, "ERR", f"stream lines {e}")
-            return
-            self.bridge.dm(src, {
-                "event": "relay.response.end",
-                "id": rid,
-                "ok": True,
-                "bytes": total_bytes,
-                "last_seq": seq,
-                "lines": total_lines,
-                "done_seen": done_seen,
-            }, DM_OPTS_STREAM)
-            self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+            return total_bytes
+
+        # success path: end with ok = True
+        self.bridge.dm(src, {
+            "event": "relay.response.end",
+            "id": rid,
+            "ok": True,
+            "bytes": total_bytes,
+            "last_seq": seq,
+            "lines": total_lines,
+            "done_seen": done_seen,
+        }, DM_OPTS_STREAM)
+        self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
         return total_bytes
+
 
     def _stream_chunks(self, src: str, rid: str, resp: requests.Response) -> int:
         total = 0
