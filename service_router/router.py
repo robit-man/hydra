@@ -364,6 +364,7 @@ class ServiceWatchdog:
         self._terminal_template = self._detect_terminal()
         self._update_thread: Optional[threading.Thread] = None
         self._repo_thread: Optional[threading.Thread] = None
+        self._restart_pending: bool = False
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
 
@@ -516,6 +517,16 @@ class ServiceWatchdog:
         except Exception:
             return False
 
+    def _restart_router(self) -> None:
+        """Exec-restart the router process after a safe pull."""
+        if self._restart_pending:
+            return
+        self._restart_pending = True
+        print("[watchdog] Pull applied; restarting router…")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
     def _maybe_update_service(self, state: ServiceState) -> None:
         """
         Check for upstream updates on preserve_repo services.
@@ -589,13 +600,12 @@ class ServiceWatchdog:
                         backup = self._backup_repo(repo_dir)
                         try:
                             self._run_git(repo_dir, ["pull", "--rebase", "--autostash"])
-                            # If we reach here, pull succeeded
                             backup = None
+                            # restart the router to pick up changes
+                            self._restart_router()
                         except Exception as exc:
-                            # rollback
                             if backup:
                                 self._restore_repo(repo_dir, backup)
-                            # log error but keep running
                             print(f"[watchdog] core repo pull failed: {exc}")
                 else:
                     # Not a git repo; skip
