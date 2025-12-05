@@ -2271,6 +2271,7 @@ class RelayNode:
         self.rate_limit_hits: Deque[float] = deque(maxlen=64)
         self.last_rate_limit: Optional[float] = None
         self.upload_sessions: Dict[str, dict] = {}
+        self.response_cache: Dict[str, dict] = {}
         self.upload_cleanup_stop = threading.Event()
         self.upload_cleanup_thread: Optional[threading.Thread] = None
 
@@ -2290,6 +2291,8 @@ class RelayNode:
             self.jobs.put(None)  # type: ignore
         self.bridge.shutdown()
         self.upload_cleanup_stop.set()
+        # Clear response cache
+        self.response_cache.clear()
 
     # bridge callbacks -----------------------------------------
     def _build_bridge(self) -> BridgeManager:
@@ -2418,6 +2421,11 @@ class RelayNode:
             canonical = self._canonical_service(service_hint)
             if self._check_assignment(canonical, src, rid):
                 self._enqueue_request(src, rid, req)
+            return
+        if event == "relay.response.missing":
+            uid = body.get("id") or body.get("upload_id") or ""
+            missing = body.get("missing") or []
+            self._handle_response_missing(src, uid, missing)
             return
         # ignore unknown
 
@@ -2748,6 +2756,25 @@ class RelayNode:
         # Only drop the session once we’ve enqueued the HTTP request (or finalized partial)
         self.upload_sessions.pop(uid, None)
 
+    def _handle_response_missing(self, src: str, rid: str, missing: List[int]) -> None:
+        if not missing:
+            return
+        cache = self.response_cache.get(rid)
+        if not cache:
+            return
+        chunks = cache.get("chunks") or {}
+        for seq in missing:
+            b64 = chunks.get(seq)
+            if not b64:
+                continue
+            payload = {
+                "event": "relay.response.chunk",
+                "id": rid,
+                "seq": seq,
+                "b64": b64,
+            }
+            self.bridge.dm(src, payload, DM_OPTS_STREAM)
+
     def _upload_cleanup_loop(self) -> None:
         """Sweep unfinished uploads so they don't stall forever."""
         while not self.upload_cleanup_stop.is_set():
@@ -3019,6 +3046,8 @@ class RelayNode:
         total = 0
         seq = 0
         last_send = time.time()
+        cache_entry = {"chunks": {}, "created": time.time()}
+        self.response_cache[rid] = cache_entry
         try:
             for chunk in resp.iter_content(chunk_size=self.chunk_raw_b):
                 if not chunk:
@@ -3028,12 +3057,14 @@ class RelayNode:
                     continue
                 total += len(chunk)
                 seq += 1
+                b64 = base64.b64encode(chunk).decode("ascii")
                 payload = {
                     "event": "relay.response.chunk",
                     "id": rid,
                     "seq": seq,
-                    "b64": base64.b64encode(chunk).decode("ascii"),
+                    "b64": b64,
                 }
+                cache_entry["chunks"][seq] = b64
                 self.bridge.dm(src, payload, DM_OPTS_STREAM)
                 last_send = time.time()
         except Exception as e:
@@ -3047,6 +3078,7 @@ class RelayNode:
                 "error": f"{type(e).__name__}: {e}",
             }, DM_OPTS_STREAM)
             self.ui.bump(self.node_id, "ERR", f"stream chunks {e}")
+            self.response_cache.pop(rid, None)
             return
         self.bridge.dm(src, {
             "event": "relay.response.end",
@@ -3057,6 +3089,8 @@ class RelayNode:
             "truncated": False,
             "error": None,
         }, DM_OPTS_STREAM)
+        # keep cache briefly for resend handling; cleanup after short delay
+        threading.Timer(5.0, lambda: self.response_cache.pop(rid, None)).start()
         self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
 
 

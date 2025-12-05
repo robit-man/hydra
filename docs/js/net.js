@@ -174,7 +174,7 @@ const Net = {
     const url = base.replace(/\/+$/, '') + path;
     this.uploadCache.set(uploadId, { chunks, total, url, headers, relay, timeout });
 
-    const responsePromise = this._awaitResponseStream(uploadId, timeout);
+    const responsePromise = this._awaitResponseStream(uploadId, timeout, relay);
 
     const throttleMs = total > 8 ? 6 : 0;
     const sendMsg = async (msg) => {
@@ -238,15 +238,17 @@ const Net = {
     }
   },
 
-  async _awaitResponseStream(id, timeout = 180000) {
+  async _awaitResponseStream(id, timeout = 180000, relay = null) {
     if (!this.nkn.client) this.ensureNkn();
     return new Promise((resolve, reject) => {
-      let buf = [];
+      const chunks = [];
+      let maxSeq = 0;
       let ok = false;
       let status = 0;
       let headers = {};
       let timer = setTimeout(() => {
         this.nkn.streams.delete(id);
+        this._clearUploadCache(id);
         reject(new Error('NKN stream timeout'));
       }, timeout);
       const handlers = {
@@ -255,30 +257,69 @@ const Net = {
           status = meta?.status || 0;
           headers = meta?.headers || {};
         },
-        onChunk: (chunk) => buf.push(chunk),
+        onChunk: (chunk, seq = 0) => {
+          const idx = (Number(seq) || 0) - 1;
+          if (idx >= 0) {
+            chunks[idx] = chunk;
+            maxSeq = Math.max(maxSeq, idx + 1);
+          } else {
+            chunks.push(chunk);
+            maxSeq = Math.max(maxSeq, chunks.length);
+          }
+        },
         onLine: (lineObj) => {
           try {
             const text = lineObj?.line || '';
-            buf.push(new TextEncoder().encode(text + '\\n'));
+            chunks.push(new TextEncoder().encode(text + '\\n'));
+            maxSeq = Math.max(maxSeq, chunks.length);
           } catch (_) {}
         },
         onEnd: () => {
           clearTimeout(timer);
           this.nkn.streams.delete(id);
           this._clearUploadCache(id);
-          const merged = buf.length ? new Blob(buf) : new Blob([]);
-          merged.arrayBuffer().then((arr) => {
-            const text = td.decode(new Uint8Array(arr));
-            if (!ok) return reject(new Error(`HTTP ${status || 0}`));
-            try {
-              return resolve(JSON.parse(text));
-            } catch (err) {
-              if (headers && typeof headers['content-type'] === 'string' && headers['content-type'].includes('application/json')) {
-                return reject(err);
+          const missing = [];
+          for (let i = 0; i < maxSeq; i++) {
+            if (!chunks[i]) missing.push(i + 1);
+          }
+          const finalize = () => {
+            const merged = chunks.length ? new Blob(chunks.filter(Boolean)) : new Blob([]);
+            merged.arrayBuffer().then((arr) => {
+              const text = td.decode(new Uint8Array(arr));
+              if (!ok) return reject(new Error(`HTTP ${status || 0}`));
+              try {
+                return resolve(JSON.parse(text));
+              } catch (err) {
+                if (headers && typeof headers['content-type'] === 'string' && headers['content-type'].includes('application/json')) {
+                  return reject(err);
+                }
+                return resolve({ body: text, status, headers });
               }
-              return resolve({ body: text, status, headers });
-            }
-          }).catch(reject);
+            }).catch(reject);
+          };
+          if (missing.length && relay) {
+            const attempts = 2;
+            const requestMissing = async (left) => {
+              if (!left || !missing.length) return finalize();
+              try {
+                await this._sendNkn(relay, { event: 'relay.response.missing', id, missing }, { noReply: true, maxHoldingSeconds: 30 }, timeout);
+              } catch (_) {
+                return finalize();
+              }
+              setTimeout(() => {
+                const stillMissing = [];
+                for (const seq of missing) {
+                  const idx = seq - 1;
+                  if (!chunks[idx]) stillMissing.push(seq);
+                }
+                missing.splice(0, missing.length, ...stillMissing);
+                requestMissing(left - 1);
+              }, 300);
+            };
+            requestMissing(attempts);
+          } else {
+            finalize();
+          }
         },
         onError: (err) => {
           clearTimeout(timer);
