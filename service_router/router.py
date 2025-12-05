@@ -2674,7 +2674,8 @@ class RelayNode:
             # If the chunk includes req (first chunk) recover by creating a session on the fly
             req = body.get("req")
             if not req:
-                self._send_upload_error(src, rid, "unknown upload id", 404)
+                # Late or duplicate chunk after completion; ignore quietly
+                self._log_upload(rid, "chunk received with no active upload; ignoring")
                 return
             total_chunks = int(body.get("total") or body.get("total_chunks") or 0)
             ctype = body.get("content_type") or (req.get("headers") or {}).get("Content-Type") or ""
