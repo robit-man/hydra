@@ -1510,6 +1510,9 @@ class EnhancedUI:
 
         # Activity tracking
         self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=500)
+        self.flow_logs: Deque[Dict[str, str]] = deque(maxlen=800)
+        self.debug_tab_index: int = 0
+        self.debug_scroll_offsets: Dict[str, int] = {}
 
         # Stats tracker
         self.stats = StatsTracker()
@@ -1649,6 +1652,28 @@ class EnhancedUI:
             self.events.put((node_id, kind, msg, ts))
         else:
             print(f"[{ts}] {source:<8} {kind:<3} {msg}")
+
+    def record_flow(
+        self,
+        source: str,
+        target: str,
+        payload: str,
+        direction: str = "→",
+        service: Optional[str] = None,
+        channel: Optional[str] = None,
+    ) -> None:
+        """Record a directional flow between a source and target for the Debug view."""
+        ts = time.strftime("%H:%M:%S")
+        entry = {
+            "ts": ts,
+            "source": source or "unknown",
+            "target": target or "unknown",
+            "payload": payload,
+            "dir": direction,
+            "service": service or "All",
+            "channel": channel or "",
+        }
+        self.flow_logs.append(entry)
 
     def _extract_nkn_addr(self, msg: str) -> str:
         """Extract NKN address from message string."""
@@ -2076,52 +2101,115 @@ class EnhancedUI:
                 self._safe_addstr(stdscr, start_row, 2, line, curses.A_NORMAL)
                 start_row += 1
 
+    def _debug_tabs(self) -> List[str]:
+        """Tabs for the Debug view: All + known services (from config or seen flows)."""
+        svc_names = set(self.services.keys())
+        for entry in self.flow_logs:
+            svc = entry.get("service")
+            if svc and svc != "All":
+                svc_names.add(svc)
+        tabs = ["All"] + sorted(svc_names)
+        if not tabs:
+            tabs = ["All"]
+        if self.debug_tab_index >= len(tabs):
+            self.debug_tab_index = max(0, len(tabs) - 1)
+        return tabs
+
+    def _debug_scroll_for_tab(self, tab: str) -> int:
+        return self.debug_scroll_offsets.get(tab, 0)
+
+    def _set_debug_scroll(self, tab: str, value: int) -> None:
+        self.debug_scroll_offsets[tab] = max(0, value)
+
     def _render_debug_view(self, stdscr, h, w):
-        """Render Debug/Activity Log view - full screen log of all input/output."""
+        """Render Debug/Activity Log view with directional flows and tabs."""
         self._draw_box(stdscr, 0, 0, h, w)
         title = "═══ Debug / Activity Log ═══"
         self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
 
-        help_text = "↑/↓: Scroll | ESC: Back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
+        tabs = self._debug_tabs()
+        tab_line = "  ".join(
+            f"[{t}]" if i == self.debug_tab_index else t
+            for i, t in enumerate(tabs)
+        )
+        self._safe_addstr(stdscr, 1, 2, tab_line[: max(0, w - 4)], curses.color_pair(6) | curses.A_BOLD)
 
-        if not self.activity:
-            self._safe_addstr(stdscr, 3, 2, "(No recent activity)", curses.A_DIM)
-            return
+        help_text = "←/→ tabs | ↑/↓ scroll | ESC: Back"
+        self._safe_addstr(stdscr, 2, 2, help_text, curses.A_DIM)
 
-        start_row = 3
+        tab = tabs[self.debug_tab_index]
+
+        start_row = 4
         visible_rows = h - start_row - 1
 
-        # Show most recent entries first (reversed)
-        activity_list = list(reversed(self.activity))
-        total_entries = len(activity_list)
+        flows = [
+            entry for entry in reversed(self.flow_logs)
+            if tab == "All" or entry.get("service") == tab
+        ]
 
-        # Calculate scroll bounds
-        max_scroll = max(0, total_entries - visible_rows)
-        self.scroll_offset = min(self.scroll_offset, max_scroll)
-
-        # Display activity entries
-        end_idx = min(total_entries, self.scroll_offset + visible_rows)
-        for i in range(self.scroll_offset, end_idx):
-            ts, source, kind, message = activity_list[i]
-            row = start_row + (i - self.scroll_offset)
-
-            # Color code by kind
-            if kind == "IN":
-                attr = curses.color_pair(2)  # Green
-            elif kind == "OUT":
-                attr = curses.color_pair(2)  # Green
-            elif kind == "ERR":
-                attr = curses.color_pair(4)  # Red
+        if not flows:
+            # Fall back to coarse activity if no flow entries yet
+            if self.activity:
+                self._safe_addstr(stdscr, start_row, 2, "(No flow entries yet; showing recent activity)", curses.A_DIM)
+                start_row += 2
+                visible_rows = h - start_row - 1
+                activity_list = list(reversed(self.activity))
+                total_entries = len(activity_list)
+                max_scroll = max(0, total_entries - visible_rows)
+                alt_scroll = min(self._debug_scroll_for_tab(tab), max_scroll)
+                end_idx = min(total_entries, alt_scroll + visible_rows)
+                for i in range(alt_scroll, end_idx):
+                    ts, source, kind, message = activity_list[i]
+                    row = start_row + (i - alt_scroll)
+                    attr = curses.color_pair(2) if kind in ("IN", "OUT") else (curses.color_pair(4) if kind == "ERR" else curses.A_NORMAL)
+                    line = f"[{ts}] {source:<12} {kind:<3} {message}"
+                    self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
+                if total_entries > visible_rows:
+                    scroll_info = f"Showing {alt_scroll + 1}-{end_idx} of {total_entries}"
+                    self._safe_addstr(stdscr, h - 1, w - len(scroll_info) - 2, scroll_info, curses.A_DIM)
             else:
-                attr = curses.A_NORMAL
+                self._safe_addstr(stdscr, start_row, 2, "(No recent flows)", curses.A_DIM)
+            return
 
-            line = f"[{ts}] {source:<12} {kind:<3} {message}"
-            self._safe_addstr(stdscr, row, 2, line, attr)
+        total_entries = len(flows)
+        max_scroll = max(0, total_entries - visible_rows)
+        scroll = min(self._debug_scroll_for_tab(tab), max_scroll)
+        self._set_debug_scroll(tab, scroll)
 
-        # Show scroll indicator
+        end_idx = min(total_entries, scroll + visible_rows)
+        for i in range(scroll, end_idx):
+            entry = flows[i]
+            row = start_row + (i - scroll)
+            ts = entry.get("ts", "--:--:--")
+            src = entry.get("source", "unknown")
+            tgt = entry.get("target", "unknown")
+            payload = entry.get("payload", "")
+            svc = entry.get("service", "")
+            channel = entry.get("channel", "")
+            arrow = entry.get("dir", "→")
+
+            # Compact source/target to fit on screen
+            max_label = max(10, (w // 4))
+            src_short = src if len(src) <= max_label else src[: max_label - 1] + "…"
+            tgt_short = tgt if len(tgt) <= max_label else tgt[: max_label - 1] + "…"
+
+            payload_space = max(10, w - len(ts) - len(src_short) - len(tgt_short) - 12)
+            payload_short = payload if len(payload) <= payload_space else payload[: payload_space - 1] + "…"
+
+            dir_left = arrow if len(arrow) == 1 else "→"
+            dir_right = dir_left
+            line = f"[{ts}] {src_short} {dir_left} {payload_short} {dir_right} {tgt_short}"
+            if svc and svc != "All":
+                line += f" [{svc}]"
+            if channel:
+                line += f" @{channel}"
+            attr = curses.color_pair(2)
+            if "err" in payload.lower():
+                attr = curses.color_pair(4)
+            self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
+
         if total_entries > visible_rows:
-            scroll_info = f"Showing {self.scroll_offset + 1}-{end_idx} of {total_entries}"
+            scroll_info = f"Showing {scroll + 1}-{end_idx} of {total_entries}"
             self._safe_addstr(stdscr, h - 1, w - len(scroll_info) - 2, scroll_info, curses.A_DIM)
 
     def _render_qr_code(self, stdscr, y, x, max_h, max_w):
@@ -2178,7 +2266,9 @@ class EnhancedUI:
                 self.main_menu_index = (self.main_menu_index - 1) % len(self.MENU_ITEMS)
             elif self.current_view == "debug":
                 # Scroll debug view
-                self.scroll_offset = max(0, self.scroll_offset - 1)
+                tab = self._debug_tabs()[self.debug_tab_index]
+                cur = self._debug_scroll_for_tab(tab)
+                self._set_debug_scroll(tab, cur - 1)
             else:
                 self.main_menu_index = max(0, self.main_menu_index - 1)
                 if self.main_menu_index < self.scroll_offset:
@@ -2189,9 +2279,9 @@ class EnhancedUI:
                 self.main_menu_index = (self.main_menu_index + 1) % len(self.MENU_ITEMS)
             elif self.current_view == "debug":
                 # Scroll debug view
-                total_entries = len(self.activity)
-                # Will be limited in render method
-                self.scroll_offset += 1
+                tab = self._debug_tabs()[self.debug_tab_index]
+                cur = self._debug_scroll_for_tab(tab)
+                self._set_debug_scroll(tab, cur + 1)
             else:
                 max_idx = 0
                 if self.current_view == "config":
@@ -2221,6 +2311,16 @@ class EnhancedUI:
         elif ch in (ord('s'), ord('S')):
             if self.current_view == "config":
                 self._save_service_config()
+        elif ch in (curses.KEY_RIGHT, ord('l')):
+            if self.current_view == "debug":
+                tabs = self._debug_tabs()
+                if tabs:
+                    self.debug_tab_index = (self.debug_tab_index + 1) % len(tabs)
+        elif ch in (curses.KEY_LEFT, ord('h')):
+            if self.current_view == "debug":
+                tabs = self._debug_tabs()
+                if tabs:
+                    self.debug_tab_index = (self.debug_tab_index - 1) % len(tabs)
 
     def _handle_enter(self):
         """Handle Enter key based on current view."""
@@ -2241,6 +2341,12 @@ class EnhancedUI:
 
             self.main_menu_index = 0
             self.scroll_offset = 0
+            # Reset debug scroll when entering debug view
+            if self.current_view == "debug":
+                tabs = self._debug_tabs()
+                if tabs:
+                    self.debug_tab_index = 0
+                    self._set_debug_scroll(tabs[0], 0)
 
         elif self.current_view == "ingress":
             services = sorted(self.services.keys())
@@ -3398,7 +3504,16 @@ class RelayNode:
             return
         event = (body.get("event") or "").lower()
         rid = body.get("id") or ""  # echoed back later
+        coarse_service = self._canonical_service(body.get("service") or body.get("target"))
+        if not coarse_service:
+            if event.startswith("asr."):
+                coarse_service = "whisper_asr"
+            elif event.startswith("browser."):
+                coarse_service = "web_scrape"
+            elif event.startswith("relay.") or event.startswith("http."):
+                coarse_service = self._canonical_service(body.get("service") or body.get("target"))
         self.ui.bump(self.node_id, "IN", f"{event or '<unknown>'} {rid}")
+        self._record_flow(src, self.node_id, f"{event or '<unknown>'} {rid}", service=coarse_service, channel=src)
         if event in ("relay.ping", "ping"):
             self.bridge.dm(src, {"event": "relay.pong", "ts": int(time.time() * 1000), "addr": self.bridge.addr})
             return
@@ -3518,6 +3633,27 @@ class RelayNode:
         hint = str(hint).lower()
         return self.alias_map.get(hint, hint)
 
+    def _record_flow(self, source: str, target: str, payload: str, service: Optional[str] = None,
+                     channel: Optional[str] = None, direction: str = "→") -> None:
+        """Route flow events to the UI without breaking headless mode."""
+        try:
+            if hasattr(self.ui, "record_flow"):
+                self.ui.record_flow(source, target, payload, direction=direction, service=service, channel=channel)
+        except Exception:
+            pass
+
+    def _flow_target_label(self, service: Optional[str], url: str) -> str:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.netloc or parsed.path
+        except Exception:
+            host = url
+        if service and host:
+            return f"{service}@{host}"
+        if service:
+            return service
+        return host or "service"
+
     def _check_assignment(self, service_name: Optional[str], src: str, rid: str) -> bool:
         if not service_name:
             return True
@@ -3539,6 +3675,7 @@ class RelayNode:
                 payload["error"] = "service currently offline"
             self.bridge.dm(src, payload, DM_OPTS_SINGLE)
             self.ui.bump(self.node_id, "OUT", f"redirect {service_name} -> {node_id}")
+            self._record_flow(src, node_id, f"redirect {service_name} {rid}", service=service_name, channel=src)
             return False
         return True
 
@@ -3667,6 +3804,10 @@ class RelayNode:
         svc_def = None
         if service_name:
             svc_def = next((d for d in self.DEFINITIONS if d.name == service_name), None)
+
+        target_label = self._flow_target_label(service_name, url)
+        path_snippet = urllib.parse.urlparse(url).path or "/"
+        self._record_flow(src or "client", target_label, f"{method} {path_snippet} {rid}", service=service_name, channel=src)
 
         want_stream = False
         stream_mode = str(req.get("stream") or headers.get("X-Relay-Stream") or "").strip().lower()
@@ -4028,6 +4169,9 @@ class RelayNode:
         # Track stats with bytes sent and NKN address
         bytes_sent = len(raw)
         self.ui.bump(self.node_id, "OUT", f"{payload['status']} {rid}", nkn_addr=src, bytes_sent=bytes_sent)
+        service_name = self._canonical_service((req or {}).get("service") or (req or {}).get("target"))
+        origin = service_name or "service"
+        self._record_flow(origin, src, f"{payload['status']} {rid}", service=service_name, channel=src, direction="←")
 
     def _sanitize_response_json(self, req: Optional[dict], data: Any) -> Any:
         try:
