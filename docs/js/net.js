@@ -40,15 +40,21 @@ const Net = {
 
   async getJSON(base, path, api, useNkn, relay) {
     const useRelay = useNkn && relay;
-    if (!useRelay) {
+    const direct = async () => {
       const headers = this.auth({}, api);
       delete headers['Content-Type'];
       headers['Accept'] = 'application/json';
       const res = await fetch(base.replace(/\/+$/, '') + path, { headers });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
+    };
+    if (!useRelay) return direct();
+    try {
+      return await this.nknFetch(base, path, 'GET', null, api, relay);
+    } catch (err) {
+      // fallback to direct if relay fails
+      return direct();
     }
-    return this.nknFetch(base, path, 'GET', null, api, relay);
   },
 
   async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000) {
@@ -103,7 +109,12 @@ const Net = {
       total: total
     });
 
-    return responsePromise;
+    try {
+      return await responsePromise;
+    } catch (err) {
+      // fallback to direct HTTP if relay upload fails
+      return this.postJSON(base, path, body, api, false, '', timeout);
+    }
   },
 
   async _awaitResponseStream(id, timeout = 180000) {
@@ -160,7 +171,7 @@ const Net = {
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000) {
     const useRelay = useNkn && relay;
-    if (!useRelay) {
+    const direct = async () => {
       const res = await fetch(base.replace(/\/+$/, '') + path, {
         method: 'POST',
         headers: this.auth({}, api),
@@ -168,8 +179,13 @@ const Net = {
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json();
+    };
+    if (!useRelay) return direct();
+    try {
+      return await this.nknFetch(base, path, 'POST', body, api, relay, timeout);
+    } catch (err) {
+      return direct();
     }
-    return this.nknFetch(base, path, 'POST', body, api, relay, timeout);
   },
 
   async nknFetchForm(base, path, formData, api, relay, timeout = 60000) {

@@ -1452,6 +1452,7 @@ class UnifiedUI:
         if self.show_activity:
             rows.append({"type": "activity_header", "text": "Service Activity (s to toggle, ↑/↓ to scroll)", "selectable": False})
             if self.activity:
+                # Show most recent first; allow the list to fill the screen
                 for ts, source, kind, message in reversed(self.activity):
                     line = f"[{ts}] {source} {kind}: {message}"
                     rows.append({"type": "activity", "text": line, "selectable": False})
