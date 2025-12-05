@@ -37,6 +37,7 @@ from collections import deque
 # Lightweight venv bootstrap so the router stays self-contained
 # ──────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent  # hydra repo root (contains .git)
 VENV_DIR = BASE_DIR / ".venv_router"
 BIN_DIR = VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
 PY_BIN = BIN_DIR / ("python.exe" if os.name == "nt" else "python")
@@ -580,7 +581,7 @@ class ServiceWatchdog:
 
     def _poll_core_repo_loop(self) -> None:
         """Monitor the main hydra repo for updates; auto-pull with backup/rollback."""
-        repo_dir = BASE_DIR
+        repo_dir = REPO_ROOT
         interval = 300
         while not self._global_stop.is_set():
             try:
