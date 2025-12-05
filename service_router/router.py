@@ -2271,6 +2271,8 @@ class RelayNode:
         self.rate_limit_hits: Deque[float] = deque(maxlen=64)
         self.last_rate_limit: Optional[float] = None
         self.upload_sessions: Dict[str, dict] = {}
+        self.upload_cleanup_stop = threading.Event()
+        self.upload_cleanup_thread: Optional[threading.Thread] = None
 
     # lifecycle -------------------------------------------------
     def start(self):
@@ -2278,12 +2280,16 @@ class RelayNode:
             t = threading.Thread(target=self._http_worker, daemon=True)
             t.start()
             self.workers.append(t)
+        if not self.upload_cleanup_thread:
+            self.upload_cleanup_thread = threading.Thread(target=self._upload_cleanup_loop, daemon=True)
+            self.upload_cleanup_thread.start()
         self.bridge.start()
 
     def stop(self):
         for _ in self.workers:
             self.jobs.put(None)  # type: ignore
         self.bridge.shutdown()
+        self.upload_cleanup_stop.set()
 
     # bridge callbacks -----------------------------------------
     def _build_bridge(self) -> BridgeManager:
@@ -2695,6 +2701,41 @@ class RelayNode:
             self._log_upload(entry.get("rid") or uid, f"complete bytes={len(data)}{missing_note}")
         finally:
             self.upload_sessions.pop(uid, None)
+
+    def _upload_cleanup_loop(self) -> None:
+        """Sweep unfinished uploads so they don't stall forever."""
+        while not self.upload_cleanup_stop.is_set():
+            try:
+                now = time.time()
+                to_finish: List[Tuple[str, dict]] = []
+                to_error: List[Tuple[str, dict]] = []
+                for uid, entry in list(self.upload_sessions.items()):
+                    created = float(entry.get("created") or now)
+                    age = now - created
+                    got = int(entry.get("got") or 0)
+                    ended = bool(entry.get("ended"))
+                    total = int(entry.get("total") or 0)
+                    # If we got something but never saw end within 20s, finalize partial
+                    if got > 0 and age >= 20 and not ended:
+                        to_finish.append((uid, entry))
+                    # If we saw end but missing chunks and 10s elapsed, finalize partial
+                    elif ended and age >= 10 and (total == 0 or got < total):
+                        to_finish.append((uid, entry))
+                    # If nothing arrived within 20s, give up with an error
+                    elif got == 0 and age >= 20:
+                        to_error.append((uid, entry))
+                for uid, entry in to_finish:
+                    self._log_upload(entry.get("rid") or uid, f"cleanup finalize got={entry.get('got')} total={entry.get('total')}")
+                    self._finalize_upload(uid, entry, allow_partial=True)
+                for uid, entry in to_error:
+                    rid = entry.get("rid") or uid
+                    src = entry.get("src") or ""
+                    self._log_upload(rid, "cleanup timeout (no chunks)")
+                    self._send_upload_error(src, rid, "upload timed out before chunks arrived", 408)
+                    self.upload_sessions.pop(uid, None)
+            except Exception:
+                pass
+            self.upload_cleanup_stop.wait(2.0)
 
     def _register_rate_limit_hit(self) -> None:
         now = time.time()
