@@ -4150,7 +4150,13 @@ class RelayNode:
 
     def _resolve_url(self, req: dict) -> str:
         url = (req.get("url") or "").strip()
-        svc = (req.get("service") or "").strip()
+        svc_raw = (req.get("service") or "").strip()
+        svc = self._canonical_service(svc_raw) if svc_raw else ""
+        target_key = svc
+        if svc in SERVICE_TARGETS:
+            target_key = SERVICE_TARGETS[svc].get("target") or svc
+        elif svc_raw:
+            target_key = svc_raw
 
         if url:
             # Validate URL port against known service endpoints
@@ -4158,9 +4164,9 @@ class RelayNode:
                 raise ValueError(f"port isolation: URL '{url}' port not in whitelist for service '{svc}'")
             return url
 
-        base = self.targets.get(svc)
+        base = self.targets.get(target_key) or self.targets.get(svc)
         if not base:
-            raise ValueError(f"unknown service '{svc}'")
+            raise ValueError(f"unknown service '{svc or svc_raw or 'default'}'")
         path = req.get("path") or "/"
         if not path.startswith("/"):
             path = "/" + path
