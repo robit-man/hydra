@@ -7,7 +7,7 @@ const NKN_SEED_KEY = 'graph.nkn.seed';
 
 const Net = {
   nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
-  uploadChunkBytes: 120 * 1024,
+  uploadChunkBytes: 80 * 1024, // conservative default to fit under most NKN DM limits
 
   setTransportUpdater(fn) {
     updateTransportButton = typeof fn === 'function' ? fn : () => {};
@@ -116,7 +116,8 @@ const Net = {
     await this.waitForReady(20000);
     const payloadStr = JSON.stringify(body || {});
     const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
-    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 120 * 1024, 8 * 1024), 180 * 1024);
+    // Keep chunk size small to survive stricter relays (router default limit is set separately)
+    const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 80 * 1024, 8 * 1024), 120 * 1024);
     const chunkChars = Math.max(2048, Math.floor(limitBytes * 4 / 3));
     const chunks = this._chunkString(b64, chunkChars);
     const total = chunks.length;
