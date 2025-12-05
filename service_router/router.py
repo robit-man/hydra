@@ -1173,12 +1173,17 @@ class UnifiedUI:
         self.action_handler: Optional[Callable[[dict], None]] = None
         self.selected_index = 0
         self._interactive_rows: List[dict] = []
+        self.service_index: int = 0
+        self.service_names: List[str] = []
+        self.show_activity: bool = False
         self.qr_candidates: List[dict] = []
         self.qr_cycle_index: int = 0
         self.qr_cycle_label: str = ""
         self.qr_cycle_lines: List[str] = []
         self.qr_next_ts: float = 0.0
         self.qr_locked: bool = False
+        self.qr_row_ref: Optional[dict] = None
+        self._last_dims: Tuple[int, int] = (0, 0)
         self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=5)
 
     def add_node(self, node_id: str, name: str):
@@ -1219,6 +1224,11 @@ class UnifiedUI:
         cur = self.services.get(name, {})
         cur.update(info)
         self.services[name] = cur
+        self.service_names = sorted(self.services.keys())
+        if self.service_names:
+            self.service_index %= len(self.service_names)
+        else:
+            self.service_index = 0
 
     def set_daemon_info(self, info: Optional[dict]):
         self.daemon_info = info
@@ -1283,7 +1293,7 @@ class UnifiedUI:
                 pass
 
             stdscr.erase()
-            stdscr.addnstr(0, 0, "Unified NKN Router — ↑↓ navigate, Enter details, press e for QR, q quit", max(0, curses.COLS - 1), header_attr)
+            stdscr.addnstr(0, 0, "Unified NKN Router — arrows: cycle services, e: pin QR, s: toggle activity, q: quit", max(0, curses.COLS - 1), header_attr)
             if self.daemon_info:
                 daemon_line = f"Daemon: enabled at {self.daemon_info.get('path','?')}"
             else:
@@ -1292,11 +1302,7 @@ class UnifiedUI:
 
             rows = self._build_rows()
             self._interactive_rows = [row for row in rows if row.get("selectable")]
-            if self._interactive_rows:
-                self.selected_index = max(0, min(self.selected_index, len(self._interactive_rows) - 1))
-                selected_row = self._interactive_rows[self.selected_index]
-            else:
-                selected_row = None
+            selected_row = self._interactive_rows[0] if self._interactive_rows else None
 
             now = time.time()
             qr_candidates = [row for row in rows if row.get("type") in ("node", "service")]
@@ -1310,6 +1316,12 @@ class UnifiedUI:
                 self.qr_candidates = []
                 if not self.qr_locked:
                     self.qr_cycle_lines = []
+
+            dims = (curses.LINES, curses.COLS)
+            if self.qr_row_ref and dims != self._last_dims:
+                label, lines = self._qr_text_for_row(self.qr_row_ref, include_detail=False)
+                self._set_cycle_display(label, lines, lock=self.qr_locked, remember_row=self.qr_row_ref)
+            self._last_dims = dims
 
             screen_row = 3
             width = max(0, curses.COLS - 1)
@@ -1365,53 +1377,49 @@ class UnifiedUI:
                 ch = stdscr.getch()
                 if ch in (ord('q'), ord('Q')):
                     self.stop.set()
-                elif ch in (curses.KEY_UP, ord('k')):
-                    self._move_selection(-1)
-                elif ch in (curses.KEY_DOWN, ord('j')):
-                    self._move_selection(1)
+                elif ch in (curses.KEY_UP, ord('k'), curses.KEY_LEFT):
+                    self._cycle_service(-1)
+                elif ch in (curses.KEY_DOWN, ord('j'), curses.KEY_RIGHT):
+                    self._cycle_service(1)
                 elif ch in (ord('e'), ord('E')):
                     if selected_row:
-                        if self.qr_locked:
-                            self.qr_locked = False
-                            self._advance_qr_cycle()
-                        else:
-                            label, lines = self._qr_text_for_row(selected_row, include_detail=False)
-                            self.qr_locked = True
-                            self._set_cycle_display(label, lines, lock=True)
+                        label, lines = self._qr_text_for_row(selected_row, include_detail=False)
+                        self._set_cycle_display(label, lines, lock=True, remember_row=selected_row)
                 elif ch in (curses.KEY_ENTER, 10, 13):
                     if selected_row:
                         self._handle_enter(stdscr, selected_row)
+                elif ch in (ord('s'), ord('S')):
+                    self.show_activity = not self.show_activity
             except Exception:
                 pass
 
-    def _move_selection(self, delta: int) -> None:
-        if not self._interactive_rows:
+    def _cycle_service(self, delta: int) -> None:
+        if not self.service_names:
             return
-        self.selected_index = (self.selected_index + delta) % len(self._interactive_rows)
+        self.service_index = (self.service_index + delta) % len(self.service_names)
+        self.qr_locked = False
+        self._advance_qr_cycle(force_row=True)
 
     def _build_rows(self) -> List[dict]:
         rows: List[dict] = []
         rows.append({"type": "section", "text": "Services", "selectable": False})
-        for name, info in sorted(self.services.items()):
-            assigned = info.get("assigned_node") or ""
-            addr = info.get("assigned_addr") or ""
-            status = info.get("status") or ("running" if info.get("running") else (info.get("last_error") or "stopped"))
-            term = "yes" if info.get("terminal_alive") else "no"
-            identifier = self._service_identifier(addr, assigned)
-            summary = f"{name:<18} {identifier:<20} status:{status:<10} term:{term}"
-            rows.append({"type": "service", "id": name, "text": summary.rstrip(), "selectable": True})
-
-        rows.append({"type": "separator", "text": "", "selectable": False})
-        rows.append({"type": "daemon", "id": "daemon", "text": "Daemon controls (Enter)", "selectable": True})
-
-        rows.append({"type": "separator", "text": "", "selectable": False})
-        rows.append({"type": "activity_header", "text": "Service Activity", "selectable": False})
-        if self.activity:
-            for ts, source, kind, message in reversed(self.activity):
-                line = f"[{ts}] {source} {kind}: {message}"
-                rows.append({"type": "activity", "text": line, "selectable": False})
+        if self.service_names:
+            name = self.service_names[self.service_index % len(self.service_names)]
+            info = self.services.get(name, {})
+            addr = info.get("assigned_addr") or "—"
+            rows.append({"type": "service", "id": name, "text": f"{name} {addr}", "selectable": True})
         else:
-            rows.append({"type": "activity", "text": "(no recent activity)", "selectable": False})
+            rows.append({"type": "service", "id": "none", "text": "(no services yet)", "selectable": False})
+
+        if self.show_activity:
+            rows.append({"type": "separator", "text": "", "selectable": False})
+            rows.append({"type": "activity_header", "text": "Service Activity", "selectable": False})
+            if self.activity:
+                for ts, source, kind, message in reversed(self.activity):
+                    line = f"[{ts}] {source} {kind}: {message}"
+                    rows.append({"type": "activity", "text": line, "selectable": False})
+            else:
+                rows.append({"type": "activity", "text": "(no recent activity)", "selectable": False})
         return rows
 
     @staticmethod
@@ -1498,6 +1506,7 @@ class UnifiedUI:
         label = ""
         detail_lines: List[str] = []
         addr = ""
+        max_width = max(10, curses.COLS - 2) if curses else 80
         if rtype == "node":
             node = self.nodes.get(row.get("id"))
             if not node:
@@ -1538,28 +1547,34 @@ class UnifiedUI:
 
         if addr:
             ascii_lines = render_qr_ascii(addr).splitlines()
+            ascii_lines = [ln[:max_width] for ln in ascii_lines]
             lines.extend(ascii_lines)
         else:
             lines.append("(No NKN address yet)")
         return (label, lines)
 
-    def _set_cycle_display(self, label: str, lines: List[str], delay: float = 10.0, lock: bool = False) -> None:
+    def _set_cycle_display(self, label: str, lines: List[str], delay: float = 10.0, lock: bool = False, remember_row: Optional[dict] = None) -> None:
         if not lines:
             lines = ["(No data)"]
         self.qr_cycle_label = label
         self.qr_cycle_lines = lines
         self.qr_next_ts = time.time() + delay
+        if remember_row is not None:
+            self.qr_row_ref = remember_row
         if lock:
             self.qr_locked = True
 
-    def _advance_qr_cycle(self) -> None:
+    def _advance_qr_cycle(self, force_row: bool = False) -> None:
         if not self.qr_candidates:
             self.qr_cycle_lines = []
             return
-        row = self.qr_candidates[self.qr_cycle_index % len(self.qr_candidates)]
-        self.qr_cycle_index = (self.qr_cycle_index + 1) % max(1, len(self.qr_candidates))
+        if force_row and self.qr_row_ref:
+            row = self.qr_row_ref
+        else:
+            row = self.qr_candidates[self.qr_cycle_index % len(self.qr_candidates)]
+            self.qr_cycle_index = (self.qr_cycle_index + 1) % max(1, len(self.qr_candidates))
         label, lines = self._qr_text_for_row(row, include_detail=False)
-        self._set_cycle_display(label, lines)
+        self._set_cycle_display(label, lines, remember_row=row)
 
     def _show_qr_for_row(self, stdscr, row: dict, include_detail: bool = False) -> None:
         if not row:
