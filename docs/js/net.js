@@ -61,6 +61,7 @@ const Net = {
     const uploadId = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     const headers = this.auth({}, api);
     headers['Content-Type'] = 'application/json';
+    headers['X-Relay-Stream'] = 'chunks';
     const payloadStr = JSON.stringify(body || {});
     const b64 = btoa(unescape(encodeURIComponent(payloadStr)));
     const limitBytes = Math.min(Math.max(chunkSize || this.uploadChunkBytes || 600 * 1024, 4096), 900 * 1024);
@@ -79,7 +80,7 @@ const Net = {
       event: 'http.upload.begin',
       id: uploadId,
       upload_id: uploadId,
-      req: { url, method: 'POST', headers, timeout_ms: timeout },
+      req: { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' },
       total_chunks: total,
       content_type: 'application/json'
     });

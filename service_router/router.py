@@ -1432,7 +1432,7 @@ class UnifiedUI:
             name = self.service_names[self.service_index % len(self.service_names)]
             info = self.services.get(name, {})
             addr = info.get("assigned_addr") or "—"
-            rows.append({"type": "service", "id": name, "text": self._format_service_line(name, addr), "selectable": True})
+            rows.append({"type": "service", "id": name, "text": f"{name} {addr}", "selectable": True})
         else:
             rows.append({"type": "service", "id": "none", "text": "(no services yet)", "selectable": False})
 
