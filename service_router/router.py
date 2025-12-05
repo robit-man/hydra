@@ -2946,7 +2946,7 @@ class RelayNode:
         begin_payload = {
             "event": "relay.response.begin",
             "id": rid,
-            "ok": True,
+            "ok": resp.status_code < 400,
             "status": int(resp.status_code),
             "headers": headers,
             "content_length": cl_num,

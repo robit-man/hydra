@@ -452,6 +452,15 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         result = await response.json();
       }
 
+      // Basic error/HTML guard
+      if (result && typeof result.status === 'number' && result.status >= 400) {
+        const bodyText = typeof result.body === 'string' ? result.body.slice(0, 180) : '';
+        throw new Error(`Backend error ${result.status}: ${bodyText || result.error || 'unknown'}`);
+      }
+      if (result && typeof result.body === 'string' && result.body.toLowerCase().includes('<!doctype html')) {
+        throw new Error('Backend returned HTML (likely 404) – check endpoint/relay config');
+      }
+
       const directPc = result.pointcloud;
       if (result.status === 'completed' && directPc) {
         state.currentPointcloud = directPc;
@@ -469,7 +478,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         }
         return pointcloud;
       } else {
-        throw new Error('Unexpected response format');
+        throw new Error(`Unexpected response format: ${JSON.stringify(result).slice(0, 120)}`);
       }
     } catch (err) {
       if (setBadge) setBadge(`Processing failed: ${err?.message || err}`, false);
