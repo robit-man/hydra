@@ -156,7 +156,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.getJSON(baseUrl, '/api/models/list', endpoint.api, endpoint.viaNkn, endpoint.relay);
+      const data = await Net.getJSON(baseUrl, '/api/models/list', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
       state.availableModels = data.models || [];
 
       const current = state.availableModels.find(m => m.current);
@@ -196,11 +196,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       state.modelReady = false;
       try {
         updateStatus(nodeId, `Selecting ${modelId}…`, 'pending');
-        await Net.postJSON(baseUrl, '/api/models/select', { model_id: modelId }, endpoint.api, endpoint.viaNkn, endpoint.relay);
+        await Net.postJSON(baseUrl, '/api/models/select', { model_id: modelId }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
         state.currentModel = modelId;
         updateStatus(nodeId, `Loading ${modelId}…`, 'pending');
         try {
-          await Net.postJSON(baseUrl, '/api/load_model', {}, endpoint.api, endpoint.viaNkn, endpoint.relay);
+          await Net.postJSON(baseUrl, '/api/load_model', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
         } catch (err) {
           const message = err?.message || '';
           if (/already loading/i.test(message)) {
@@ -244,7 +244,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     return new Promise((resolve) => {
       const checkStatus = async () => {
         try {
-          const data = await Net.getJSON(baseUrl, '/api/model_status', endpoint.api, endpoint.viaNkn, endpoint.relay);
+          const data = await Net.getJSON(baseUrl, '/api/model_status', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
           const status = data.status;
           const progress = data.progress || 0;
           if (status === 'ready') {
@@ -418,10 +418,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         };
         if (useChunked && Net.postJSONChunked) {
           // Use conservative chunk size to stay under relay DM limits
-          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 16000, progressCb);
+          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 16000, progressCb, { service: 'depth_any', useServiceTarget: true });
         } else {
           updateUploadProgress(nodeId, 'Sending request…');
-          result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000);
+          result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, { service: 'depth_any', useServiceTarget: true });
         }
       } else {
         const formData = new FormData();
@@ -500,7 +500,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     return new Promise((resolve) => {
       const checkJob = async () => {
         try {
-          const data = await Net.getJSON(baseUrl, `/api/job/${jobId}`, endpoint.api, endpoint.viaNkn, endpoint.relay);
+          const data = await Net.getJSON(baseUrl, `/api/job/${jobId}`, endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
 
           const pointcloud = data.pointcloud || data.result?.pointcloud;
           if (data.status === 'completed' && pointcloud) {
@@ -537,7 +537,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
 
     try {
       const fullUrl = `${baseUrl}/api/export/glb`;
-      const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api);
+      const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api, { service: 'depth_any', useServiceTarget: true });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
@@ -561,7 +561,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.postJSON(baseUrl, '/api/floor_align', {}, endpoint.api, endpoint.viaNkn, endpoint.relay);
+      const data = await Net.postJSON(baseUrl, '/api/floor_align', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);
@@ -583,7 +583,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.postJSON(baseUrl, '/api/floor_align/manual', { points }, endpoint.api, endpoint.viaNkn, endpoint.relay);
+      const data = await Net.postJSON(baseUrl, '/api/floor_align/manual', { points }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);

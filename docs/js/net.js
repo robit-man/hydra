@@ -87,8 +87,16 @@ const Net = {
     if (!entry) return;
     const missing = Array.isArray(msg.missing) ? msg.missing.map((n) => Number(n) || 0).filter((n) => n > 0) : [];
     if (!missing.length) return;
-    const { relay, timeout = 120000, url, headers, chunks, total } = entry;
-    const reqMeta = { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' };
+    const { relay, timeout = 120000, url, path = '', headers, chunks, total, service = '', useServiceTarget = false } = entry;
+    const reqMeta = {
+      url: useServiceTarget ? '' : url,
+      path,
+      method: 'POST',
+      headers,
+      timeout_ms: timeout,
+      stream: 'chunks'
+    };
+    if (service) reqMeta.service = service;
     for (const seq of missing) {
       const chunk = chunks[seq - 1];
       if (!chunk) continue;
@@ -134,7 +142,7 @@ const Net = {
   },
 
   async getJSON(base, path, api, useNkn, relay, options = {}) {
-    const { forceRelay = false } = options || {};
+    const { forceRelay = false, service = '', useServiceTarget = false } = options || {};
     const useRelay = useNkn && relay;
     const direct = async () => {
       const headers = this.auth({}, api);
@@ -149,7 +157,7 @@ const Net = {
       return direct();
     }
     try {
-      return await this.nknFetch(base, path, 'GET', null, api, relay);
+      return await this.nknFetch(base, path, 'GET', null, api, relay, 45000, { service, useServiceTarget });
     } catch (err) {
       if (forceRelay) throw err;
       // fallback to direct if relay fails
@@ -158,7 +166,7 @@ const Net = {
   },
 
   async postJSONChunked(base, path, body, api, useNkn, relay, timeout = 120000, chunkSize = 60000, progressCb = null, options = {}) {
-    const { forceRelay = false } = options || {};
+    const { forceRelay = false, service = '', useServiceTarget = false } = options || {};
     const useRelay = useNkn && relay;
     if (!useRelay) {
       if (forceRelay) throw new Error('Relay address required for remote endpoint');
@@ -179,7 +187,16 @@ const Net = {
     const chunks = this._chunkBase64(b64, chunkChars);
     const total = chunks.length;
     const url = base.replace(/\/+$/, '') + path;
-    this.uploadCache.set(uploadId, { chunks, total, url, headers, relay, timeout });
+    const reqMeta = {
+      url: useServiceTarget ? '' : url,
+      path,
+      method: 'POST',
+      headers,
+      timeout_ms: timeout,
+      stream: 'chunks'
+    };
+    if (service) reqMeta.service = service;
+    this.uploadCache.set(uploadId, { chunks, total, url, path, headers, relay, timeout, service, useServiceTarget });
 
     const responsePromise = this._awaitResponseStream(uploadId, timeout, relay);
 
@@ -196,7 +213,7 @@ const Net = {
       event: 'http.upload.begin',
       id: uploadId,
       upload_id: uploadId,
-      req: { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' },
+      req: reqMeta,
       total_chunks: total,
       content_type: 'application/json'
     };
@@ -216,7 +233,7 @@ const Net = {
       };
       // Include req on first chunk so router can recover if begin was dropped
       if (seq === 1) {
-        payload.req = { url, method: 'POST', headers, timeout_ms: timeout, stream: 'chunks' };
+        payload.req = reqMeta;
         payload.content_type = 'application/json';
       }
       await sendMsg(payload);
@@ -342,7 +359,7 @@ const Net = {
   },
 
   async postJSON(base, path, body, api, useNkn, relay, timeout = 45000, options = {}) {
-    const { forceRelay = false } = options || {};
+    const { forceRelay = false, service = '', useServiceTarget = false } = options || {};
     const useRelay = useNkn && relay;
     const direct = async () => {
       const res = await fetch(base.replace(/\/+$/, '') + path, {
@@ -358,7 +375,7 @@ const Net = {
       return direct();
     }
     try {
-      return await this.nknFetch(base, path, 'POST', body, api, relay, timeout);
+      return await this.nknFetch(base, path, 'POST', body, api, relay, timeout, { service, useServiceTarget });
     } catch (err) {
       if (forceRelay) throw err;
       return direct();
@@ -370,7 +387,7 @@ const Net = {
   },
 
   async fetchBlob(fullUrl, useNkn, relay, api, options = {}) {
-    const { forceRelay = false } = options || {};
+    const { forceRelay = false, service = '', useServiceTarget = false } = options || {};
     const useRelay = useNkn && relay;
     if (!useRelay) {
       if (forceRelay) throw new Error('Relay address required for remote endpoint');
@@ -378,7 +395,7 @@ const Net = {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.blob();
     }
-    return this.nknFetchBlob(fullUrl, relay, api);
+    return this.nknFetchBlob(fullUrl, relay, api, { service, useServiceTarget });
   },
 
   ensureNkn() {
@@ -604,13 +621,21 @@ const Net = {
     });
   },
 
-  async nknFetch(base, path, method, json, api, relay, timeout = 45000) {
+  async nknFetch(base, path, method, json, api, relay, timeout = 45000, options = {}) {
+    const { service = '', useServiceTarget = false } = options || {};
     const headers = this.auth({}, api);
     if (method === 'GET') {
       delete headers['Content-Type'];
       headers['Accept'] = 'application/json';
     }
-    const req = { url: base.replace(/\/+$/, '') + path, method, headers, timeout_ms: timeout };
+    const req = {
+      url: useServiceTarget ? '' : base.replace(/\/+$/, '') + path,
+      path,
+      method,
+      headers,
+      timeout_ms: timeout
+    };
+    if (service) req.service = service;
     if (json !== null) {
       if (method === 'POST_FORM') {
         // NKN cannot stream binary form; send as JSON map (only works for text fields)
@@ -633,11 +658,26 @@ const Net = {
     return null;
   },
 
-  async nknFetchBlob(fullUrl, relay, api) {
+  async nknFetchBlob(fullUrl, relay, api, options = {}) {
+    const { service = '', useServiceTarget = false } = options || {};
+    let path = '';
+    try {
+      const parsed = new URL(fullUrl);
+      path = parsed.pathname + (parsed.search || '');
+    } catch (_) {
+      path = fullUrl;
+    }
     const parts = [];
     let contentType = 'application/octet-stream';
     await this.nknStream(
-      { url: fullUrl, method: 'GET', headers: this.auth({ 'X-Relay-Stream': 'chunks' }, api), timeout_ms: 10 * 60 * 1000 },
+      {
+        url: useServiceTarget ? '' : fullUrl,
+        path,
+        method: 'GET',
+        service,
+        headers: this.auth({ 'X-Relay-Stream': 'chunks' }, api),
+        timeout_ms: 10 * 60 * 1000
+      },
       relay,
       {
         onBegin: (meta) => {
