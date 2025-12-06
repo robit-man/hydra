@@ -364,7 +364,7 @@ class ServiceWatchdog:
             script_path="app.py",
             description="Depth Anything 3 depth estimation and pointcloud generation",
             preserve_repo=True,  # Requires full repo structure for dependencies
-            default_stream=True,  # Responses can be large (pointcloud) — stream by default
+            default_stream=False,  # Opt-in to streaming per request; UI expects non-stream for metadata calls
         ),
     ]
 
@@ -604,7 +604,21 @@ class ServiceWatchdog:
             backup_dir = BACKUP_ROOT / f"hydra_{ts}"
             if backup_dir.exists():
                 shutil.rmtree(backup_dir, ignore_errors=True)
-            shutil.copytree(repo_dir, backup_dir, dirs_exist_ok=False)
+            ignore_dirs = [
+                BACKUP_ROOT.name,  # prevent recursive explosion
+                ".logs",
+                ".services",
+                ".venv_router",
+                ".venv",
+                "__pycache__",
+                ".cache",
+            ]
+            shutil.copytree(
+                repo_dir,
+                backup_dir,
+                dirs_exist_ok=False,
+                ignore=shutil.ignore_patterns(*ignore_dirs),
+            )
             self._prune_backups()
             return backup_dir
         except Exception:
@@ -5168,6 +5182,8 @@ class RelayNode:
         last_flush = time.time()
         hb_deadline = time.time() + self.heartbeat_s
         done_seen = False
+        ok = True
+        error_msg = None
 
         def flush_batch():
             nonlocal batch, last_flush
@@ -5237,31 +5253,30 @@ class RelayNode:
                 })
             flush_batch()
         except Exception as e:
-            # error path: end with ok = False
-            self.bridge.dm(src, {
-                "event": "relay.response.end",
-                "id": rid,
-                "ok": False,
-                "bytes": total_bytes,
-                "last_seq": seq,
-                "lines": total_lines,
-                "error": f"{type(e).__name__}: {e}",
-                "done_seen": done_seen,
-            }, DM_OPTS_STREAM)
+            ok = False
+            error_msg = f"{type(e).__name__}: {e}"
+            try:
+                flush_batch()
+            except Exception:
+                pass
             self.ui.bump(self.node_id, "ERR", f"stream lines {e}")
-            return total_bytes
 
-        # success path: end with ok = True
-        self.bridge.dm(src, {
+        end_payload = {
             "event": "relay.response.end",
             "id": rid,
-            "ok": True,
+            "ok": ok,
             "bytes": total_bytes,
             "last_seq": seq,
             "lines": total_lines,
             "done_seen": done_seen,
-        }, DM_OPTS_STREAM)
-        self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+        }
+        if error_msg:
+            end_payload["error"] = error_msg
+        self.bridge.dm(src, end_payload, DM_OPTS_STREAM)
+        if ok:
+            self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
+        else:
+            self.ui.bump(self.node_id, "ERR", f"stream lines {error_msg}")
         return total_bytes
 
 
