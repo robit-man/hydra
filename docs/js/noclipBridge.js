@@ -2439,11 +2439,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const requestSync = async (nodeId, targetPub, options = {}) => {
     const state = nodeId ? ensureNodeState(nodeId) : null;
     const badgeState = state || {};
+    const silent = normalizeBoolean(options?.silent ?? options?.suppressBadge, false);
     const record = nodeId ? NodeStore.ensure(nodeId, 'NoClipBridge') : null;
     const config = record?.config || {};
     const normalized = sanitizePubKey(targetPub || state?.targetPub || config.targetPub || '');
     if (!normalized) {
-      maybeBadge(badgeState, 'Select a NoClip peer first', false);
+      if (!silent) maybeBadge(badgeState, 'Select a NoClip peer first', false);
       throw new Error('NoClip peer not selected');
     }
 
@@ -2488,16 +2489,20 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (nodeId) {
         logToNode(nodeId, `→ Sync request sent to noclip.${normalized.slice(0, 8)}…`, 'info');
       }
-      maybeBadge(badgeState, `Sync request sent to noclip.${normalized.slice(0, 8)}…`);
-      if (!nodeId) {
+      if (!silent) {
+        maybeBadge(badgeState, `Sync request sent to noclip.${normalized.slice(0, 8)}…`);
+      }
+      if (!nodeId && !silent) {
         setBadge?.(`Sync request sent to noclip.${normalized.slice(0, 8)}…`);
       }
     } catch (err) {
       if (nodeId) {
         logToNode(nodeId, `✗ Sync request failed: ${err?.message || err}`, 'error');
       }
-      maybeBadge(badgeState, `Sync request failed: ${err?.message || err}`, false);
-      if (!nodeId) {
+      if (!silent) {
+        maybeBadge(badgeState, `Sync request failed: ${err?.message || err}`, false);
+      }
+      if (!nodeId && !silent) {
         setBadge?.(`Sync request failed: ${err?.message || err}`, false);
       }
       throw err;

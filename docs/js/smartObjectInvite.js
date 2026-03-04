@@ -1,277 +1,299 @@
 /**
  * Smart Object Invite System
- * Generates QR codes for connecting Hydra nodes to NoClip Smart Objects
+ * Generates QR codes for NoClipBridge targets and exposes invite ingress links.
  */
+
+const PUBKEY_RE = /^[0-9a-f]{64}$/i;
+const TRUE_VALUES = new Set(['1', 'true', 'yes', 'y', 'on']);
+
+const normalizePub = (value) => {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  const normalized = raw
+    .replace(/^nkn:\/\//, '')
+    .replace(/^noclip\./, '')
+    .replace(/^hydra\./, '');
+  return PUBKEY_RE.test(normalized) ? normalized : '';
+};
+
+const cleanField = (value, maxLen = 160) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const max = Math.max(1, Math.floor(Number(maxLen) || 160));
+  return raw.slice(0, max);
+};
+
+const parseBoolean = (value, fallback = false) => {
+  if (value === true || value === false) return value;
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return !!fallback;
+  if (TRUE_VALUES.has(text)) return true;
+  if (text === '0' || text === 'false' || text === 'no' || text === 'n' || text === 'off') return false;
+  return !!fallback;
+};
 
 export function initSmartObjectInvite({ NodeStore, Net, setBadge }) {
   const state = {
     modal: null,
-    initialized: false
+    nodeId: '',
+    lastUrl: ''
   };
 
-  /**
-   * Create invite modal HTML
-   */
-  function createModal() {
+  const query = (selector) => state.modal?.querySelector(selector) || null;
+
+  const listNoClipBridgeNodes = () => {
+    const nodes = [];
+    const seen = new Set();
+    const els = Array.from(document.querySelectorAll('.node[data-id]'));
+    els.forEach((el) => {
+      const nodeId = String(el?.dataset?.id || '').trim();
+      if (!nodeId || seen.has(nodeId)) return;
+      const rec = NodeStore?.load?.(nodeId);
+      if (!rec || rec.type !== 'NoClipBridge') return;
+      nodes.push(nodeId);
+      seen.add(nodeId);
+    });
+    return nodes;
+  };
+
+  const readBridgeConfig = (nodeId) => {
+    const id = String(nodeId || '').trim();
+    if (!id) return null;
+    const rec = NodeStore?.load?.(id);
+    if (!rec || rec.type !== 'NoClipBridge') return null;
+    const cfg = rec.config && typeof rec.config === 'object' ? rec.config : {};
+    const interop = cfg.interopTarget && typeof cfg.interopTarget === 'object' ? cfg.interopTarget : {};
+    const targetPub = normalizePub(cfg.targetPub || cfg.targetAddr || '');
+    return {
+      nodeId: id,
+      targetPub,
+      sessionId: cleanField(cfg.sessionId || interop.sessionId || '', 128),
+      objectUuid: cleanField(cfg.objectUuid || cfg.objectId || interop.objectUuid || '', 160),
+      overlayId: cleanField(cfg.overlayId || interop.overlayId || '', 128),
+      itemId: cleanField(cfg.itemId || interop.itemId || '', 160),
+      layerId: cleanField(cfg.layerId || interop.layerId || '', 128)
+    };
+  };
+
+  const readHydraPub = () => {
+    const addr = String(Net?.nkn?.addr || Net?.nkn?.client?.addr || '').trim();
+    if (!addr) return '';
+    return normalizePub(addr);
+  };
+
+  const buildInviteUrl = ({ nodeId, network, autoSync }) => {
+    const bridge = readBridgeConfig(nodeId);
+    if (!bridge) {
+      throw new Error('NoClipBridge node not found');
+    }
+    if (!bridge.targetPub) {
+      throw new Error('No target peer configured on this bridge node');
+    }
+    const targetNetwork = String(network || 'noclip').trim().toLowerCase() === 'hydra' ? 'hydra' : 'noclip';
+    const baseUrl = targetNetwork === 'hydra'
+      ? 'https://hydras.nexus/'
+      : 'https://noclip.nexus/';
+    const inviteUrl = new URL(baseUrl);
+
+    // Primary parser contract (Hydra invite ingress path)
+    inviteUrl.searchParams.set('noclip', `noclip.${bridge.targetPub}`);
+    inviteUrl.searchParams.set('bridgeNodeId', bridge.nodeId);
+    inviteUrl.searchParams.set('autoSync', autoSync ? 'true' : 'false');
+    if (bridge.sessionId) inviteUrl.searchParams.set('sessionId', bridge.sessionId);
+    if (bridge.objectUuid) inviteUrl.searchParams.set('objectUuid', bridge.objectUuid);
+    if (bridge.overlayId) inviteUrl.searchParams.set('overlayId', bridge.overlayId);
+    if (bridge.itemId) inviteUrl.searchParams.set('itemId', bridge.itemId);
+    if (bridge.layerId) inviteUrl.searchParams.set('layerId', bridge.layerId);
+
+    // Backward-compat metadata for older scanner flows.
+    const hydraPub = readHydraPub();
+    if (hydraPub) inviteUrl.searchParams.set('hydra', `hydra.${hydraPub}`);
+    inviteUrl.searchParams.set('node', bridge.nodeId);
+    inviteUrl.searchParams.set('kind', 'smart-object');
+
+    return inviteUrl.toString();
+  };
+
+  const ensureModal = () => {
     if (state.modal) return state.modal;
-
     const modal = document.createElement('div');
-    modal.id = 'smart-invite-modal';
-    modal.className = 'modal-overlay';
-    modal.style.display = 'none';
-
+    modal.id = 'smartInviteModal';
+    modal.className = 'modal hidden';
+    modal.setAttribute('aria-hidden', 'true');
     modal.innerHTML = `
-      <div class="modal-content" style="max-width: 500px;">
-        <div class="modal-header">
-          <h3>Smart Object Invite</h3>
-          <button class="modal-close" id="smart-invite-close">&times;</button>
+      <div class="modal-backdrop" data-smart-invite-backdrop></div>
+      <div class="modal-panel" style="max-width:560px;">
+        <div class="modal-head">
+          <div class="modal-title">Smart Object Invite</div>
+          <button type="button" class="ghost" data-smart-invite-close>✕</button>
         </div>
-        <div class="modal-body">
-          <p style="margin-bottom: 16px; color: var(--muted);">
-            Generate a QR code to connect this node to a NoClip Smart Object
-          </p>
-
-          <div class="form-group">
-            <label>Node ID:</label>
-            <input type="text" id="smart-invite-node-id" readonly style="background: rgba(255,255,255,0.05);">
-          </div>
-
-          <div class="form-group">
-            <label>Target Network:</label>
-            <select id="smart-invite-network">
-              <option value="noclip">NoClip (noclip.nexus)</option>
-              <option value="hydra">Hydra (hydras.nexus)</option>
-            </select>
-          </div>
-
-          <div class="form-group">
-            <button class="btn btn-primary" id="smart-invite-generate">
-              Generate QR Code
-            </button>
-          </div>
-
-          <div id="smart-invite-qr-container" style="display: none; text-align: center; margin-top: 20px;">
-            <canvas id="smart-invite-qr-canvas"></canvas>
-            <p id="smart-invite-url" style="
-              font-family: monospace;
-              font-size: 12px;
-              color: var(--accent);
-              word-break: break-all;
-              margin-top: 12px;
-              padding: 8px;
-              background: rgba(0,0,0,0.3);
-              border-radius: 4px;
-            "></p>
-            <p style="font-size: 12px; color: var(--muted); margin-top: 8px;">
-              Scan with NoClip Smart Object modal
-            </p>
-          </div>
+        <div class="help">Generate invite QR for the selected NoClipBridge target.</div>
+        <div class="row" style="margin-top:10px;gap:8px;align-items:center;">
+          <label style="min-width:84px;">Bridge Node</label>
+          <input data-smart-invite-node readonly style="flex:1;" />
         </div>
+        <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+          <label style="min-width:84px;">Target Peer</label>
+          <input data-smart-invite-target readonly style="flex:1;" />
+        </div>
+        <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+          <label style="min-width:84px;">Network</label>
+          <select data-smart-invite-network style="flex:1;">
+            <option value="noclip">NoClip</option>
+            <option value="hydra">Hydra</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:8px;gap:8px;align-items:center;">
+          <label style="min-width:84px;">Auto Sync</label>
+          <select data-smart-invite-autosync style="flex:1;">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px;gap:8px;">
+          <button type="button" class="secondary" data-smart-invite-generate>Generate QR</button>
+          <button type="button" class="ghost" data-smart-invite-copy>Copy URL</button>
+        </div>
+        <canvas data-smart-invite-qr style="margin-top:10px;max-width:100%;border-radius:8px;background:#0f1118;"></canvas>
+        <div class="code" data-smart-invite-url style="margin-top:10px;max-height:110px;overflow:auto;word-break:break-all;">(no invite generated)</div>
       </div>
     `;
-
     document.body.appendChild(modal);
     state.modal = modal;
 
-    _bindEvents();
+    const hideModal = () => {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+    };
 
-    return modal;
-  }
-
-  /**
-   * Bind event handlers
-   */
-  function _bindEvents() {
-    const modal = state.modal;
-    if (!modal) return;
-
-    // Close button
-    const closeBtn = modal.querySelector('#smart-invite-close');
-    closeBtn.addEventListener('click', hideModal);
-
-    // Click outside to close
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) {
-        hideModal();
+    query('[data-smart-invite-close]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      hideModal();
+    });
+    query('[data-smart-invite-backdrop]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      hideModal();
+    });
+    query('[data-smart-invite-generate]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      void generateQR();
+    });
+    query('[data-smart-invite-copy]')?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const url = String(state.lastUrl || '').trim();
+      if (!url) {
+        setBadge?.('Generate invite URL first', false);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(url);
+        setBadge?.('Invite URL copied');
+      } catch (_) {
+        setBadge?.('Clipboard unavailable', false);
       }
     });
 
-    // Generate button
-    const generateBtn = modal.querySelector('#smart-invite-generate');
-    generateBtn.addEventListener('click', generateQR);
-  }
+    return modal;
+  };
 
-  /**
-   * Show invite modal for a specific node
-   */
-  function showModal(nodeId) {
-    const modal = createModal();
-    const nodeIdInput = modal.querySelector('#smart-invite-node-id');
-    nodeIdInput.value = nodeId;
-
-    // Reset QR display
-    const qrContainer = modal.querySelector('#smart-invite-qr-container');
-    qrContainer.style.display = 'none';
-
-    modal.style.display = 'flex';
-  }
-
-  /**
-   * Hide modal
-   */
-  function hideModal() {
-    if (state.modal) {
-      state.modal.style.display = 'none';
+  const syncModalFields = () => {
+    const bridge = readBridgeConfig(state.nodeId);
+    const nodeField = query('[data-smart-invite-node]');
+    const targetField = query('[data-smart-invite-target]');
+    const urlField = query('[data-smart-invite-url]');
+    if (nodeField) nodeField.value = state.nodeId || '';
+    if (targetField) targetField.value = bridge?.targetPub ? `noclip.${bridge.targetPub}` : '(none)';
+    if (urlField && !state.lastUrl) {
+      urlField.textContent = '(no invite generated)';
     }
-  }
+  };
 
-  /**
-   * Generate QR code
-   */
-  async function generateQR() {
-    const modal = state.modal;
-    if (!modal) return;
+  const showModal = (nodeId = '') => {
+    ensureModal();
+    const requestedNodeId = String(nodeId || '').trim();
+    if (requestedNodeId) {
+      state.nodeId = requestedNodeId;
+    } else if (!state.nodeId) {
+      state.nodeId = listNoClipBridgeNodes()[0] || '';
+    }
+    if (!state.nodeId) {
+      setBadge?.('No NoClipBridge node available', false);
+      return;
+    }
+    state.lastUrl = '';
+    syncModalFields();
+    state.modal.classList.remove('hidden');
+    state.modal.setAttribute('aria-hidden', 'false');
+  };
 
+  const hideModal = () => {
+    if (!state.modal) return;
+    state.modal.classList.add('hidden');
+    state.modal.setAttribute('aria-hidden', 'true');
+  };
+
+  const generateQR = async () => {
+    ensureModal();
+    if (!state.nodeId) {
+      setBadge?.('No NoClipBridge node selected', false);
+      return;
+    }
+    const network = String(query('[data-smart-invite-network]')?.value || 'noclip').trim().toLowerCase();
+    const autoSync = parseBoolean(query('[data-smart-invite-autosync]')?.value, true);
+    let inviteUrl = '';
     try {
-      const nodeIdInput = modal.querySelector('#smart-invite-node-id');
-      const networkSelect = modal.querySelector('#smart-invite-network');
-      const nodeId = nodeIdInput.value;
-      const network = networkSelect.value;
+      inviteUrl = buildInviteUrl({
+        nodeId: state.nodeId,
+        network,
+        autoSync
+      });
+    } catch (err) {
+      setBadge?.(err?.message || 'Failed to generate invite URL', false);
+      return;
+    }
 
-      if (!nodeId) {
-        setBadge?.('No node ID specified', false);
-        return;
-      }
+    state.lastUrl = inviteUrl;
+    const urlField = query('[data-smart-invite-url]');
+    const canvas = query('[data-smart-invite-qr]');
+    if (urlField) urlField.textContent = inviteUrl;
 
-      // Get Hydra address
-      const client = Net?.nkn?.client;
-      const hydraAddr = Net?.nkn?.addr || client?.addr || '';
-
-      if (!hydraAddr) {
-        setBadge?.('Hydra address not available', false);
-        return;
-      }
-
-      // Extract pub key (remove hydra. prefix if present)
-      const hydraPub = hydraAddr.replace(/^hydra\./, '').toLowerCase();
-
-      if (!/^[0-9a-f]{64}$/.test(hydraPub)) {
-        setBadge?.('Hydra address invalid', false);
-        return;
-      }
-
-      // Generate URL
-      const baseUrl = network === 'noclip'
-        ? 'https://noclip.nexus/'
-        : 'https://hydras.nexus/';
-
-      const url = `${baseUrl}?hydra=hydra.${hydraPub}&node=${encodeURIComponent(nodeId)}&kind=smart-object`;
-
-      // Check if QRCode library is available
-      if (typeof window.QRCode === 'undefined' || typeof window.QRCode.toCanvas !== 'function') {
-        setBadge?.('QR Code library not loaded', false);
-        // Show URL anyway
-        const urlDisplay = modal.querySelector('#smart-invite-url');
-        urlDisplay.textContent = url;
-        const qrContainer = modal.querySelector('#smart-invite-qr-container');
-        qrContainer.style.display = 'block';
-        return;
-      }
-
-      // Generate QR code
-      const canvas = modal.querySelector('#smart-invite-qr-canvas');
-      const urlDisplay = modal.querySelector('#smart-invite-url');
-
-      window.QRCode.toCanvas(canvas, url, {
-        width: 280,
+    if (!canvas) {
+      setBadge?.('QR canvas unavailable', false);
+      return;
+    }
+    if (!window.QRCode || typeof window.QRCode.toCanvas !== 'function') {
+      setBadge?.('QR library unavailable; URL generated only', false);
+      return;
+    }
+    try {
+      await window.QRCode.toCanvas(canvas, inviteUrl, {
+        width: 300,
         margin: 2,
         color: {
           dark: '#5ee3a6',
           light: '#0f1118'
         }
-      }, (error) => {
-        if (error) {
-          console.error('[SmartInvite] QR generation error:', error);
-          setBadge?.('QR generation failed', false);
-          urlDisplay.textContent = url;
-        } else {
-          urlDisplay.textContent = url;
-          const qrContainer = modal.querySelector('#smart-invite-qr-container');
-          qrContainer.style.display = 'block';
-          setBadge?.('QR code generated', true);
-        }
       });
-
+      setBadge?.('Smart object invite QR generated');
     } catch (err) {
-      console.error('[SmartInvite] Error:', err);
-      setBadge?.('Failed to generate invite', false);
+      setBadge?.(`QR generation failed: ${err?.message || err}`, false);
     }
-  }
+  };
 
-  /**
-   * Add invite button to NoClipBridge nodes
-   */
-  function addInviteButton(nodeId) {
-    // Wait for node element to exist
-    requestAnimationFrame(() => {
-      const nodeEl = document.querySelector(`[data-node-id="${nodeId}"]`);
-      if (!nodeEl) return;
+  const handleOpenRequest = (event) => {
+    const detail = event?.detail && typeof event.detail === 'object' ? event.detail : {};
+    const nodeId = cleanField(detail.nodeId || detail.bridgeNodeId || '', 96);
+    showModal(nodeId);
+  };
 
-      // Check if button already exists
-      if (nodeEl.querySelector('.smart-invite-btn')) return;
-
-      // Find node body or controls area
-      const nodeBody = nodeEl.querySelector('.node-body') || nodeEl.querySelector('.node-content');
-      if (!nodeBody) return;
-
-      // Create invite button
-      const btn = document.createElement('button');
-      btn.className = 'btn btn-sm smart-invite-btn';
-      btn.textContent = '📱 Smart Object Invite';
-      btn.title = 'Generate QR code to connect to NoClip Smart Object';
-      btn.style.cssText = `
-        width: 100%;
-        margin-top: 8px;
-        background: linear-gradient(135deg, #5ee3a6, #a8ff60);
-        color: #000;
-        border: none;
-        padding: 6px 12px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 12px;
-        font-weight: 600;
-      `;
-
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showModal(nodeId);
-      });
-
-      nodeBody.appendChild(btn);
-    });
-  }
-
-  // Auto-add button when NoClipBridge nodes are created/refreshed
   if (typeof window !== 'undefined') {
-    // Hook into node creation
-    const originalEnsure = NodeStore?.ensure;
-    if (originalEnsure) {
-      NodeStore.ensure = function(nodeId, type, ...args) {
-        const result = originalEnsure.call(this, nodeId, type, ...args);
-        if (type === 'NoClipBridge') {
-          setTimeout(() => addInviteButton(nodeId), 100);
-        }
-        return result;
-      };
-    }
+    window.addEventListener('hydra-noclip-smart-invite-open', handleOpenRequest);
   }
-
-  state.initialized = true;
 
   return {
     showModal,
     hideModal,
     generateQR,
-    addInviteButton
+    addInviteButton: () => {}
   };
 }

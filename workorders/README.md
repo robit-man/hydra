@@ -67,6 +67,18 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-11.4-marketplace-directory-peer-ingress.md`
   - `WO-11.5-peer-modal-bridge-target-orchestration.md`
   - `WO-11.6-url-invite-bridge-autotarget-and-context-hydration.md`
+  - `WO-11.7-smart-invite-egress-and-ui-hook-alignment.md`
+  - `WO-11.8-url-invite-autosync-retry-and-lifecycle-hardening.md`
+- `phase-12`
+  - `WO-12.1-noclip-transport-marketplace-handler-activation.md`
+  - `WO-12.2-noclip-backend-nats-marketplace-gossip.md`
+  - `WO-12.3-hydra-router-nats-marketplace-sync.md`
+  - `WO-12.4-hydra-marketplace-discovery-event-pipeline.md`
+  - `WO-12.5-hydra-noclip-bridge-market-broadcast.md`
+  - `WO-12.6-hydra-provider-provisioning-and-service-config-ui.md`
+  - `WO-12.7-noclip-provider-management-frontend.md`
+  - `WO-12.8-cross-platform-catalog-reconciliation-and-health.md`
+  - `WO-12.9-marketplace-remediation-e2e-gates-and-rollout.md`
 
 ## Completion Rule
 

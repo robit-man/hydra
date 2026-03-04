@@ -2170,6 +2170,7 @@ function refreshNodeResolution(force = false) {
               </select>
               <button type="button" data-noclip-peer-refresh title="Refresh peers">🔄</button>
               <button type="button" data-noclip-peer-sync title="Send sync request" aria-label="Send sync request">🤝</button>
+              <button type="button" class="ghost" data-noclip-peer-invite title="Generate smart object invite" aria-label="Generate smart object invite">📱</button>
             </div>
             <div class="muted" style="pointer-events:auto;margin-top:6px;">Pending Sync Requests</div>
             <div data-noclip-sync-list style="pointer-events:auto;margin-bottom:10px;font-size:12px;line-height:1.4;color:var(--muted);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:6px;max-height:140px;overflow:auto;">
@@ -5972,6 +5973,7 @@ function refreshNodeResolution(force = false) {
     // Wire up peer dropdown
     const selectEl = node.el?.querySelector('[data-noclip-peer-select]');
     const syncBtn = node.el?.querySelector('[data-noclip-peer-sync]');
+    const inviteBtn = node.el?.querySelector('[data-noclip-peer-invite]');
     const updateSyncButtonState = () => {
       if (!syncBtn) return;
       const record = NodeStore.ensure(node.id, 'NoClipBridge');
@@ -6025,6 +6027,20 @@ function refreshNodeResolution(force = false) {
         }
       });
       syncBtn._noclipBound = true;
+    }
+
+    if (inviteBtn && !inviteBtn._noclipBound) {
+      inviteBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        try {
+          window.dispatchEvent(new CustomEvent('hydra-noclip-smart-invite-open', {
+            detail: { nodeId: node.id }
+          }));
+        } catch (_) {
+          setBadge?.('Unable to open invite modal', false);
+        }
+      });
+      inviteBtn._noclipBound = true;
     }
 
     // Initial peer list population

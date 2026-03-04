@@ -65,6 +65,13 @@ Hydra frontend check:
    - confirm bridge target is auto-applied without manual settings,
    - confirm object/session context is reflected in bridge node target config,
    - confirm invite query params are removed from URL after processing.
+6. Open any `NoClipBridge` node and click the `📱` invite control:
+   - confirm Smart Invite modal opens for that bridge node,
+   - generate QR and verify URL includes `noclip`, `bridgeNodeId`, and `autoSync`,
+   - if bridge node has target context, verify URL includes context keys (`objectUuid/sessionId/...`).
+7. Validate URL invite auto-sync retry lifecycle:
+   - open Hydra with `?noclip=<pub>&autoSync=true` for an unreachable peer and confirm retries back off then stop at cap,
+   - open with a reachable peer and confirm pending invite retry state clears after sync success.
 
 ## Kill-Switch Operations
 ### Freeze publication only

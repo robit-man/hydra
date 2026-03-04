@@ -875,6 +875,15 @@ applyRelayState = (...args) => Graph.setRelayState(...args);
 
 const NOCLIP_PUB_RE = /^[0-9a-f]{64}$/i;
 const YES_VALUES = new Set(['1', 'true', 'yes', 'y', 'on']);
+const INVITE_SYNC_MAX_ATTEMPTS = 6;
+const INVITE_SYNC_BASE_DELAY_MS = 2500;
+const INVITE_SYNC_MAX_DELAY_MS = 30000;
+const INVITE_SYNC_MAX_AGE_MS = 10 * 60 * 1000;
+
+const InviteSyncState = {
+  timer: null,
+  inFlight: false
+};
 
 const cleanTargetField = (value, maxLen = 160) => {
   const raw = String(value || '').trim();
@@ -974,6 +983,202 @@ const ensureNoClipBridgeNode = (preferredNodeId = '') => {
   return { nodeId: created.id, created: true };
 };
 
+const normalizeInviteErrorMessage = (errorLike) => {
+  if (errorLike == null) return '';
+  if (typeof errorLike === 'string') return errorLike.trim();
+  if (errorLike && typeof errorLike === 'object' && 'message' in errorLike) {
+    return String(errorLike.message || '').trim();
+  }
+  return String(errorLike).trim();
+};
+
+const isUrlInviteSource = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return key === 'url-invite' || key === 'url_invite' || key === 'urlinvite' || key.startsWith('url-invite');
+};
+
+const clearInviteSyncTimer = () => {
+  if (!InviteSyncState.timer) return;
+  clearTimeout(InviteSyncState.timer);
+  InviteSyncState.timer = null;
+};
+
+const clearPendingNoClipInvite = () => {
+  clearInviteSyncTimer();
+  InviteSyncState.inFlight = false;
+  try {
+    delete window.pendingNoClipInvite;
+  } catch (_) {
+    window.pendingNoClipInvite = null;
+  }
+};
+
+const getPendingNoClipInvite = () => {
+  const value = window.pendingNoClipInvite;
+  if (!value || typeof value !== 'object') return null;
+  return value;
+};
+
+const updatePendingNoClipInvite = (patch = {}) => {
+  const current = getPendingNoClipInvite();
+  if (!current) return null;
+  const next = { ...current, ...(patch && typeof patch === 'object' ? patch : {}) };
+  window.pendingNoClipInvite = next;
+  return next;
+};
+
+const getInviteSyncAttemptCount = (invite) => {
+  const raw = Number(invite?.syncAttempts ?? invite?.attempts ?? 0);
+  if (!Number.isFinite(raw)) return 0;
+  return Math.max(0, Math.floor(raw));
+};
+
+const getInviteSyncAgeMs = (invite) => {
+  const base = Number(invite?.createdAt ?? invite?.timestamp ?? Date.now());
+  if (!Number.isFinite(base)) return 0;
+  return Math.max(0, Date.now() - base);
+};
+
+const isInviteSyncExpired = (invite) => getInviteSyncAgeMs(invite) > INVITE_SYNC_MAX_AGE_MS;
+
+const isInviteSyncTerminalError = (errorLike) => {
+  const message = normalizeInviteErrorMessage(errorLike).toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes('invalid_noclip_target_pub') ||
+    message.includes('unable_to_create_noclip_bridge_node') ||
+    message.includes('noclip_sync_unavailable') ||
+    message.includes('no target pubkey configured') ||
+    message.includes('noclip peer not selected')
+  );
+};
+
+const getInviteSyncBackoffDelayMs = (completedAttempts = 0) => {
+  const attempts = Math.max(0, Math.floor(Number(completedAttempts) || 0));
+  const factor = Math.max(0, attempts - 1);
+  const delay = INVITE_SYNC_BASE_DELAY_MS * (2 ** factor);
+  return Math.max(INVITE_SYNC_BASE_DELAY_MS, Math.min(INVITE_SYNC_MAX_DELAY_MS, Math.floor(delay)));
+};
+
+const schedulePendingInviteSyncRetry = (reason = 'sync_failed') => {
+  const invite = getPendingNoClipInvite();
+  if (!invite) return false;
+  if (!parseBooleanish(invite.autoSync, false)) {
+    clearPendingNoClipInvite();
+    return false;
+  }
+  if (isInviteSyncExpired(invite)) {
+    const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+    const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+    setBadge(`${short} auto-sync invite expired before completion`, false);
+    clearPendingNoClipInvite();
+    return false;
+  }
+  const attempts = getInviteSyncAttemptCount(invite);
+  if (attempts >= INVITE_SYNC_MAX_ATTEMPTS) {
+    const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+    const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+    const failure = normalizeInviteErrorMessage(invite.lastError || reason);
+    setBadge(`${short} auto-sync failed after ${attempts} attempts${failure ? `: ${failure}` : ''}`, false);
+    clearPendingNoClipInvite();
+    return false;
+  }
+  clearInviteSyncTimer();
+  const delayMs = getInviteSyncBackoffDelayMs(attempts);
+  updatePendingNoClipInvite({
+    retryReason: cleanTargetField(reason, 120) || 'sync_failed',
+    nextRetryAt: Date.now() + delayMs
+  });
+  InviteSyncState.timer = setTimeout(() => {
+    processPendingInviteSyncRetry('timer').catch(() => {});
+  }, delayMs);
+  return true;
+};
+
+const processPendingInviteSyncRetry = async (trigger = 'manual') => {
+  if (InviteSyncState.inFlight) return { ok: false, reason: 'in_flight' };
+  const invite = getPendingNoClipInvite();
+  if (!invite) return { ok: false, reason: 'missing_invite' };
+  if (!parseBooleanish(invite.autoSync, false)) {
+    clearPendingNoClipInvite();
+    return { ok: false, reason: 'auto_sync_disabled' };
+  }
+  if (isInviteSyncExpired(invite)) {
+    const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+    const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+    setBadge(`${short} auto-sync invite expired before completion`, false);
+    clearPendingNoClipInvite();
+    return { ok: false, reason: 'expired' };
+  }
+  const attempts = getInviteSyncAttemptCount(invite);
+  if (attempts >= INVITE_SYNC_MAX_ATTEMPTS) {
+    const failure = normalizeInviteErrorMessage(invite.lastError || 'sync_failed');
+    const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+    const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+    setBadge(`${short} auto-sync failed after ${attempts} attempts${failure ? `: ${failure}` : ''}`, false);
+    clearPendingNoClipInvite();
+    return { ok: false, reason: 'attempts_exhausted', error: failure };
+  }
+
+  clearInviteSyncTimer();
+  const nextAttempt = attempts + 1;
+  InviteSyncState.inFlight = true;
+  updatePendingNoClipInvite({
+    syncAttempts: nextAttempt,
+    lastAttemptAt: Date.now(),
+    lastTrigger: cleanTargetField(trigger, 40) || 'manual'
+  });
+
+  try {
+    const result = await applyNoClipBridgeTarget({
+      ...invite,
+      source: 'url-invite-retry',
+      autoSync: true,
+      silent: true
+    });
+    if (result?.autoSync && result?.syncOk === false) {
+      const syncError = normalizeInviteErrorMessage(result.syncError || 'sync_failed') || 'sync_failed';
+      updatePendingNoClipInvite({
+        lastError: syncError,
+        lastFailureAt: Date.now(),
+        lastStatus: 'sync_failed'
+      });
+      if (nextAttempt >= INVITE_SYNC_MAX_ATTEMPTS || isInviteSyncTerminalError(syncError)) {
+        const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+        const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+        setBadge(`${short} auto-sync failed after ${nextAttempt} attempts: ${syncError}`, false);
+        clearPendingNoClipInvite();
+        return { ok: false, reason: 'sync_failed_terminal', error: syncError };
+      }
+      schedulePendingInviteSyncRetry(syncError);
+      return { ok: false, reason: 'sync_failed_retrying', error: syncError };
+    }
+    const targetPub = result?.targetPub || parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+    const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+    setBadge(`${short} auto-sync ready`);
+    clearPendingNoClipInvite();
+    return { ok: true, nodeId: result?.nodeId || '', targetPub: targetPub || '' };
+  } catch (err) {
+    const message = normalizeInviteErrorMessage(err) || 'sync_failed';
+    updatePendingNoClipInvite({
+      lastError: message,
+      lastFailureAt: Date.now(),
+      lastStatus: 'apply_failed'
+    });
+    if (nextAttempt >= INVITE_SYNC_MAX_ATTEMPTS || isInviteSyncTerminalError(message)) {
+      const targetPub = parseNoClipPub(invite.targetPub || invite.noclipPub || '');
+      const short = targetPub ? `noclip.${targetPub.slice(0, 8)}` : 'NoClip invite';
+      setBadge(`${short} auto-sync failed after ${nextAttempt} attempts: ${message}`, false);
+      clearPendingNoClipInvite();
+      return { ok: false, reason: 'apply_failed_terminal', error: message };
+    }
+    schedulePendingInviteSyncRetry(message);
+    return { ok: false, reason: 'apply_failed_retrying', error: message };
+  } finally {
+    InviteSyncState.inFlight = false;
+  }
+};
+
 const applyNoClipBridgeTarget = async (detail = {}) => {
   const targetPub = parseNoClipPub(detail?.targetPub || detail?.target || '');
   if (!targetPub) {
@@ -982,6 +1187,7 @@ const applyNoClipBridgeTarget = async (detail = {}) => {
   const preferredNodeId = cleanTargetField(detail?.bridgeNodeId || detail?.nodeId || detail?.node, 96);
   const targetCtx = normalizeBridgeTargetContext(detail);
   const autoSync = parseBooleanish(detail?.autoSync, false);
+  const silent = parseBooleanish(detail?.silent, false);
   const targetLabelRaw = String(detail?.displayName || '').trim();
   const targetLabel = targetLabelRaw || `noclip.${targetPub.slice(0, 8)}...`;
   const { nodeId, created } = ensureNoClipBridgeNode(preferredNodeId);
@@ -1010,42 +1216,122 @@ const applyNoClipBridgeTarget = async (detail = {}) => {
     NoClipBridge?.refreshPeerDropdown?.(nodeId, { silent: true });
   }, 300);
 
-  const nodeEl = Graph.getNode(nodeId)?.el;
-  if (nodeEl?.scrollIntoView) {
-    try {
-      nodeEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    } catch (_) {
-      nodeEl.scrollIntoView({ block: 'center' });
+  if (!silent) {
+    const nodeEl = Graph.getNode(nodeId)?.el;
+    if (nodeEl?.scrollIntoView) {
+      try {
+        nodeEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (_) {
+        nodeEl.scrollIntoView({ block: 'center' });
+      }
     }
   }
 
-  const statusPrefix = created ? 'Created' : 'Updated';
-  const contextLabel = targetCtx.objectUuid
-    ? ` • object ${targetCtx.objectUuid.slice(0, 12)}`
-    : (targetCtx.sessionId ? ` • session ${targetCtx.sessionId.slice(0, 12)}` : '');
-  setBadge(`${statusPrefix} NoClip Bridge ${nodeId} for ${targetLabel}${contextLabel}`);
-  NoClipBridge?.logToNode?.(nodeId, `✓ Target set to noclip.${targetPub.slice(0, 8)}…`, 'success');
-  if (targetCtx.hasTarget) {
-    NoClipBridge?.logToNode?.(
-      nodeId,
-      `✓ Interop target set (${targetCtx.objectUuid || targetCtx.sessionId || targetCtx.itemId || 'context'})`,
-      'info'
-    );
+  if (!silent) {
+    const statusPrefix = created ? 'Created' : 'Updated';
+    const contextLabel = targetCtx.objectUuid
+      ? ` • object ${targetCtx.objectUuid.slice(0, 12)}`
+      : (targetCtx.sessionId ? ` • session ${targetCtx.sessionId.slice(0, 12)}` : '');
+    setBadge(`${statusPrefix} NoClip Bridge ${nodeId} for ${targetLabel}${contextLabel}`);
+    NoClipBridge?.logToNode?.(nodeId, `✓ Target set to noclip.${targetPub.slice(0, 8)}…`, 'success');
+    if (targetCtx.hasTarget) {
+      NoClipBridge?.logToNode?.(
+        nodeId,
+        `✓ Interop target set (${targetCtx.objectUuid || targetCtx.sessionId || targetCtx.itemId || 'context'})`,
+        'info'
+      );
+    }
   }
 
+  let syncOk = !autoSync;
+  let syncError = '';
   if (autoSync) {
     try {
-      await NoClipBridge?.requestSync?.(nodeId, targetPub);
+      const requestSync = NoClipBridge?.requestSync;
+      if (typeof requestSync !== 'function') {
+        throw new Error('noclip_sync_unavailable');
+      }
+      await requestSync(nodeId, targetPub, { silent });
+      syncOk = true;
     } catch (err) {
-      setBadge(`Bridge sync request failed: ${err?.message || err}`, false);
+      syncOk = false;
+      syncError = normalizeInviteErrorMessage(err) || 'sync_failed';
+      if (!silent) {
+        setBadge(`Bridge sync request failed: ${syncError}`, false);
+      }
     }
   }
+  return {
+    ok: true,
+    nodeId,
+    targetPub,
+    autoSync,
+    syncOk,
+    syncError,
+    created
+  };
 };
 
 window.addEventListener('hydra-noclip-bridge-target', (event) => {
   const detail = event?.detail && typeof event.detail === 'object' ? event.detail : {};
-  applyNoClipBridgeTarget(detail).catch((err) => {
-    setBadge(`NoClip bridge target failed: ${err?.message || err}`, false);
+  const source = cleanTargetField(detail?.source, 64);
+  const sourceKey = source.toLowerCase();
+  const autoSync = parseBooleanish(detail?.autoSync, false);
+  const isUrlInvite = isUrlInviteSource(source);
+  const isRetrySource = sourceKey.startsWith('url-invite-retry');
+  if (isUrlInvite && !autoSync) clearPendingNoClipInvite();
+
+  if (isUrlInvite && autoSync) {
+    const current = getPendingNoClipInvite();
+    const normalizedTarget = parseNoClipPub(detail.targetPub || detail.target || '');
+    const currentTarget = parseNoClipPub(current?.targetPub || current?.noclipPub || '');
+    const shouldResetPending = !isRetrySource || !current || currentTarget !== normalizedTarget;
+    if (shouldResetPending) {
+      clearPendingNoClipInvite();
+      window.pendingNoClipInvite = {
+        ...detail,
+        noclipPub: normalizedTarget,
+        source: source || 'url-invite',
+        autoSync: true,
+        syncAttempts: 0,
+        createdAt: Date.now(),
+        timestamp: Date.now(),
+        lastError: ''
+      };
+    }
+  }
+
+  applyNoClipBridgeTarget(detail).then((result) => {
+    if (!isUrlInvite || !autoSync) return;
+    if (result?.autoSync && result?.syncOk === false) {
+      const errorText = normalizeInviteErrorMessage(result.syncError || 'sync_failed') || 'sync_failed';
+      const currentAttempts = Math.max(1, getInviteSyncAttemptCount(getPendingNoClipInvite()));
+      updatePendingNoClipInvite({
+        syncAttempts: currentAttempts,
+        lastError: errorText,
+        lastFailureAt: Date.now(),
+        lastStatus: 'sync_failed_initial'
+      });
+      schedulePendingInviteSyncRetry(errorText);
+      return;
+    }
+    clearPendingNoClipInvite();
+  }).catch((err) => {
+    const message = normalizeInviteErrorMessage(err) || 'bridge_target_failed';
+    setBadge(`NoClip bridge target failed: ${message}`, false);
+    if (!isUrlInvite || !autoSync) return;
+    if (isInviteSyncTerminalError(message)) {
+      clearPendingNoClipInvite();
+      return;
+    }
+    const currentAttempts = Math.max(1, getInviteSyncAttemptCount(getPendingNoClipInvite()));
+    updatePendingNoClipInvite({
+      syncAttempts: currentAttempts,
+      lastError: message,
+      lastFailureAt: Date.now(),
+      lastStatus: 'apply_failed_initial'
+    });
+    schedulePendingInviteSyncRetry(message);
   });
 });
 
@@ -1650,13 +1936,14 @@ function handleInviteUrlParams() {
 
     const noclipPub = parseNoClipPub(firstValue(['noclip', 'peer', 'target']));
     if (!noclipPub) return;
+    const autoSync = parseBooleanish(firstValue(['autosync', 'autoSync', 'sync']), false);
 
     const inviteDetail = {
       targetPub: noclipPub,
       targetAddr: `noclip.${noclipPub}`,
       displayName: 'URL invite',
       source: 'url-invite',
-      autoSync: parseBooleanish(firstValue(['autosync', 'autoSync', 'sync']), false),
+      autoSync,
       bridgeNodeId: firstValue(['bridgeNodeId', 'bridge_node_id', 'nodeId', 'node']),
       sessionId: firstValue(['sessionId', 'session_id', 'session']),
       objectUuid: firstValue(['objectUuid', 'object_uuid', 'objectId', 'object_id', 'object']),
@@ -1668,16 +1955,27 @@ function handleInviteUrlParams() {
       inviteDetail.objectUuid = inviteDetail.itemId;
     }
 
-    window.pendingNoClipInvite = {
-      ...inviteDetail,
-      noclipPub,
-      timestamp: Date.now()
-    };
+    clearPendingNoClipInvite();
+    if (autoSync) {
+      const now = Date.now();
+      window.pendingNoClipInvite = {
+        ...inviteDetail,
+        noclipPub,
+        syncAttempts: 0,
+        createdAt: now,
+        timestamp: now,
+        lastError: ''
+      };
+    }
 
     try {
       window.dispatchEvent(new CustomEvent('hydra-noclip-bridge-target', { detail: inviteDetail }));
       const suffix = inviteDetail.objectUuid ? ` • object ${inviteDetail.objectUuid.slice(0, 12)}` : '';
-      setBadge(`NoClip invite applied: noclip.${noclipPub.slice(0, 8)}${suffix}`);
+      if (autoSync) {
+        setBadge(`NoClip invite loaded: noclip.${noclipPub.slice(0, 8)}${suffix} • auto-sync`);
+      } else {
+        setBadge(`NoClip invite applied: noclip.${noclipPub.slice(0, 8)}${suffix}`);
+      }
     } catch (err) {
       setBadge(`NoClip invite detected for noclip.${noclipPub.slice(0, 8)}`, true);
     }

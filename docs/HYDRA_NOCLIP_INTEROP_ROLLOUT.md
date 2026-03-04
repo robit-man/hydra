@@ -55,6 +55,8 @@ curl -s "http://127.0.0.1:3001/api/interop/marketplace/catalog/providers?sourceN
 - Open peer list (`Hydra` network) and confirm imported marketplace routers appear without manual entry.
 - Open peer list (`NoClip` network), click `Bridge` on a peer, and confirm a `NoClipBridge` node is configured (or created) with that target.
 - Open Hydra using invite URL params (`noclip`, optional `object/session`) and confirm bridge target/context are auto-applied with URL params cleared after ingest.
+- Open a NoClipBridge node, use the `📱` invite control, and confirm generated URL/QR payload contains parser-compatible keys (`noclip`, `bridgeNodeId`, `autoSync`, and context fields when present).
+- Validate URL invite retry behavior: with `autoSync=true` and an offline peer, confirm retries back off and stop at cap/expiry; with a reachable peer, confirm pending invite state clears after sync success.
 
 ## Rollout Gates
 Rollout proceeds only when all conditions hold:
