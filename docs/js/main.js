@@ -657,6 +657,8 @@ const createMarketplaceDirectoryClient = ({ CFG, saveCFG, setBadge, log, onDirec
     notify({
       ok: false,
       error: text,
+      source: 'http-directory',
+      sourcePriority: 20,
       updatedAtMs: Date.now()
     });
     if (opts.manual) setBadge(`Marketplace directory refresh failed: ${text}`, false);
@@ -707,6 +709,8 @@ const createMarketplaceDirectoryClient = ({ CFG, saveCFG, setBadge, log, onDirec
       ).trim();
       const detail = {
         ok: true,
+        source: 'http-directory',
+        sourcePriority: 20,
         total: Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0,
         freshCount: Number.isFinite(freshCount) ? Math.max(0, Math.floor(freshCount)) : 0,
         staleCount: Number.isFinite(staleCount) ? Math.max(0, Math.floor(staleCount)) : 0,
