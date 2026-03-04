@@ -62,7 +62,7 @@ Each Hydra service is surfaced through a normalized discovery contract:
 ## 4) Phased Workorders
 
 Canonical execution files live under:
-- `workorders/phase-00` through `workorders/phase-09`
+- `workorders/phase-00` through `workorders/phase-10`
 - Each workorder file includes scoped file targets, acceptance metrics, and failure-mode preventions used by implementation agents.
 
 ## Phase 0 - Discovery Baseline
@@ -530,6 +530,108 @@ Tasks:
 Acceptance:
 - Release decisions can be driven from one deterministic command output and artifact bundle.
 
+## Phase 10 - Marketplace, Credits, And Federated Service Commerce
+
+### WO-10.1 Marketplace Contract And Interop Namespace
+Scope:
+- `workorders/phase-10/WO-10.1-marketplace-contract-and-interop-namespace.md`
+
+Tasks:
+- Define one versioned contract namespace for catalog, quote, credit, ticket, and usage envelopes shared by Hydra router, NoClip backend, and both frontends.
+
+Acceptance:
+- Contract version and compatibility checks are enforced consistently across control-plane health and interop payloads.
+
+### WO-10.2 Hydra Router Service Publication And Catalog
+Scope:
+- `workorders/phase-10/WO-10.2-hydra-router-service-publication-and-catalog.md`
+
+Tasks:
+- Publish provider-grade service catalog entries from Hydra router including NKN/cloudflared/local candidates, health, and transport selection.
+
+Acceptance:
+- Parent and subordinate services are discoverable through one deterministic router catalog surface.
+
+### WO-10.3 NoClip Provider Registry And Offer Lifecycle
+Scope:
+- `workorders/phase-10/WO-10.3-noclip-provider-registry-and-offer-lifecycle.md`
+
+Tasks:
+- Add backend provider/offer lifecycle APIs so account holders can register endpoints, set rates, and scope offers to friends/public.
+
+Acceptance:
+- Verified account holders can publish and manage offers without leaking private endpoint credentials.
+
+### WO-10.4 Multi-Transport Discovery And Peer Ingress Unification
+Scope:
+- `workorders/phase-10/WO-10.4-multi-transport-discovery-and-peer-ingress-unification.md`
+
+Tasks:
+- Unify NKN, cloudflared, and NATS discovery/ingress flows with shared manual-add and QR pathways.
+
+Acceptance:
+- Hydra and NoClip peers can find/connect each other in both directions with consistent transport state.
+
+### WO-10.5 Access Tickets, Shared Keys, And Audience Gating
+Scope:
+- `workorders/phase-10/WO-10.5-access-tickets-shared-keys-and-audience-gating.md`
+
+Tasks:
+- Enforce short-lived tickets and shared-key signature validation with friend/public/private audience policy checks.
+
+Acceptance:
+- Unauthorized calls and replay attempts are rejected before service or overlay execution.
+
+### WO-10.6 Credit Ledger And Daily Entitlement Engine
+Scope:
+- `workorders/phase-10/WO-10.6-credit-ledger-and-daily-entitlement-engine.md`
+
+Tasks:
+- Implement USDC-equivalent credit accounts with daily replenishment derived from verified asset ownership.
+
+Acceptance:
+- Users receive deterministic daily grants and can spend credits against provider services with auditability.
+
+### WO-10.7 Usage Metering, Pricing, And Settlement Events
+Scope:
+- `workorders/phase-10/WO-10.7-usage-metering-pricing-and-settlement-events.md`
+
+Tasks:
+- Add quote, metering, and settlement pipeline linking provider rate cards to runtime usage.
+
+Acceptance:
+- Every billable request is traceable from quote to final debit/settlement.
+
+### WO-10.8 Runtime Enforcement For Router RPC And Overlay Ingress
+Scope:
+- `workorders/phase-10/WO-10.8-runtime-enforcement-for-router-rpc-and-overlay-ingress.md`
+
+Tasks:
+- Apply preflight entitlement/ticket/policy enforcement to service RPC and overlay mutation ingress paths.
+
+Acceptance:
+- Execution is blocked by default unless all gating conditions pass.
+
+### WO-10.9 Cross-Frontend Marketplace UI And Badge Unification
+Scope:
+- `workorders/phase-10/WO-10.9-cross-frontend-marketplace-ui-and-badge-unification.md`
+
+Tasks:
+- Align provider badges, service health states, transport labels, and credit/quote UX across Hydra and NoClip UIs.
+
+Acceptance:
+- Both frontends present one coherent marketplace and service-status language.
+
+### WO-10.10 Rollout, Security Audit, And Failure Recovery
+Scope:
+- `workorders/phase-10/WO-10.10-rollout-security-audit-and-failure-recovery.md`
+
+Tasks:
+- Extend gate orchestration with marketplace security checks, fraud drills, kill-switches, and rollback invariants.
+
+Acceptance:
+- Marketplace rollout can be gated, paused, or rolled back safely without ledger or access-control corruption.
+
 ## 5) Detailed Frontend Change Map (`docs/js`)
 
 ### `docs/js/config.js`
@@ -582,6 +684,7 @@ Acceptance:
 5. Phase 6 and Phase 7 before full rollout.
 6. Phase 8 after Phase 4/5 contracts stabilize, with backend migration and interop smoke gates enabled.
 7. Phase 9 to operationalize one-command rollout gate execution and artifact retention.
+8. Phase 10 to ship provider marketplace, entitlement credits, and runtime enforcement across Hydra and NoClip.
 
 ## 7) Definition of Done (Program-Level)
 - Hydra router exposes stable control-plane APIs and NKN resolve semantics matching teleoperation behavior.
@@ -589,3 +692,4 @@ Acceptance:
 - Hydra frontend can discover and apply service endpoints from router NKN address, including QR onboarding.
 - Cloudflared failure modes are explicitly surfaced with stale-url and fallback handling.
 - End-to-end tests verify local and remote resolution paths and key failure recoveries.
+- Marketplace provider offers, entitlement credits, and runtime gating are consistent across Hydra and NoClip surfaces.

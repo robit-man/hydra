@@ -49,6 +49,17 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-08.10-end-to-end-validation-failure-drills-and-rollout-gates.md`
 - `phase-09`
   - `WO-09.1-rollout-gate-orchestrator-and-artifact-unification.md`
+- `phase-10`
+  - `WO-10.1-marketplace-contract-and-interop-namespace.md`
+  - `WO-10.2-hydra-router-service-publication-and-catalog.md`
+  - `WO-10.3-noclip-provider-registry-and-offer-lifecycle.md`
+  - `WO-10.4-multi-transport-discovery-and-peer-ingress-unification.md`
+  - `WO-10.5-access-tickets-shared-keys-and-audience-gating.md`
+  - `WO-10.6-credit-ledger-and-daily-entitlement-engine.md`
+  - `WO-10.7-usage-metering-pricing-and-settlement-events.md`
+  - `WO-10.8-runtime-enforcement-for-router-rpc-and-overlay-ingress.md`
+  - `WO-10.9-cross-frontend-marketplace-ui-and-badge-unification.md`
+  - `WO-10.10-rollout-security-audit-and-failure-recovery.md`
 
 ## Completion Rule
 
