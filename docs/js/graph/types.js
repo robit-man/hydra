@@ -318,6 +318,26 @@ const GraphTypes = {
         tooltip: 'Lifecycle events (friend responses, acknowledgements).'
       },
       {
+        name: 'overlayIngress',
+        label: 'Overlay Ingress',
+        tooltip: 'Overlay-targeted ingress envelopes with resolved session/object metadata.'
+      },
+      {
+        name: 'overlayPose',
+        label: 'Overlay Pose',
+        tooltip: 'Pose updates enriched with overlay/session targeting context.'
+      },
+      {
+        name: 'overlayGeometry',
+        label: 'Overlay Geometry',
+        tooltip: 'Geometry/GLB/pointcloud ingress payloads for overlay hydration.'
+      },
+      {
+        name: 'overlayMedia',
+        label: 'Overlay Media',
+        tooltip: 'Media ingress payloads (video/audio/control) for theater or object streams.'
+      },
+      {
         name: 'chat',
         label: 'Chat',
         tooltip: 'Chat messages received over the bridge.'
@@ -333,7 +353,12 @@ const GraphTypes = {
       { key: 'targetPub', label: 'Target NKN Pub', type: 'text', placeholder: 'hex64 peer id' },
       { key: 'targetAddr', label: 'Target Address', type: 'text', placeholder: 'noclip.<hex64>' },
       { key: 'room', label: 'Discovery Room (override)', type: 'text', placeholder: '(auto from url)', def: 'auto' },
-      { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' }
+      { key: 'autoConnect', label: 'Auto Connect', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'sessionId', label: 'Session ID', type: 'text', placeholder: 'optional ingress session id' },
+      { key: 'objectUuid', label: 'Object UUID', type: 'text', placeholder: 'optional overlay object id' },
+      { key: 'overlayId', label: 'Overlay ID', type: 'text', placeholder: 'optional overlay id' },
+      { key: 'itemId', label: 'Item ID', type: 'text', placeholder: 'optional item id' },
+      { key: 'layerId', label: 'Layer ID', type: 'text', placeholder: 'optional layer id' }
     ]
   },
   Payments: {

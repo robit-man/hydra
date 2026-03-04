@@ -7129,6 +7129,12 @@ class Router:
             upnp_base = str((fallback.get("upnp") or {}).get("public_base_url") or "")
             nats_base = str((fallback_nats or {}).get("public_base_url") or "")
             nkn_base = str((fallback_nkn or {}).get("public_base_url") or "")
+            nkn_address = str(
+                (fallback_nkn or {}).get("nkn_address")
+                or (fallback_nkn or {}).get("address")
+                or (fallback_nkn or {}).get("target_address")
+                or ""
+            )
             local_base = str(local.get("base_url") or payload.get("base_url") or "")
             selected_transport = str(fallback.get("selected_transport") or payload.get("transport") or "").strip().lower()
             if selected_transport not in ("cloudflare", "upnp", "nats", "nkn", "local"):
@@ -7174,6 +7180,30 @@ class Router:
                     selected_base = local_base
                     selected_reason = "defaulted to local base URL"
 
+            candidates = {
+                "cloudflare": tunnel_url or str((fallback_cloudflare or {}).get("public_base_url") or ""),
+                "upnp": upnp_base,
+                "nats": nats_base,
+                "nkn": nkn_address or nkn_base,
+                "local": local_base,
+            }
+            stale_cloudflare = bool(stale_tunnel) and not bool(tunnel_url)
+            stale_rejected = False
+            stale_reason = ""
+            if selected_transport == "cloudflare" and stale_cloudflare:
+                fallback_order = ["nkn", "upnp", "nats", "local"]
+                for alt in fallback_order:
+                    alt_base = str(candidates.get(alt) or "")
+                    if alt_base:
+                        selected_transport = alt
+                        selected_base = alt_base
+                        selected_reason = f"demoted stale cloudflare candidate to {alt}"
+                        stale_rejected = True
+                        stale_reason = "cloudflare_stale_tunnel_demoted"
+                        break
+            if isinstance(fallback, dict):
+                fallback["selected_transport"] = selected_transport
+
             local_host = ""
             try:
                 local_host = urllib.parse.urlparse(selected_base).hostname or ""
@@ -7203,6 +7233,15 @@ class Router:
                 "tunnel_url": tunnel_url,
                 "stale_tunnel_url": stale_tunnel,
                 "tunnel_error": str(tunnel.get("error") or ""),
+                "candidates": candidates,
+                "discovery_source": "router_snapshot",
+                "stale_rejected": stale_rejected,
+                "stale_reason": stale_reason,
+                "selection_telemetry": {
+                    "selected_transport": selected_transport,
+                    "selection_reason": selected_reason,
+                    "stale_rejected": stale_rejected,
+                },
                 "fallback": fallback,
                 "local": local,
                 "cloudflare": fallback_cloudflare,
@@ -7257,6 +7296,7 @@ class Router:
             "services": services,
             "resolved": resolved,
             "stale": False,
+            "discovery_source": "local_snapshot",
             "interop_contract": dict(INTEROP_CONTRACT),
             "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
         }
@@ -7426,6 +7466,61 @@ class Router:
             labels.append(f"{svc}:{endpoint}")
         return labels
 
+    def _resolved_discovery_summary(self, resolved: Dict[str, dict]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "service_count": 0,
+            "transport_counts": {},
+            "transport_total": 0,
+            "stale_rejections": [],
+            "has_stale_rejections": False,
+            "candidates": {},
+            "candidate_coverage": {},
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "generated_at_ms": int(time.time() * 1000),
+        }
+        if not isinstance(resolved, dict):
+            return out
+        transport_counts: Dict[str, int] = {}
+        stale_rejections: List[Dict[str, Any]] = []
+        candidates: Dict[str, Dict[str, str]] = {}
+        candidate_coverage: Dict[str, int] = {}
+        service_count = 0
+        for svc in sorted(resolved.keys()):
+            item = resolved.get(svc) or {}
+            if not isinstance(item, dict):
+                continue
+            service_count += 1
+            selected = str(item.get("selected_transport") or item.get("transport") or "").strip().lower()
+            if selected:
+                transport_counts[selected] = int(transport_counts.get(selected, 0)) + 1
+            raw_candidates = item.get("candidates") if isinstance(item.get("candidates"), dict) else {}
+            candidates[svc] = {
+                "cloudflare": str((raw_candidates or {}).get("cloudflare") or ""),
+                "nkn": str((raw_candidates or {}).get("nkn") or ""),
+                "local": str((raw_candidates or {}).get("local") or ""),
+                "upnp": str((raw_candidates or {}).get("upnp") or ""),
+                "nats": str((raw_candidates or {}).get("nats") or ""),
+            }
+            candidate_coverage[svc] = sum(1 for value in candidates[svc].values() if value)
+            if bool(item.get("stale_rejected")):
+                stale_rejections.append(
+                    {
+                        "service": svc,
+                        "selected_transport": selected,
+                        "reason": str(item.get("stale_reason") or "stale_candidate_rejected"),
+                        "candidates": candidates[svc],
+                    }
+                )
+        out["service_count"] = service_count
+        out["transport_counts"] = transport_counts
+        out["transport_total"] = sum(int(value) for value in transport_counts.values())
+        out["stale_rejections"] = stale_rejections
+        out["has_stale_rejections"] = bool(stale_rejections)
+        out["stale_rejection_count"] = len(stale_rejections)
+        out["candidates"] = candidates
+        out["candidate_coverage"] = candidate_coverage
+        return out
+
     def _record_endpoint_usage(self, peer: str, labels: List[str]) -> None:
         clean_labels = [str(label) for label in (labels or []) if str(label or "").strip()]
         if not clean_labels:
@@ -7503,6 +7598,8 @@ class Router:
             self.telemetry_state["resolve_requests_in"] = int(self.telemetry_state.get("resolve_requests_in", 0)) + 1
         snapshot = self.get_service_snapshot(force_refresh=True)
         public_snapshot = self._redact_public_payload(snapshot)
+        resolved_payload = public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {}
+        resolve_summary = self._resolved_discovery_summary(resolved_payload if isinstance(resolved_payload, dict) else {})
         reply = {
             "event": "resolve_tunnels_result",
             "interop_contract": dict(INTEROP_CONTRACT),
@@ -7510,13 +7607,15 @@ class Router:
             "request_id": request_id,
             "source_address": node.current_address or "",
             "timestamp_ms": int(time.time() * 1000),
+            "discovery_source": "nkn_dm",
             "snapshot": public_snapshot,
-            "resolved": public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {},
+            "resolved": resolved_payload if isinstance(resolved_payload, dict) else {},
+            "resolve_summary": resolve_summary,
         }
         node.bridge.dm(source, reply, DM_OPTS_SINGLE)
         self._record_outbound_nkn(source, reply)
         endpoint_labels = self._collect_endpoint_labels(
-            public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {}
+            resolved_payload if isinstance(resolved_payload, dict) else {}
         )
         self._record_endpoint_usage(source, endpoint_labels)
 
@@ -7744,11 +7843,59 @@ class Router:
                 "resolve_requests_out": int(self.telemetry_state.get("resolve_requests_out", 0)),
                 "resolve_success_out": int(self.telemetry_state.get("resolve_success_out", 0)),
                 "resolve_fail_out": int(self.telemetry_state.get("resolve_fail_out", 0)),
+                "rpc_requests_in": int(self.telemetry_state.get("rpc_requests_in", 0)),
+                "rpc_requests_out": int(self.telemetry_state.get("rpc_requests_out", 0)),
+                "rpc_success_out": int(self.telemetry_state.get("rpc_success_out", 0)),
+                "rpc_fail_out": int(self.telemetry_state.get("rpc_fail_out", 0)),
                 "active_peers": len(self.telemetry_state.get("peer_usage", {})),
             }
 
+    def _rollout_gates(
+        self,
+        snapshot: Dict[str, Any],
+        pending_count: int,
+        resolve_summary: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        safe_snapshot = snapshot if isinstance(snapshot, dict) else {}
+        resolved = safe_snapshot.get("resolved", {})
+        resolved_map = resolved if isinstance(resolved, dict) else {}
+        summary = resolve_summary if isinstance(resolve_summary, dict) else self._resolved_discovery_summary(resolved_map)
+        telemetry = self._health_telemetry_totals()
+        resolve_success = int(telemetry.get("resolve_success_out", 0))
+        resolve_fail = int(telemetry.get("resolve_fail_out", 0))
+        resolve_total = resolve_success + resolve_fail
+        resolve_error_rate = float(resolve_fail / resolve_total) if resolve_total > 0 else 0.0
+
+        addresses = self._current_node_addresses()
+        expected_contract = str(INTEROP_CONTRACT.get("version") or "")
+        reported_contract = str(safe_snapshot.get("interop_contract_version") or expected_contract)
+        contract_ok = bool(expected_contract and reported_contract == expected_contract)
+        nkn_ready = bool(self.nkn_settings.get("enable", True) and addresses)
+        resolved_services = int(summary.get("service_count") or len(resolved_map))
+        stale_count = int(summary.get("stale_rejection_count") or 0)
+        pending_clear = int(max(0, pending_count)) == 0
+        resolve_error_rate_ok = resolve_error_rate <= 0.30
+        ready = bool(contract_ok and nkn_ready and resolved_services > 0 and pending_clear and resolve_error_rate_ok)
+
+        return {
+            "ready": ready,
+            "contract_version_expected": expected_contract,
+            "contract_version_reported": reported_contract,
+            "contract_version_ok": contract_ok,
+            "nkn_ready": nkn_ready,
+            "resolved_services": resolved_services,
+            "pending_resolves_clear": pending_clear,
+            "stale_rejection_count": stale_count,
+            "resolve_total": resolve_total,
+            "resolve_error_rate": round(resolve_error_rate, 4),
+            "resolve_error_rate_ok": resolve_error_rate_ok,
+        }
+
     def _health_payload(self, snapshot: Dict[str, Any], pending_count: int) -> Dict[str, Any]:
         addresses = self._current_node_addresses()
+        resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+        resolved_map = resolved if isinstance(resolved, dict) else {}
+        resolve_summary = self._resolved_discovery_summary(resolved_map)
         return {
             "status": "ok",
             "service": "hydra_router",
@@ -7764,20 +7911,27 @@ class Router:
                 "addresses": addresses,
             },
             "telemetry": self._health_telemetry_totals(),
+            "resolve_summary": resolve_summary,
+            "rollout_gates": self._rollout_gates(snapshot, pending_count, resolve_summary=resolve_summary),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
 
-    @staticmethod
-    def _services_snapshot_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def _services_snapshot_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+        summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
         return {
             "status": "success",
             "interop_contract": dict(INTEROP_CONTRACT),
             "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
+            "resolve_summary": summary,
+            "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
     def _nkn_info_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         addresses = self._current_node_addresses()
+        resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+        summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
         return {
             "status": "success",
             "interop_contract": dict(INTEROP_CONTRACT),
@@ -7791,23 +7945,33 @@ class Router:
                 "seed_persisted": any(bool((entry or {}).get("seed_hex")) for entry in self.service_relays.values()),
             },
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
+            "resolve_summary": summary,
+            "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
     def _nkn_resolve_local_payload(self, snapshot: Dict[str, Any], target_address: str = "") -> Dict[str, Any]:
         addresses = self._current_node_addresses()
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+        resolved_map = resolved if isinstance(resolved, dict) else {}
+        summary = self._resolved_discovery_summary(resolved_map)
         return {
             "status": "success",
             "interop_contract": dict(INTEROP_CONTRACT),
             "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "mode": "local",
+            "discovery_source": "local_snapshot",
             "target_address": str(target_address or (addresses[0] if addresses else "")),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
-            "resolved": resolved if isinstance(resolved, dict) else {},
+            "resolved": resolved_map,
+            "resolve_summary": summary,
+            "endpoint_candidates": summary.get("candidates", {}),
+            "stale_rejections": summary.get("stale_rejections", []),
+            "stale_rejection_count": int(summary.get("stale_rejection_count", 0)),
+            "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
-    @staticmethod
     def _nkn_resolve_remote_payload(
+        self,
         request_id: str,
         target_address: str,
         source_address: str,
@@ -7815,17 +7979,25 @@ class Router:
         snapshot: Dict[str, Any],
         resolved: Dict[str, Any],
     ) -> Dict[str, Any]:
+        resolved_map = resolved if isinstance(resolved, dict) else {}
+        summary = self._resolved_discovery_summary(resolved_map)
         return {
             "status": "success",
             "interop_contract": dict(INTEROP_CONTRACT),
             "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "mode": "remote",
+            "discovery_source": str(response_payload.get("discovery_source") or "nkn_dm"),
             "request_id": str(request_id or ""),
             "target_address": str(target_address or ""),
             "source_address": str(source_address or ""),
             "reply": response_payload if isinstance(response_payload, dict) else {},
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
-            "resolved": resolved if isinstance(resolved, dict) else {},
+            "resolved": resolved_map,
+            "resolve_summary": summary,
+            "endpoint_candidates": summary.get("candidates", {}),
+            "stale_rejections": summary.get("stale_rejections", []),
+            "stale_rejection_count": int(summary.get("stale_rejection_count", 0)),
+            "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
     def _snapshot_dashboard_data(self, history_limit: Any = 240, log_limit: Any = 120, peer_limit: Any = 50) -> Dict[str, Any]:

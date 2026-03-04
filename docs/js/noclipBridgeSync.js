@@ -44,6 +44,12 @@ function createNoClipBridgeSync({
     return match ? match[1].toLowerCase() : '';
   };
 
+  const textValue = (value) => {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    return trimmed || '';
+  };
+
   const notifyBridge = (session) => {
     if (!session) return;
     try {
@@ -113,6 +119,9 @@ function createNoClipBridgeSync({
     const stamp = nowMs();
     const position = input.position && typeof input.position === 'object' ? { ...input.position } : null;
     const geo = input.geo && typeof input.geo === 'object' ? { ...input.geo } : null;
+    const overlayId = textValue(input.overlayId || input.overlay_id);
+    const itemId = textValue(input.itemId || input.item_id || input.objectId || input.objectUuid);
+    const layerId = textValue(input.layerId || input.layer_id);
     return {
       sessionId,
       objectUuid,
@@ -127,6 +136,9 @@ function createNoClipBridgeSync({
       status: typeof input.status === 'string' ? input.status : 'pending-handshake',
       createdAt: Number.isFinite(input.createdAt) ? input.createdAt : stamp,
       updatedAt: Number.isFinite(input.updatedAt) ? input.updatedAt : stamp,
+      ...(overlayId ? { overlayId } : {}),
+      ...(itemId ? { itemId } : {}),
+      ...(layerId ? { layerId } : {}),
       ...(position ? { position } : {}),
       ...(geo ? { geo } : {})
     };
@@ -253,6 +265,10 @@ function createNoClipBridgeSync({
     const objectId = msg.objectId;
     const objectLabel = msg.objectConfig?.label || 'Smart Object';
     const discoveryRoom = typeof msg.discoveryRoom === 'string' ? msg.discoveryRoom : '';
+    const overlayId = textValue(msg.overlayId || msg.overlay_id || msg.objectConfig?.overlayId || msg.objectConfig?.overlay_id);
+    const itemId = textValue(msg.itemId || msg.item_id || msg.objectConfig?.itemId || msg.objectConfig?.item_id || objectId);
+    const layerId = textValue(msg.layerId || msg.layer_id || msg.objectConfig?.layerId || msg.objectConfig?.layer_id);
+    const sessionHint = textValue(msg.sessionId || msg.session_id || msg.objectConfig?.sessionId || msg.objectConfig?.session_id);
     const position = msg.objectConfig?.position && typeof msg.objectConfig.position === 'object'
       ? { ...msg.objectConfig.position }
       : null;
@@ -266,6 +282,10 @@ function createNoClipBridgeSync({
       objectId,
       objectLabel,
       discoveryRoom,
+      overlayId,
+      itemId,
+      layerId,
+      sessionHint,
       position,
       objectConfig: msg.objectConfig && typeof msg.objectConfig === 'object' ? { ...msg.objectConfig } : null,
       receivedAt: Date.now()
@@ -434,7 +454,12 @@ function createNoClipBridgeSync({
           targetPub: targetPub,
           targetAddr: request.noclipAddr,
           room: resolvedRoom,
-          autoConnect: 'true'
+          autoConnect: 'true',
+          ...(request.sessionHint ? { sessionId: request.sessionHint } : {}),
+          ...(request.objectId ? { objectUuid: request.objectId } : {}),
+          ...(request.overlayId ? { overlayId: request.overlayId } : {}),
+          ...(request.itemId ? { itemId: request.itemId } : {}),
+          ...(request.layerId ? { layerId: request.layerId } : {})
         }
       });
 
@@ -461,7 +486,7 @@ function createNoClipBridgeSync({
         if (typeof geohash === 'string') geoData.gh = geohash;
       }
       const session = upsertSession({
-        sessionId: generateSessionId(),
+        sessionId: request.sessionHint || generateSessionId(),
         objectUuid: request.objectId,
         objectLabel: request.objectLabel,
         noclipPub,
@@ -473,6 +498,9 @@ function createNoClipBridgeSync({
         bridgeNodeId: nodeId,
         discoveryRoom: resolvedRoom,
         status: 'pending-handshake',
+        overlayId: request.overlayId || '',
+        itemId: request.itemId || request.objectId || '',
+        layerId: request.layerId || '',
         position: positionData,
         geo: geoData
       });
@@ -483,6 +511,11 @@ function createNoClipBridgeSync({
           type: 'noclip-bridge-sync-accepted',
           bridgeNodeId: nodeId,
           session,
+          overlayTarget: {
+            overlayId: request.overlayId || '',
+            itemId: request.itemId || request.objectId || '',
+            layerId: request.layerId || ''
+          },
           discoveryRoom: resolvedRoom,
           objectId: request.objectId,
           objectLabel: request.objectLabel,

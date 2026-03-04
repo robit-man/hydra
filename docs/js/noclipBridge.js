@@ -4,6 +4,46 @@ const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const CONNECT_TIMEOUT_MS = 12000;
 const MESSAGE_ACK_TIMEOUT_MS = 10000;
 const EARTH_RADIUS_M = 6371000;
+const MAX_DM_PAYLOAD_CHARS = 42000;
+const MESSAGE_ID_TTL_MS = 2 * 60 * 1000;
+const CHUNK_ASSEMBLY_TTL_MS = 90 * 1000;
+const MAX_MESSAGE_CACHE = 1024;
+const MAX_CHUNK_ASSEMBLIES = 64;
+const INTEROP_CONTRACT = Object.freeze({
+  name: 'hydra_noclip_interop',
+  version: '1.0.0'
+});
+const EVENT_BY_TYPE = Object.freeze({
+  'hybrid-bridge-state': 'interop.bridge.state',
+  'hybrid-bridge-handshake': 'interop.bridge.handshake',
+  'hybrid-bridge-handshake-ack': 'interop.bridge.handshake_ack',
+  'hybrid-bridge-ack': 'interop.bridge.ack',
+  'hybrid-bridge-update': 'interop.asset.pose',
+  'hybrid-bridge-resource': 'interop.asset.resource',
+  'hybrid-bridge-command': 'interop.asset.command',
+  'hybrid-bridge-geometry': 'interop.asset.geometry',
+  'smart-object-audio-output': 'interop.asset.media',
+  'smart-object-audio': 'interop.asset.media',
+  'hybrid-chat': 'interop.chat.message',
+  'hybrid-friend-request': 'interop.social.friend_request',
+  'hybrid-friend-response': 'interop.social.friend_response'
+});
+const TYPE_BY_EVENT = Object.freeze({
+  'interop.bridge.state': 'hybrid-bridge-state',
+  'interop.bridge.handshake': 'hybrid-bridge-handshake',
+  'interop.bridge.handshake_ack': 'hybrid-bridge-handshake-ack',
+  'interop.bridge.ack': 'hybrid-bridge-ack',
+  'interop.asset.pose': 'hybrid-bridge-update',
+  'interop.asset.resource': 'hybrid-bridge-resource',
+  'interop.asset.command': 'hybrid-bridge-command',
+  'interop.asset.geometry': 'hybrid-bridge-geometry',
+  'interop.asset.media': 'smart-object-audio',
+  'interop.chat.message': 'hybrid-chat',
+  'interop.social.friend_request': 'hybrid-friend-request',
+  'interop.social.friend_response': 'hybrid-friend-response'
+});
+const GEOMETRY_TYPE_HINTS = new Set(['pointcloud', 'geometry', 'mesh', 'glb', 'gltf', 'model']);
+const MEDIA_TYPE_HINTS = new Set(['audio', 'video', 'image', 'media']);
 
 const toRadians = (deg) => (deg * Math.PI) / 180;
 
@@ -36,6 +76,88 @@ const normalizeGeo = (geo) => {
 };
 
 const ensureArray = (value) => (Array.isArray(value) ? value : []);
+const textOrEmpty = (value) => (typeof value === 'string' ? value : '');
+
+const stableJson = (value) => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch (_) {
+    try {
+      return String(value);
+    } catch (err) {
+      return '';
+    }
+  }
+};
+
+const checksumHex = (value) => {
+  const text = stableJson(value);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const chunkText = (value, maxChars = MAX_DM_PAYLOAD_CHARS) => {
+  const text = textOrEmpty(value);
+  if (!text) return [];
+  const size = Math.max(1024, Number(maxChars) || MAX_DM_PAYLOAD_CHARS);
+  if (text.length <= size) return [text];
+  const chunks = [];
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size));
+  }
+  return chunks;
+};
+
+const normalizeMessageType = (rawType, rawEvent) => {
+  const type = String(rawType || '').trim();
+  if (type) return type;
+  const event = String(rawEvent || '').trim();
+  return TYPE_BY_EVENT[event] || '';
+};
+
+const normalizeMessageEvent = (rawEvent, rawType) => {
+  const event = String(rawEvent || '').trim();
+  if (event) return event;
+  const type = String(rawType || '').trim();
+  return EVENT_BY_TYPE[type] || '';
+};
+
+const inferResourceFamily = (resource = {}, fallback = {}) => {
+  const typeHint = String(resource.type || fallback.type || '').trim().toLowerCase();
+  if (GEOMETRY_TYPE_HINTS.has(typeHint)) return 'geometry';
+  if (MEDIA_TYPE_HINTS.has(typeHint)) return 'media';
+  if (typeHint.includes('geometry') || typeHint.includes('pointcloud') || typeHint.includes('glb') || typeHint.includes('gltf')) {
+    return 'geometry';
+  }
+  if (typeHint.includes('audio') || typeHint.includes('video') || typeHint.includes('media')) {
+    return 'media';
+  }
+  const eventHint = String(resource.event || fallback.event || '').trim().toLowerCase();
+  if (eventHint.includes('asset.geometry')) return 'geometry';
+  if (eventHint.includes('asset.media')) return 'media';
+  if (resource.pointcloud || fallback.pointcloud || resource.geometry || fallback.geometry || resource.glb || fallback.glb || resource.gltf || fallback.gltf) {
+    return 'geometry';
+  }
+  if ((resource.data && Array.isArray(resource.data.vertices)) || (fallback.data && Array.isArray(fallback.data.vertices))) {
+    return 'geometry';
+  }
+  if ((resource.chunk != null && resource.total != null) || (fallback.chunk != null && fallback.total != null)) {
+    const maybeContentType = String(resource.contentType || resource.content_type || fallback.contentType || fallback.content_type || '').toLowerCase();
+    if (maybeContentType.includes('model') || maybeContentType.includes('pointcloud') || maybeContentType.includes('json')) {
+      return 'geometry';
+    }
+  }
+  if (resource.audioPacket || fallback.audioPacket || resource.videoPacket || fallback.videoPacket) {
+    return 'media';
+  }
+  return 'resource';
+};
 
 function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const NODE_STATE = new Map();
@@ -50,6 +172,66 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   let sharedDmRegistered = false;
 
   const nowMs = () => Date.now();
+
+  const newMessageId = (prefix = 'hb') =>
+    `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+  const normalizeTransportLabel = (value) => {
+    const key = String(value || '').trim().toLowerCase();
+    if (key === 'cloudflared' || key === 'cf') return 'cloudflare';
+    if (key === 'localhost' || key === 'lan') return 'local';
+    if (key === 'cloudflare' || key === 'upnp' || key === 'nats' || key === 'nkn' || key === 'local') return key;
+    return '';
+  };
+
+  const selectedTransportForPacket = (state, packet = {}) => {
+    const fromPacket = normalizeTransportLabel(packet.selected_transport || packet.selectedTransport || packet.transport || packet.mode);
+    if (fromPacket) return fromPacket;
+    const fromCfg = normalizeTransportLabel(state?.cfg?.selectedTransport || state?.cfg?.transport || state?.cfg?.mode);
+    if (fromCfg) return fromCfg;
+    const fromGlobal = normalizeTransportLabel(CFG?.transport);
+    if (fromGlobal) return fromGlobal;
+    return 'nkn';
+  };
+
+  const pruneMessageCache = (state) => {
+    if (!state?.receivedMessageIds) return;
+    const now = nowMs();
+    for (const [key, expiresAt] of state.receivedMessageIds.entries()) {
+      if (!key || expiresAt <= now) state.receivedMessageIds.delete(key);
+    }
+    while (state.receivedMessageIds.size > MAX_MESSAGE_CACHE) {
+      const oldest = state.receivedMessageIds.keys().next();
+      if (oldest.done) break;
+      state.receivedMessageIds.delete(oldest.value);
+    }
+  };
+
+  const rememberInboundMessage = (state, messageId) => {
+    const key = String(messageId || '').trim();
+    if (!state?.receivedMessageIds || !key) return true;
+    pruneMessageCache(state);
+    const now = nowMs();
+    const current = Number(state.receivedMessageIds.get(key) || 0);
+    if (current > now) return false;
+    state.receivedMessageIds.set(key, now + MESSAGE_ID_TTL_MS);
+    return true;
+  };
+
+  const pruneChunkAssemblies = (state) => {
+    if (!state?.chunkAssemblies) return;
+    const now = nowMs();
+    for (const [key, assembly] of state.chunkAssemblies.entries()) {
+      if (!key || !assembly || Number(assembly.expiresAt || 0) <= now) {
+        state.chunkAssemblies.delete(key);
+      }
+    }
+    while (state.chunkAssemblies.size > MAX_CHUNK_ASSEMBLIES) {
+      const oldest = state.chunkAssemblies.keys().next();
+      if (oldest.done) break;
+      state.chunkAssemblies.delete(oldest.value);
+    }
+  };
 
   const sanitizePubKey = (value) => {
     if (!value) return '';
@@ -125,6 +307,84 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     } catch (err) {
       return null;
     }
+  };
+
+  const normalizeIncomingMessage = (rawMsg = {}) => {
+    if (!rawMsg || typeof rawMsg !== 'object') return { type: '', event: '', message: {} };
+    const payload = rawMsg.payload && typeof rawMsg.payload === 'object' ? rawMsg.payload : null;
+    const message = payload ? { ...payload, ...rawMsg } : { ...rawMsg };
+    const type = normalizeMessageType(message.type || rawMsg.type, message.event || rawMsg.event);
+    const event = normalizeMessageEvent(message.event || rawMsg.event, type);
+    if (type && !message.type) message.type = type;
+    if (event && !message.event) message.event = event;
+    if (!message.messageId && message.message_id) message.messageId = String(message.message_id);
+    if (!message.assetId && message.asset_id) message.assetId = String(message.asset_id);
+    if (!message.contentType && message.content_type) message.contentType = String(message.content_type);
+    if (!message.selected_transport && message.selectedTransport) {
+      message.selected_transport = message.selectedTransport;
+    }
+    return {
+      type,
+      event,
+      message
+    };
+  };
+
+  const registerInboundChunk = (state, fromPub, message = {}) => {
+    if (!state?.chunkAssemblies) return { complete: false, payload: null };
+    const total = Math.max(1, Number(message.total || 1) || 1);
+    if (total <= 1) return { complete: true, payload: textOrEmpty(message.chunk_payload || message.chunkPayload || message.data_chunk || message.chunkData || '') };
+    const chunkNumberRaw = Number(message.chunk_number || message.chunkNumber || 0);
+    const chunkRaw = Number(message.chunk || message.chunk_index || 0);
+    const idx = Number.isFinite(chunkNumberRaw) && chunkNumberRaw > 0
+      ? Math.max(0, chunkNumberRaw - 1)
+      : Math.max(0, chunkRaw);
+    const chunkTextValue = textOrEmpty(
+      message.chunk_payload ||
+      message.chunkPayload ||
+      message.data_chunk ||
+      message.chunkData ||
+      message.b64_chunk ||
+      ''
+    );
+    if (!chunkTextValue) return { complete: false, payload: null };
+
+    const assetId = String(message.assetId || message.asset_id || 'asset').trim() || 'asset';
+    const transferId = String(message.transferId || message.transfer_id || '').trim();
+    const key = `${fromPub}:${assetId}:${transferId || message.checksum || total}`;
+    pruneChunkAssemblies(state);
+
+    let assembly = state.chunkAssemblies.get(key);
+    if (!assembly || Number(assembly.total || 0) !== total) {
+      assembly = {
+        key,
+        assetId,
+        total,
+        chunks: new Array(total),
+        received: new Set(),
+        createdAt: nowMs(),
+        expiresAt: nowMs() + CHUNK_ASSEMBLY_TTL_MS,
+        contentType: String(message.contentType || message.content_type || 'application/json').trim(),
+        checksum: String(message.checksum || '').trim(),
+        transferId
+      };
+      state.chunkAssemblies.set(key, assembly);
+    }
+
+    if (idx >= total) return { complete: false, payload: null };
+    if (!assembly.received.has(idx)) {
+      assembly.chunks[idx] = chunkTextValue;
+      assembly.received.add(idx);
+    }
+    assembly.expiresAt = nowMs() + CHUNK_ASSEMBLY_TTL_MS;
+
+    if (assembly.received.size < total) {
+      return { complete: false, payload: null };
+    }
+
+    const merged = assembly.chunks.join('');
+    state.chunkAssemblies.delete(key);
+    return { complete: true, payload: merged, meta: assembly };
   };
 
   const formatLastSeen = (ts) => {
@@ -264,6 +524,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         lastState: null,
         badgeLimiter: 0,
         pendingAcks: new Map(),
+        receivedMessageIds: new Map(),
+        chunkAssemblies: new Map(),
         rootEl: null
       });
       registerTarget(key, sanitizePubKey(cfg.targetPub));
@@ -344,6 +606,152 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       state: entry.state || null,
       last: entry.lastTs || 0
     }));
+  };
+
+  const textId = (value) => {
+    if (value === null || value === undefined) return '';
+    const text = String(value).trim();
+    return text || '';
+  };
+
+  const pickFirstId = (...values) => {
+    for (const value of values) {
+      const text = textId(value);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  const normalizeTargetFields = (source = {}) => {
+    const src = source && typeof source === 'object' ? source : {};
+    const objectUuid = pickFirstId(
+      src.objectUuid,
+      src.object_uuid,
+      src.objectId,
+      src.object_id
+    );
+    return {
+      sessionId: pickFirstId(src.sessionId, src.session_id),
+      objectUuid,
+      objectId: objectUuid,
+      overlayId: pickFirstId(src.overlayId, src.overlay_id),
+      itemId: pickFirstId(src.itemId, src.item_id),
+      layerId: pickFirstId(src.layerId, src.layer_id)
+    };
+  };
+
+  const mergeTargetFields = (primary = {}, fallback = {}) => {
+    const head = normalizeTargetFields(primary);
+    const tail = normalizeTargetFields(fallback);
+    const objectUuid = head.objectUuid || tail.objectUuid;
+    return {
+      sessionId: head.sessionId || tail.sessionId,
+      objectUuid,
+      objectId: objectUuid,
+      overlayId: head.overlayId || tail.overlayId,
+      itemId: head.itemId || tail.itemId || objectUuid,
+      layerId: head.layerId || tail.layerId
+    };
+  };
+
+  const sessionTargetSnapshot = (session = {}) => {
+    const normalized = normalizeTargetFields({
+      sessionId: session.sessionId,
+      objectUuid: session.objectUuid || session.objectId,
+      overlayId: session.overlayId,
+      itemId: session.itemId,
+      layerId: session.layerId
+    });
+    if (!normalized.sessionId && !normalized.objectUuid && !normalized.overlayId && !normalized.itemId && !normalized.layerId) {
+      return null;
+    }
+    return normalized;
+  };
+
+  const resolveConfiguredTarget = (state) => {
+    const cfg = state?.cfg || {};
+    const fromCfg = normalizeTargetFields({
+      sessionId: cfg.sessionId,
+      objectUuid: cfg.objectUuid || cfg.objectId,
+      overlayId: cfg.overlayId,
+      itemId: cfg.itemId,
+      layerId: cfg.layerId
+    });
+    const fromInterop = normalizeTargetFields(cfg.interopTarget || {});
+    const merged = mergeTargetFields(fromCfg, fromInterop);
+    if (!merged.sessionId && !merged.objectUuid && !merged.overlayId && !merged.itemId && !merged.layerId) return null;
+    return merged;
+  };
+
+  const resolveOutboundTargetContext = (state, payload = {}) => {
+    const explicit = mergeTargetFields(payload, payload?.target || {});
+    const configured = resolveConfiguredTarget(state) || {};
+    const merged = mergeTargetFields(explicit, configured);
+    const hasTarget = !!(merged.sessionId || merged.objectUuid || merged.overlayId || merged.itemId || merged.layerId);
+    return { ...merged, hasTarget };
+  };
+
+  const resolveInboundTargetContext = (state, msg = {}, fromPub = '') => {
+    const direct = mergeTargetFields(msg, msg.target || {});
+    const sessions = state?.sessions instanceof Map ? state.sessions : null;
+    let session = null;
+    let ambiguous = false;
+
+    if (sessions && sessions.size) {
+      if (direct.sessionId && sessions.has(direct.sessionId)) {
+        session = sessions.get(direct.sessionId) || null;
+      }
+
+      if (!session && direct.objectUuid) {
+        const matches = [];
+        sessions.forEach((candidate) => {
+          const objectId = pickFirstId(candidate?.objectUuid, candidate?.objectId, candidate?.itemId);
+          if (objectId && objectId === direct.objectUuid) matches.push(candidate);
+        });
+        if (matches.length === 1) session = matches[0];
+        else if (matches.length > 1) ambiguous = true;
+      }
+
+      if (!session && !direct.sessionId && !direct.objectUuid && fromPub) {
+        const indexSet = state?.sessionIndex?.get?.(fromPub);
+        if (indexSet && indexSet.size === 1) {
+          const onlySessionId = Array.from(indexSet.values())[0];
+          if (onlySessionId && sessions.has(onlySessionId)) {
+            session = sessions.get(onlySessionId) || null;
+          }
+        } else if (indexSet && indexSet.size > 1) {
+          ambiguous = true;
+        }
+      }
+    }
+
+    const mapped = sessionTargetSnapshot(session || {});
+    const target = mergeTargetFields(direct, mapped || {});
+    const hasTarget = !!(target.sessionId || target.objectUuid || target.overlayId || target.itemId || target.layerId);
+    return {
+      ...target,
+      ambiguous,
+      hasTarget,
+      session: session ? { ...session } : null
+    };
+  };
+
+  const applyTargetToPayload = (payload, target) => {
+    if (!payload || typeof payload !== 'object') return payload;
+    if (!target || !target.hasTarget) return payload;
+    const merged = { ...payload };
+    if (target.sessionId && !merged.sessionId) merged.sessionId = target.sessionId;
+    if (target.objectUuid && !merged.objectUuid && !merged.objectId) {
+      merged.objectUuid = target.objectUuid;
+      merged.objectId = target.objectUuid;
+    }
+    if (!merged.target || typeof merged.target !== 'object') merged.target = {};
+    if (target.overlayId && !merged.target.overlayId) merged.target.overlayId = target.overlayId;
+    if (target.itemId && !merged.target.itemId) merged.target.itemId = target.itemId;
+    if (target.layerId && !merged.target.layerId) merged.target.layerId = target.layerId;
+    if (target.sessionId && !merged.target.sessionId) merged.target.sessionId = target.sessionId;
+    if (target.objectUuid && !merged.target.objectUuid) merged.target.objectUuid = target.objectUuid;
+    return merged;
   };
 
   const selectTargets = (state, filters = {}) => {
@@ -479,16 +887,120 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
   function handleDiscoveryDm(evt) {
     if (!evt) return;
-    const msg = evt.msg || {};
-    const from = sanitizePubKey(evt.from || msg.pub || msg.from);
+    const rawMsg = evt.msg || {};
+    const from = sanitizePubKey(
+      evt.from ||
+      rawMsg.pub ||
+      rawMsg.from ||
+      rawMsg.source_address ||
+      rawMsg.sourceAddress
+    );
     if (!from) return;
     const watchers = TARGET_INDEX.get(from);
     if (!watchers || !watchers.size) return;
-    const type = msg.type;
-    if (type === 'hybrid-bridge-state') {
-      for (const nodeId of watchers) {
+
+    const normalized = normalizeIncomingMessage(rawMsg);
+    const msg = normalized.message || {};
+    const type = normalized.type || normalizeMessageType(msg.type, msg.event);
+    const event = normalized.event || normalizeMessageEvent(msg.event, type);
+    if (!type && !event) return;
+
+    if (type && !msg.type) msg.type = type;
+    if (event && !msg.event) msg.event = event;
+    const selectedTransport = selectedTransportForPacket(null, msg);
+    msg.transport = normalizeTransportLabel(msg.transport) || selectedTransport;
+    msg.selected_transport = normalizeTransportLabel(msg.selected_transport || msg.selectedTransport) || msg.transport;
+    if (!msg.selectedTransport) msg.selectedTransport = msg.selected_transport;
+
+    const watcherIds = Array.from(watchers).filter(Boolean);
+    if (!watcherIds.length) return;
+    const primaryNodeId = watcherIds[0];
+
+    const sendAck = (status = 'ok', detail = 'received') => {
+      const inReplyTo = String(msg.messageId || msg.message_id || '').trim();
+      if (!inReplyTo) return;
+      const st = ensureNodeState(primaryNodeId);
+      if (!st) return;
+      sendBridgePayload(primaryNodeId, st, {
+        type: 'hybrid-bridge-ack',
+        event: 'interop.bridge.ack',
+        inReplyTo,
+        status,
+        detail,
+        sessionId: msg.sessionId || msg.session_id || '',
+        ts: nowMs()
+      }, { targets: [from] });
+    };
+
+    const messageId = String(msg.messageId || msg.message_id || '').trim();
+    if (messageId) {
+      let duplicateCount = 0;
+      for (const nodeId of watcherIds) {
         const st = ensureNodeState(nodeId);
         if (!st) continue;
+        if (!rememberInboundMessage(st, messageId)) duplicateCount += 1;
+      }
+      if (duplicateCount === watcherIds.length) {
+        sendAck('ok', 'duplicate');
+        return;
+      }
+    }
+
+    if (type === 'hybrid-bridge-geometry' || event === 'interop.asset.geometry') {
+      const total = Math.max(1, Number(msg.total || 1) || 1);
+      const chunked = total > 1 || !!(
+        msg.chunk_payload ||
+        msg.chunkPayload ||
+        msg.data_chunk ||
+        msg.chunkData ||
+        msg.b64_chunk
+      );
+      if (chunked) {
+        const assembledByNode = new Map();
+        for (const nodeId of watcherIds) {
+          const st = ensureNodeState(nodeId);
+          if (!st) continue;
+          const result = registerInboundChunk(st, from, msg);
+          if (result.complete && typeof result.payload === 'string') {
+            assembledByNode.set(nodeId, result);
+          }
+        }
+        sendAck('ok', 'chunk-received');
+        if (!assembledByNode.size) return;
+
+        for (const nodeId of watcherIds) {
+          const result = assembledByNode.get(nodeId);
+          if (!result) continue;
+          const assembledPayload = {
+            ...msg,
+            type: 'hybrid-bridge-geometry',
+            event: 'interop.asset.geometry',
+            chunk: 1,
+            total: 1,
+            chunk_payload: '',
+            payload_data: result.payload,
+            payload_encoding: 'utf8',
+            contentType: msg.contentType || msg.content_type || result.meta?.contentType || 'application/json',
+            checksum: msg.checksum || result.meta?.checksum || checksumHex(result.payload),
+            assembled: true
+          };
+          Router.sendFrom(nodeId, 'events', {
+            nodeId,
+            peer: from,
+            type: 'hybrid-bridge-geometry',
+            payload: assembledPayload
+          });
+        }
+        return;
+      }
+    }
+
+    if (type === 'hybrid-bridge-state') {
+      for (const nodeId of watcherIds) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+        const targetCtx = resolveInboundTargetContext(st, msg, from);
+        const statePayload = applyTargetToPayload(msg, targetCtx);
         if (Array.isArray(msg.peers)) {
           msg.peers.forEach((entry) => {
             const peerPub = entry?.nknPub || entry?.pub || entry?.addr;
@@ -511,21 +1023,45 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         Router.sendFrom(nodeId, 'state', {
           nodeId,
           peer: from,
-          state: msg.state || null,
-          pose: msg.pose || null,
-          ts: msg.ts || nowMs()
+          state: statePayload.state || null,
+          pose: statePayload.pose || null,
+          selected_transport: statePayload.selected_transport || statePayload.transport || '',
+          sessionId: statePayload.sessionId || '',
+          objectUuid: statePayload.objectUuid || statePayload.objectId || '',
+          target: statePayload.target || null,
+          ts: statePayload.ts || nowMs()
         });
-        if (msg.pose) {
+        if (statePayload.pose) {
           Router.sendFrom(nodeId, 'pose', {
             nodeId,
             peer: from,
-            pose: msg.pose,
-            ts: msg.ts || nowMs()
+            pose: statePayload.pose,
+            selected_transport: statePayload.selected_transport || statePayload.transport || '',
+            sessionId: statePayload.sessionId || '',
+            objectUuid: statePayload.objectUuid || statePayload.objectId || '',
+            target: statePayload.target || null,
+            ts: statePayload.ts || nowMs()
+          });
+          Router.sendFrom(nodeId, 'overlayPose', {
+            nodeId,
+            peer: from,
+            type,
+            payload: statePayload,
+            target: targetCtx.hasTarget ? {
+              sessionId: targetCtx.sessionId || '',
+              objectUuid: targetCtx.objectUuid || '',
+              overlayId: targetCtx.overlayId || '',
+              itemId: targetCtx.itemId || '',
+              layerId: targetCtx.layerId || ''
+            } : null
           });
         }
       }
-    } else if (type === 'hybrid-friend-response' || type === 'hybrid-bridge-log') {
-      for (const nodeId of watchers) {
+      return;
+    }
+
+    if (type === 'hybrid-friend-response' || type === 'hybrid-bridge-log') {
+      for (const nodeId of watcherIds) {
         Router.sendFrom(nodeId, 'events', {
           nodeId,
           peer: from,
@@ -533,26 +1069,69 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           payload: msg
         });
       }
-    } else if (type === 'hybrid-bridge-resource' || type === 'hybrid-bridge-command') {
-      for (const nodeId of watchers) {
+      return;
+    }
+
+    if (type === 'hybrid-bridge-resource' || type === 'hybrid-bridge-command' || type === 'hybrid-bridge-geometry') {
+      for (const nodeId of watcherIds) {
+        const st = ensureNodeState(nodeId);
+        const targetCtx = resolveInboundTargetContext(st, msg, from);
+        const payload = applyTargetToPayload(msg, targetCtx);
         Router.sendFrom(nodeId, 'events', {
           nodeId,
           peer: from,
           type,
-          payload: msg
+          payload
         });
+        Router.sendFrom(nodeId, 'overlayIngress', {
+          nodeId,
+          peer: from,
+          type,
+          payload,
+          target: targetCtx.hasTarget ? {
+            sessionId: targetCtx.sessionId || '',
+            objectUuid: targetCtx.objectUuid || '',
+            overlayId: targetCtx.overlayId || '',
+            itemId: targetCtx.itemId || '',
+            layerId: targetCtx.layerId || '',
+            ambiguous: !!targetCtx.ambiguous
+          } : null
+        });
+        if (type === 'hybrid-bridge-geometry') {
+          Router.sendFrom(nodeId, 'overlayGeometry', {
+            nodeId,
+            peer: from,
+            type,
+            payload,
+            target: targetCtx.hasTarget ? {
+              sessionId: targetCtx.sessionId || '',
+              objectUuid: targetCtx.objectUuid || '',
+              overlayId: targetCtx.overlayId || '',
+              itemId: targetCtx.itemId || '',
+              layerId: targetCtx.layerId || '',
+              ambiguous: !!targetCtx.ambiguous
+            } : null
+          });
+        }
       }
-    } else if (type === 'hybrid-chat') {
-      for (const nodeId of watchers) {
+      if (msg.expectAck === true) sendAck('ok', 'applied');
+      return;
+    }
+
+    if (type === 'hybrid-chat') {
+      for (const nodeId of watcherIds) {
         Router.sendFrom(nodeId, 'chat', {
           nodeId,
           peer: from,
           message: msg
         });
       }
-    } else if (type === 'hybrid-bridge-handshake') {
+      return;
+    }
+
+    if (type === 'hybrid-bridge-handshake') {
       // Handle handshake request from NoClip peer
-      for (const nodeId of watchers) {
+      for (const nodeId of watcherIds) {
         const st = ensureNodeState(nodeId);
         if (!st) continue;
         st.lastHandshakeAt = nowMs();
@@ -587,26 +1166,96 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         }
         refreshSessionStatus(nodeId);
       }
-    } else if (type === 'smart-object-audio') {
+      return;
+    }
+
+    if (type === 'smart-object-audio' || event === 'interop.asset.media') {
+      const isAudioPacket =
+        msg.audioPacket ||
+        String(msg.kind || msg.op || '').toLowerCase() === 'audio' ||
+        String(msg.contentType || msg.content_type || '').toLowerCase().startsWith('audio/');
+      if (!isAudioPacket) {
+        for (const nodeId of watcherIds) {
+          const st = ensureNodeState(nodeId);
+          const targetCtx = resolveInboundTargetContext(st, msg, from);
+          const payload = applyTargetToPayload(msg, targetCtx);
+          Router.sendFrom(nodeId, 'events', {
+            nodeId,
+            peer: from,
+            type: 'hybrid-bridge-media',
+            payload
+          });
+          Router.sendFrom(nodeId, 'overlayMedia', {
+            nodeId,
+            peer: from,
+            type: 'hybrid-bridge-media',
+            payload,
+            target: targetCtx.hasTarget ? {
+              sessionId: targetCtx.sessionId || '',
+              objectUuid: targetCtx.objectUuid || '',
+              overlayId: targetCtx.overlayId || '',
+              itemId: targetCtx.itemId || '',
+              layerId: targetCtx.layerId || '',
+              ambiguous: !!targetCtx.ambiguous
+            } : null
+          });
+        }
+        if (msg.expectAck === true) sendAck('ok', 'media-received');
+        return;
+      }
       // Handle audio packets from NoClip Smart Objects for ASR
-      for (const nodeId of watchers) {
+      for (const nodeId of watcherIds) {
+        const st = ensureNodeState(nodeId);
+        const targetCtx = resolveInboundTargetContext(st, msg, from);
+        const payload = applyTargetToPayload(msg, targetCtx);
         Router.sendFrom(nodeId, 'audioInput', {
           nodeId,
           peer: from,
-          objectId: msg.objectId,
-          audioPacket: msg.audioPacket || msg,
-          ts: msg.ts || nowMs()
+          objectId: payload.objectId || payload.objectUuid || payload.target?.itemId || msg.objectId,
+          sessionId: payload.sessionId || '',
+          target: payload.target || null,
+          audioPacket: payload.audioPacket || payload,
+          ts: payload.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'overlayMedia', {
+          nodeId,
+          peer: from,
+          type: 'hybrid-bridge-media',
+          payload,
+          target: targetCtx.hasTarget ? {
+            sessionId: targetCtx.sessionId || '',
+            objectUuid: targetCtx.objectUuid || '',
+            overlayId: targetCtx.overlayId || '',
+            itemId: targetCtx.itemId || '',
+            layerId: targetCtx.layerId || '',
+            ambiguous: !!targetCtx.ambiguous
+          } : null
         });
       }
-    } else if (type === 'hybrid-bridge-ack') {
+      if (msg.expectAck === true) sendAck('ok', 'audio-received');
+      return;
+    }
+
+    if (type === 'hybrid-bridge-ack') {
       const messageId = msg.inReplyTo || msg.messageId;
       const status = (msg.status || 'ok').toLowerCase();
       const detail = msg.detail || msg.error || '';
-      for (const nodeId of watchers) {
+      for (const nodeId of watcherIds) {
         const st = ensureNodeState(nodeId);
         if (!st) continue;
         resolvePendingAck(st, messageId, { status, detail });
       }
+      return;
+    }
+
+    // Forward unknown events without dropping them so migration traffic stays observable.
+    for (const nodeId of watcherIds) {
+      Router.sendFrom(nodeId, 'events', {
+        nodeId,
+        peer: from,
+        type: type || event || 'interop.unknown',
+        payload: msg
+      });
     }
   }
 
@@ -708,8 +1357,57 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (!disco) return false;
     let success = false;
     for (const targetPub of targetList) {
+      const sourceAddress = String(Net?.nkn?.addr || state?.cfg?.address || state?.cfg?.targetAddr || '').trim();
+      const targetAddress = `noclip.${targetPub}`;
+      const packet = payload && typeof payload === 'object'
+        ? { ...payload }
+        : { payload };
+      const packetType = normalizeMessageType(packet.type, packet.event);
+      const packetEvent = normalizeMessageEvent(packet.event, packetType);
+      if (packetType && !packet.type) packet.type = packetType;
+      if (packetEvent && !packet.event) packet.event = packetEvent;
+      if (!packet.messageId) packet.messageId = newMessageId('hb');
+      if (!packet.ts) packet.ts = nowMs();
+      packet.interop_contract = { ...INTEROP_CONTRACT };
+      packet.interop_contract_version = INTEROP_CONTRACT.version;
+      if (!packet.source_network) packet.source_network = 'hydra';
+      if (!packet.target_network) packet.target_network = 'noclip';
+      if (!packet.source_address && sourceAddress) packet.source_address = sourceAddress;
+      if (!packet.target_address) packet.target_address = targetAddress;
+      const selectedTransport = selectedTransportForPacket(state, packet);
+      if (!packet.transport) packet.transport = selectedTransport;
+      if (!packet.selected_transport) packet.selected_transport = selectedTransport;
+      if (!packet.selectedTransport) packet.selectedTransport = packet.selected_transport;
+      if (!packet.contentType && packet.content_type) packet.contentType = packet.content_type;
+      if (!packet.content_type && packet.contentType) packet.content_type = packet.contentType;
+      if (!packet.assetId && packet.asset_id) packet.assetId = packet.asset_id;
+      if (!packet.asset_id && packet.assetId) packet.asset_id = packet.assetId;
+      if (packet.assetId || packet.asset_id) {
+        const stableAssetId = String(packet.assetId || packet.asset_id || '').trim();
+        packet.assetId = stableAssetId;
+        packet.asset_id = stableAssetId;
+      }
+      if (packet.chunk != null && packet.total != null) {
+        const chunk = Number(packet.chunk);
+        const total = Number(packet.total);
+        if (Number.isFinite(chunk)) packet.chunk = chunk;
+        if (Number.isFinite(total)) packet.total = total;
+      }
+      if (!packet.checksum) {
+        const checkSource =
+          packet.chunk_payload ||
+          packet.chunkPayload ||
+          packet.data_chunk ||
+          packet.payload_data ||
+          packet.audioPacket ||
+          packet.pose ||
+          packet.resource ||
+          packet.command ||
+          packet.payload;
+        packet.checksum = checksumHex(checkSource);
+      }
       try {
-        await disco.dm(targetPub, { ...payload, target: targetPub });
+        await disco.dm(targetPub, { ...packet, target: targetPub });
         success = true;
       } catch (err) {
         log?.(`[noclip] send failed to ${targetPub}: ${err?.message || err}`);
@@ -737,13 +1435,22 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const resolvedRoom = resolveRoomName(config.room || state?.room || '');
     const hydraAddr = Net?.nkn?.addr || Net?.nkn?.client?.addr || '';
     const hydraPub = sanitizePubKey(Net?.nkn?.client?.getPublicKey?.() || hydraAddr);
+    const selectedTransport = selectedTransportForPacket(state, options || {});
     const payload = {
       type: 'noclip-bridge-sync-request',
+      event: 'interop.bridge.sync_request',
+      messageId: newMessageId('sync'),
       hydraAddr: hydraAddr || (hydraPub ? `hydra.${hydraPub}` : ''),
       hydraPub,
       hydraGraphId: CFG?.graphId || '',
       bridgeNodeId: nodeId,
       discoveryRoom: resolvedRoom,
+      interop_contract: { ...INTEROP_CONTRACT },
+      interop_contract_version: INTEROP_CONTRACT.version,
+      source_network: 'hydra',
+      target_network: 'noclip',
+      selected_transport: selectedTransport,
+      transport: selectedTransport,
       timestamp: Date.now()
     };
     if (options.objectId) payload.objectId = options.objectId;
@@ -807,8 +1514,38 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const registerPendingAck = (state, messageId, info) => {
     if (!state || !messageId) return;
     if (!state.pendingAcks) state.pendingAcks = new Map();
+    const attempt = Math.max(1, Number(info?.attempt || 1) || 1);
+    const maxAttempts = Math.max(attempt, Number(info?.maxAttempts || 1) || 1);
     const timer = setTimeout(() => {
       state.pendingAcks.delete(messageId);
+      const canRetry = typeof info?.onTimeout === 'function' && attempt < maxAttempts;
+      if (canRetry) {
+        const nextAttempt = attempt + 1;
+        Promise.resolve()
+          .then(() => info.onTimeout(nextAttempt))
+          .then((ok) => {
+            if (!ok) {
+              if (info?.nodeId) {
+                logToNode(info.nodeId, `⚠️ Ack retry failed for ${info.type || 'message'} (${messageId.slice(0, 8)})`, 'warn');
+              }
+              return;
+            }
+            registerPendingAck(state, messageId, {
+              ...info,
+              attempt: nextAttempt,
+              maxAttempts
+            });
+            if (info?.nodeId) {
+              logToNode(info.nodeId, `↺ Retrying ${info.type || 'message'} ack (${nextAttempt}/${maxAttempts})`, 'warn');
+            }
+          })
+          .catch((err) => {
+            if (info?.nodeId) {
+              logToNode(info.nodeId, `⚠️ Ack retry error for ${info.type || 'message'}: ${err?.message || err}`, 'error');
+            }
+          });
+        return;
+      }
       if (info?.nodeId) {
         logToNode(info.nodeId, `⚠️ Awaiting ack for ${info.type || 'message'} (${messageId.slice(0, 8)})`, 'warn');
       }
@@ -833,7 +1570,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
   };
 
-  const sendTypedBridgeMessage = async (nodeId, state, message, { expectAck = true, targets = undefined } = {}) => {
+  const sendTypedBridgeMessage = async (
+    nodeId,
+    state,
+    message,
+    { expectAck = true, targets = undefined, maxAckRetries = 0 } = {}
+  ) => {
     if (!state) return { ok: false, messageId: null };
     const messageId = message.messageId || createMessageId();
     const packet = {
@@ -844,11 +1586,15 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     };
     const ok = await sendBridgePayload(nodeId, state, packet, { targets });
     if (ok && expectAck && messageId) {
+      const resendPayload = { ...packet };
       registerPendingAck(state, messageId, {
         nodeId,
         type: packet.type,
         sessionId: packet.sessionId,
-        objectUuid: packet.objectUuid
+        objectUuid: packet.objectUuid,
+        attempt: 1,
+        maxAttempts: Math.max(1, Number(maxAckRetries || 0) + 1),
+        onTimeout: async () => sendBridgePayload(nodeId, state, resendPayload, { targets })
       });
     }
     return { ok, messageId };
@@ -1020,6 +1766,10 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       ...session,
       sessionId,
       noclipPub: normalizedPub,
+      objectUuid: pickFirstId(session.objectUuid, session.objectId, session.itemId),
+      overlayId: pickFirstId(session.overlayId, session.overlay_id),
+      itemId: pickFirstId(session.itemId, session.item_id, session.objectUuid, session.objectId),
+      layerId: pickFirstId(session.layerId, session.layer_id),
       updatedAt: nowMs()
     };
     if (session.position && typeof session.position === 'object') {
@@ -1066,8 +1816,44 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (!session) return;
     const nodeId = session.hydraBridgeNodeId || session.bridgeNodeId || session.nodeId;
     if (!nodeId) return;
-    storeSessionForNode(nodeId, session);
-  }
+    const stored = storeSessionForNode(nodeId, session);
+    if (!stored) return;
+    const cfgPatch = {};
+    if (stored.sessionId) cfgPatch.sessionId = stored.sessionId;
+    if (stored.objectUuid) cfgPatch.objectUuid = stored.objectUuid;
+    if (stored.overlayId) cfgPatch.overlayId = stored.overlayId;
+    if (stored.itemId) cfgPatch.itemId = stored.itemId;
+    if (stored.layerId) cfgPatch.layerId = stored.layerId;
+    if (!Object.keys(cfgPatch).length) return;
+    cfgPatch.interopTarget = {
+      sessionId: cfgPatch.sessionId || '',
+      objectUuid: cfgPatch.objectUuid || '',
+      overlayId: cfgPatch.overlayId || '',
+      itemId: cfgPatch.itemId || '',
+      layerId: cfgPatch.layerId || ''
+    };
+    try {
+      const currentCfg = NodeStore.ensure(nodeId, 'NoClipBridge')?.config || {};
+      const changed = Object.entries(cfgPatch).some(([key, value]) => {
+        if (key === 'interopTarget') {
+          const curr = currentCfg.interopTarget || {};
+          return (
+            String(curr.sessionId || '') !== String(value.sessionId || '') ||
+            String(curr.objectUuid || '') !== String(value.objectUuid || '') ||
+            String(curr.overlayId || '') !== String(value.overlayId || '') ||
+            String(curr.itemId || '') !== String(value.itemId || '') ||
+            String(curr.layerId || '') !== String(value.layerId || '')
+          );
+        }
+        return String(currentCfg[key] || '') !== String(value || '');
+      });
+      if (changed) {
+        NodeStore.update(nodeId, { type: 'NoClipBridge', ...cfgPatch });
+      }
+    } catch (err) {
+      log?.(`[noclip-bridge] Failed to persist session target for ${nodeId}: ${err?.message || err}`);
+    }
+  };
 
   return {
     init(nodeId) {
@@ -1139,12 +1925,32 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       if (!st) return;
       const pose = normalizePose(payload);
       if (!pose) return;
+      const targetCtx = resolveOutboundTargetContext(st, payload || {});
+      const selectedTransport = selectedTransportForPacket(st, payload || {});
       const packet = {
         type: 'hybrid-bridge-update',
+        event: 'interop.asset.pose',
         nodeId,
         pose,
+        assetId: `pose-${nodeId}`,
+        contentType: 'application/json',
+        checksum: checksumHex(pose),
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         ts: nowMs()
       };
+      if (targetCtx.hasTarget) {
+        packet.sessionId = targetCtx.sessionId || '';
+        packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
+        packet.objectId = packet.objectUuid;
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: targetCtx.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
       const ok = await sendBridgePayload(nodeId, st, packet);
       if (ok) maybeBadge(st, 'Sent pose update');
     },
@@ -1159,7 +1965,11 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
       let resource = request.resource;
       if (!resource || typeof resource !== 'object') {
-        resource = { type: 'object', value: request };
+        if (request && typeof request === 'object') {
+          resource = { ...request };
+        } else {
+          resource = { type: 'object', value: request };
+        }
       }
 
       if (!resource.id) {
@@ -1180,36 +1990,180 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         targets = selectTargets(st, filters);
       }
 
+      const selectedTransport = selectedTransportForPacket(st, request || {});
+      const targetCtx = resolveOutboundTargetContext(st, request || {});
+      const assetId = String(
+        request.assetId ||
+        request.asset_id ||
+        resource.assetId ||
+        resource.asset_id ||
+        resource.id ||
+        `asset-${Date.now().toString(36)}`
+      ).trim();
+      const family = inferResourceFamily(resource, request);
+      const outboundType = family === 'geometry'
+        ? 'hybrid-bridge-geometry'
+        : (family === 'media' ? 'smart-object-audio-output' : 'hybrid-bridge-resource');
+      const contentType = String(
+        request.contentType ||
+        request.content_type ||
+        resource.contentType ||
+        resource.content_type ||
+        (family === 'media' ? (resource.mime || 'application/octet-stream') : 'application/json')
+      ).trim() || 'application/json';
+      const resourcePayload = {
+        ...resource,
+        assetId,
+        asset_id: assetId,
+        contentType,
+        content_type: contentType,
+        selected_transport: selectedTransport,
+        transport: selectedTransport
+      };
+      if (targetCtx.hasTarget) {
+        resourcePayload.sessionId = targetCtx.sessionId || '';
+        resourcePayload.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
+        resourcePayload.objectId = resourcePayload.objectUuid;
+        resourcePayload.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || resourcePayload.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: targetCtx.sessionId || '',
+          objectUuid: resourcePayload.objectUuid || ''
+        };
+      }
+
+      const serializedResource = stableJson(resourcePayload);
+      const checksum = checksumHex(serializedResource);
+      const shouldChunk = family === 'geometry' && serializedResource.length > MAX_DM_PAYLOAD_CHARS;
+
+      if (shouldChunk) {
+        const transferId = newMessageId('asset');
+        const chunks = chunkText(serializedResource, MAX_DM_PAYLOAD_CHARS);
+        let sent = 0;
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkPacket = {
+            type: 'hybrid-bridge-geometry',
+            event: 'interop.asset.geometry',
+            nodeId,
+            assetId,
+            asset_id: assetId,
+            transferId,
+            transfer_id: transferId,
+            chunk: i,
+            chunk_number: i + 1,
+            total: chunks.length,
+            chunk_payload: chunks[i],
+            payload_encoding: 'utf8-json',
+            contentType,
+            content_type: contentType,
+            checksum,
+            selected_transport: selectedTransport,
+            transport: selectedTransport,
+            expectAck: true
+          };
+          const result = await sendTypedBridgeMessage(nodeId, st, chunkPacket, {
+            expectAck: true,
+            targets,
+            maxAckRetries: 2
+          });
+          if (result.ok) sent += 1;
+        }
+        const ok = sent === chunks.length;
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: targets,
+          type: 'resource-dispatched',
+          payload: {
+            resource: resourcePayload,
+            filters,
+            success: ok,
+            targets,
+            chunked: true,
+            chunks: chunks.length,
+            assetId,
+            checksum,
+            contentType,
+            selected_transport: selectedTransport
+          }
+        });
+        if (ok) maybeBadge(st, `Geometry sent (${chunks.length} chunks)`);
+        else maybeBadge(st, 'Geometry chunk send failed', false);
+        logToNode(nodeId, `📤 Geometry out: ${assetId} • ${chunks.length} chunks`, ok ? 'success' : 'error');
+        return;
+      }
+
       const packet = {
-        type: 'hybrid-bridge-resource',
+        type: outboundType,
+        event: normalizeMessageEvent('', outboundType),
+        messageId: String(
+          request.messageId ||
+          request.message_id ||
+          resourcePayload.messageId ||
+          resourcePayload.message_id ||
+          ''
+        ).trim() || undefined,
         nodeId,
         issuer: {
           graphId: st.graphId || CFG?.graphId || '',
           nodeId,
           address: st.cfg?.address || st.cfg?.targetAddr || ''
         },
-        resource,
+        resource: resourcePayload,
+        kind: resourcePayload.kind || family,
+        data: resourcePayload.data || null,
+        chunk: resourcePayload.chunk ?? request.chunk,
+        chunk_number: resourcePayload.chunk_number ?? resourcePayload.chunkNumber ?? request.chunk_number ?? request.chunkNumber,
+        total: resourcePayload.total ?? request.total,
+        chunk_payload: resourcePayload.chunk_payload || resourcePayload.chunkPayload || request.chunk_payload || request.chunkPayload || '',
+        payload_encoding: resourcePayload.payload_encoding || request.payload_encoding || '',
+        assetId,
+        asset_id: assetId,
+        contentType,
+        content_type: contentType,
+        checksum,
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         filters: filters || null,
         ts: nowMs()
       };
+      if (targetCtx.hasTarget) {
+        packet.sessionId = packet.sessionId || targetCtx.sessionId || '';
+        packet.objectUuid = packet.objectUuid || targetCtx.objectUuid || targetCtx.itemId || '';
+        packet.objectId = packet.objectUuid || packet.objectId || '';
+        packet.target = {
+          ...(packet.target && typeof packet.target === 'object' ? packet.target : {}),
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: targetCtx.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
 
-      const ok = await sendBridgePayload(nodeId, st, packet, { targets });
+      const ok = outboundType === 'hybrid-bridge-geometry'
+        ? (await sendTypedBridgeMessage(nodeId, st, packet, { expectAck: true, targets, maxAckRetries: 1 })).ok
+        : await sendBridgePayload(nodeId, st, packet, { targets });
       Router.sendFrom(nodeId, 'events', {
         nodeId,
         peer: targets,
         type: 'resource-dispatched',
         payload: {
-          resource,
+          resource: resourcePayload,
           filters,
           success: ok,
-          targets
+          targets,
+          assetId,
+          checksum,
+          contentType,
+          selected_transport: selectedTransport
         }
       });
       if (ok) maybeBadge(st, `Resource sent to ${targets?.length || 1} peer${targets?.length === 1 ? '' : 's'}`);
 
       // Log resource data
-      const resType = resource.type || 'unknown';
-      const resLabel = resource.label || 'unlabeled';
+      const resType = resourcePayload.type || 'unknown';
+      const resLabel = resourcePayload.label || assetId || 'unlabeled';
       logToNode(nodeId, `📤 Resource out: ${resType} "${resLabel}" → ${targets?.length || 0} peer(s)`, 'success');
     },
 
@@ -1217,28 +2171,82 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const st = ensureNodeState(nodeId);
       if (!st) return;
       if (!payload || typeof payload !== 'object') return;
+      const targetCtx = resolveOutboundTargetContext(st, payload || {});
+      const selectedTransport = selectedTransportForPacket(st, payload || {});
+      const contentType = String(payload.contentType || payload.content_type || 'application/json').trim() || 'application/json';
       const packet = {
         type: 'hybrid-bridge-command',
+        event: 'interop.asset.command',
         nodeId,
         command: payload,
+        contentType,
+        content_type: contentType,
+        checksum: checksumHex(payload),
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         ts: nowMs()
       };
-      await sendBridgePayload(nodeId, st, packet);
+      if (targetCtx.hasTarget) {
+        packet.sessionId = targetCtx.sessionId || '';
+        packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
+        packet.objectId = packet.objectUuid;
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: targetCtx.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
+      await sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: payload.expectAck !== false,
+        targets: payload.targets,
+        maxAckRetries: 1
+      });
     },
 
     async onAudioOutput(nodeId, payload) {
       // Handle audio packets from TTS node to send to NoClip Smart Objects
       const st = ensureNodeState(nodeId);
       if (!st || !payload) return;
+      const targetCtx = resolveOutboundTargetContext(st, payload || {});
+      const selectedTransport = selectedTransportForPacket(st, payload || {});
+      const contentType = String(payload.mime || payload.contentType || payload.content_type || 'audio/pcm').trim() || 'audio/pcm';
+      const assetId = String(payload.assetId || payload.asset_id || `audio-${Date.now().toString(36)}`).trim();
 
       const packet = {
         type: 'smart-object-audio-output',
+        event: 'interop.asset.media',
         nodeId,
         audioPacket: payload,
+        kind: 'audio',
+        assetId,
+        asset_id: assetId,
+        contentType,
+        content_type: contentType,
+        checksum: checksumHex(payload.data || payload.b64 || payload),
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         ts: nowMs()
       };
+      if (targetCtx.hasTarget) {
+        packet.sessionId = targetCtx.sessionId || '';
+        packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
+        packet.objectId = packet.objectUuid;
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: targetCtx.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
 
-      await sendBridgePayload(nodeId, st, packet);
+      await sendTypedBridgeMessage(nodeId, st, packet, {
+        expectAck: payload.expectAck !== false,
+        targets: payload.targets,
+        maxAckRetries: 1
+      });
 
       // Log audio data
       const dataSize = payload.data?.length || 0;
@@ -1259,10 +2267,14 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     requestFriend(nodeId, note) {
       const st = ensureNodeState(nodeId);
       if (!st) return;
+      const selectedTransport = selectedTransportForPacket(st, {});
       const packet = {
         type: 'hybrid-friend-request',
+        event: 'interop.social.friend_request',
         nodeId,
         note: typeof note === 'string' ? note.slice(0, 240) : '',
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         ts: nowMs()
       };
       sendBridgePayload(nodeId, st, packet);
@@ -1280,6 +2292,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         st.pendingAcks.forEach((entry) => clearTimeout(entry.timer));
         st.pendingAcks.clear();
       }
+      st?.receivedMessageIds?.clear?.();
+      st?.chunkAssemblies?.clear?.();
       NODE_STATE.delete(key);
     },
 
@@ -1294,74 +2308,148 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     async sendSmartObjectState(nodeId, data = {}) {
       const st = ensureNodeState(nodeId);
       if (!st) return { ok: false, messageId: null };
+      const targetCtx = resolveOutboundTargetContext(st, data || {});
+      const selectedTransport = selectedTransportForPacket(st, data || {});
       const packet = {
         type: 'smart-object-state',
-        sessionId: data.sessionId || data.session?.sessionId || '',
-        objectUuid: data.objectUuid || data.objectId || '',
-        objectId: data.objectUuid || data.objectId || '',
+        event: 'interop.bridge.state',
+        sessionId: data.sessionId || data.session?.sessionId || targetCtx.sessionId || '',
+        objectUuid: data.objectUuid || data.objectId || targetCtx.objectUuid || targetCtx.itemId || '',
+        objectId: data.objectUuid || data.objectId || targetCtx.objectUuid || targetCtx.itemId || '',
         position: data.position || null,
         state: data.state || null,
         capabilities: data.capabilities || null,
-        metadata: data.metadata || null
+        metadata: data.metadata || null,
+        contentType: 'application/json',
+        content_type: 'application/json',
+        checksum: checksumHex(data.state || data.position || data),
+        selected_transport: selectedTransport,
+        transport: selectedTransport
       };
+      if (targetCtx.hasTarget) {
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: packet.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
       return sendTypedBridgeMessage(nodeId, st, packet, {
         expectAck: data.expectAck !== false,
-        targets: data.targets
+        targets: data.targets,
+        maxAckRetries: 1
       });
     },
 
     async sendDecisionResult(nodeId, data = {}) {
       const st = ensureNodeState(nodeId);
       if (!st) return { ok: false, messageId: null };
+      const targetCtx = resolveOutboundTargetContext(st, data || {});
+      const selectedTransport = selectedTransportForPacket(st, data || {});
       const packet = {
         type: 'decision-result',
-        sessionId: data.sessionId || data.session?.sessionId || '',
-        objectUuid: data.objectUuid || data.objectId || '',
-        objectId: data.objectUuid || data.objectId || '',
+        event: 'interop.asset.command',
+        sessionId: data.sessionId || data.session?.sessionId || targetCtx.sessionId || '',
+        objectUuid: data.objectUuid || data.objectId || targetCtx.objectUuid || targetCtx.itemId || '',
+        objectId: data.objectUuid || data.objectId || targetCtx.objectUuid || targetCtx.itemId || '',
         result: data.result || null,
         decision: data.decision || null,
         summary: data.summary || null,
-        metadata: data.metadata || null
+        metadata: data.metadata || null,
+        contentType: 'application/json',
+        content_type: 'application/json',
+        checksum: checksumHex(data.result || data.decision || data.summary || data),
+        selected_transport: selectedTransport,
+        transport: selectedTransport
       };
+      if (targetCtx.hasTarget) {
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: packet.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
       return sendTypedBridgeMessage(nodeId, st, packet, {
         expectAck: data.expectAck !== false,
-        targets: data.targets
+        targets: data.targets,
+        maxAckRetries: 1
       });
     },
 
     async sendGraphQuery(nodeId, data = {}) {
       const st = ensureNodeState(nodeId);
       if (!st) return { ok: false, messageId: null };
+      const targetCtx = resolveOutboundTargetContext(st, data || {});
+      const selectedTransport = selectedTransportForPacket(st, data || {});
       const packet = {
         type: 'graph-query',
-        sessionId: data.sessionId || '',
-        objectUuid: data.objectUuid || '',
+        event: 'interop.asset.command',
+        sessionId: data.sessionId || targetCtx.sessionId || '',
+        objectUuid: data.objectUuid || targetCtx.objectUuid || targetCtx.itemId || '',
         queryId: data.queryId || data.query?.id || null,
         query: data.query || null,
         variables: data.variables || null,
-        metadata: data.metadata || null
+        metadata: data.metadata || null,
+        contentType: 'application/json',
+        content_type: 'application/json',
+        checksum: checksumHex(data.query || data.variables || data),
+        selected_transport: selectedTransport,
+        transport: selectedTransport
       };
+      packet.objectId = packet.objectUuid || '';
+      if (targetCtx.hasTarget) {
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: packet.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
       return sendTypedBridgeMessage(nodeId, st, packet, {
         expectAck: data.expectAck !== false,
-        targets: data.targets
+        targets: data.targets,
+        maxAckRetries: 1
       });
     },
 
     async sendGraphResponse(nodeId, data = {}) {
       const st = ensureNodeState(nodeId);
       if (!st) return { ok: false, messageId: null };
+      const targetCtx = resolveOutboundTargetContext(st, data || {});
+      const selectedTransport = selectedTransportForPacket(st, data || {});
       const packet = {
         type: 'graph-response',
-        sessionId: data.sessionId || '',
-        objectUuid: data.objectUuid || '',
+        event: 'interop.asset.resource',
+        sessionId: data.sessionId || targetCtx.sessionId || '',
+        objectUuid: data.objectUuid || targetCtx.objectUuid || targetCtx.itemId || '',
         queryId: data.queryId || '',
         result: data.result || null,
         errors: data.errors || null,
-        metadata: data.metadata || null
+        metadata: data.metadata || null,
+        contentType: 'application/json',
+        content_type: 'application/json',
+        checksum: checksumHex(data.result || data.errors || data),
+        selected_transport: selectedTransport,
+        transport: selectedTransport
       };
+      packet.objectId = packet.objectUuid || '';
+      if (targetCtx.hasTarget) {
+        packet.target = {
+          overlayId: targetCtx.overlayId || '',
+          itemId: targetCtx.itemId || packet.objectUuid || '',
+          layerId: targetCtx.layerId || '',
+          sessionId: packet.sessionId || '',
+          objectUuid: packet.objectUuid || ''
+        };
+      }
       return sendTypedBridgeMessage(nodeId, st, packet, {
         expectAck: data.expectAck === true,
-        targets: data.targets
+        targets: data.targets,
+        maxAckRetries: 1
       });
     },
 

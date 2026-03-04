@@ -1,4 +1,4 @@
-import { qs } from './utils.js';
+import { qs, LS } from './utils.js';
 
 function createWorkspaceSync({
   Graph,
@@ -9,6 +9,8 @@ function createWorkspaceSync({
   log,
   updateTransportButton
 }) {
+  const DISCOVERY_ROOM_KEY = 'hydra.discovery.room';
+  const DISCOVERY_ROOM_DEFAULT = 'nexus';
   const state = {
     shareTarget: null,
     incomingOffer: null,
@@ -140,9 +142,82 @@ function createWorkspaceSync({
     return null;
   }
 
+  function sanitizeRoom(value) {
+    const text = String(value || '').trim().replace(/[^a-zA-Z0-9_.-]+/g, '_');
+    return text || '';
+  }
+
+  function saveDiscoveryRoom(room) {
+    const normalized = sanitizeRoom(room || DISCOVERY_ROOM_DEFAULT) || DISCOVERY_ROOM_DEFAULT;
+    try {
+      LS.set(DISCOVERY_ROOM_KEY, normalized);
+    } catch (_) {
+      // ignore storage issues
+    }
+    return normalized;
+  }
+
+  function getDiscoveryRoom() {
+    const stored = sanitizeRoom(LS.get(DISCOVERY_ROOM_KEY, DISCOVERY_ROOM_DEFAULT) || DISCOVERY_ROOM_DEFAULT);
+    return stored || DISCOVERY_ROOM_DEFAULT;
+  }
+
+  function readParam(url, keys = []) {
+    for (const key of keys) {
+      const raw = url.searchParams.get(key);
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (trimmed) return trimmed;
+    }
+    return '';
+  }
+
+  function consumeParamSet(url, keys = []) {
+    keys.forEach((key) => url.searchParams.delete(key));
+  }
+
   function consumeSearchParam() {
     try {
       const url = new URL(window.location.href);
+      const requestedRoom = sanitizeRoom(readParam(url, ['room', 'discoveryRoom']));
+      if (requestedRoom) saveDiscoveryRoom(requestedRoom);
+
+      const peerValue = readParam(url, ['peer', 'address', 'nkn']);
+      if (peerValue) {
+        const text = peerValue.trim();
+        const lower = text.toLowerCase();
+        let typeHint = '';
+        let candidate = text;
+        if (lower.startsWith('hydra.')) {
+          typeHint = 'hydra';
+          candidate = text.slice('hydra.'.length);
+        } else if (lower.startsWith('noclip.')) {
+          typeHint = 'noclip';
+          candidate = text.slice('noclip.'.length);
+        }
+        const sanitizedPeer = sanitizeHex(candidate);
+        if (sanitizedPeer) {
+          consumeParamSet(url, ['peer', 'address', 'nkn', 'hydra', 'noclip', 'sync', 'room', 'discoveryRoom']);
+          const newSearch = url.searchParams.toString();
+          const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
+          try {
+            window.history.replaceState({}, document.title, newUrl);
+          } catch (_) {
+            // ignore history failures
+          }
+          const peerType = typeHint || 'hydra';
+          state.lastShareParam = sanitizedPeer;
+          state.lastShareType = peerType;
+          state.lastShareContext = {
+            room: requestedRoom || getDiscoveryRoom()
+          };
+          return {
+            type: peerType,
+            hex: sanitizedPeer,
+            context: { room: requestedRoom || getDiscoveryRoom() }
+          };
+        }
+      }
 
       // Check for ?hydra= param (new format: hydra.<hex>)
       let hydraValue = url.searchParams.get('hydra');
@@ -155,7 +230,7 @@ function createWorkspaceSync({
         if (sanitized) {
           state.lastShareParam = sanitized;
           state.lastShareType = 'hydra';
-          url.searchParams.delete('hydra');
+          consumeParamSet(url, ['hydra', 'room', 'discoveryRoom']);
           const newSearch = url.searchParams.toString();
           const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
           try {
@@ -163,7 +238,11 @@ function createWorkspaceSync({
           } catch (err) {
             // ignore history failures
           }
-          return { type: 'hydra', hex: sanitized };
+          return {
+            type: 'hydra',
+            hex: sanitized,
+            context: { room: requestedRoom || getDiscoveryRoom() }
+          };
         }
       }
 
@@ -176,9 +255,23 @@ function createWorkspaceSync({
         const sanitized = sanitizeHex(hex);
 
         if (sanitized) {
+          const objectUuid = readParam(url, ['object', 'objectId', 'objectUuid']);
+          const sessionId = readParam(url, ['session', 'sessionId']);
+          const overlayId = readParam(url, ['overlay', 'overlayId']);
+          const itemId = readParam(url, ['item', 'itemId']);
+          const layerId = readParam(url, ['layer', 'layerId']);
+          const room = readParam(url, ['room', 'discoveryRoom']);
           state.lastShareParam = sanitized;
           state.lastShareType = 'noclip';
-          url.searchParams.delete('noclip');
+          state.lastShareContext = {
+            objectUuid: objectUuid || '',
+            sessionId: sessionId || '',
+            overlayId: overlayId || '',
+            itemId: itemId || '',
+            layerId: layerId || '',
+            room: room || ''
+          };
+          consumeParamSet(url, ['noclip', 'object', 'objectId', 'objectUuid', 'session', 'sessionId', 'overlay', 'overlayId', 'item', 'itemId', 'layer', 'layerId', 'room', 'discoveryRoom']);
           const newSearch = url.searchParams.toString();
           const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
           try {
@@ -186,7 +279,18 @@ function createWorkspaceSync({
           } catch (err) {
             // ignore history failures
           }
-          return { type: 'noclip', hex: sanitized };
+          return {
+            type: 'noclip',
+            hex: sanitized,
+            context: {
+              objectUuid: objectUuid || '',
+              sessionId: sessionId || '',
+              overlayId: overlayId || '',
+              itemId: itemId || '',
+              layerId: layerId || '',
+              room: room || ''
+            }
+          };
         }
       }
 
@@ -200,7 +304,7 @@ function createWorkspaceSync({
       if (hex) {
         state.lastShareParam = hex;
         state.lastShareType = 'hydra'; // Legacy params assumed to be hydra
-        url.searchParams.delete('sync');
+        consumeParamSet(url, ['sync', 'room', 'discoveryRoom']);
         const newSearch = url.searchParams.toString();
         const newUrl = url.pathname + (newSearch ? `?${newSearch}` : '') + (url.hash || '');
         try {
@@ -208,7 +312,11 @@ function createWorkspaceSync({
         } catch (err) {
           // ignore history failures
         }
-        return { type: 'hydra', hex };
+        return {
+          type: 'hydra',
+          hex,
+          context: { room: requestedRoom || getDiscoveryRoom() }
+        };
       }
       return null;
     } catch (err) {
@@ -350,9 +458,15 @@ function createWorkspaceSync({
     const origin = window.location.origin;
     const path = window.location.pathname;
     const base = `${origin}${path}`;
-    const addressParam = stripGraphPrefix(addressFull);
-    // Use new ?hydra= param with hydra. prefix
-    const url = `${base}?hydra=hydra.${addressParam}`;
+    const strippedAddress = stripGraphPrefix(addressFull);
+    const addressParam = strippedAddress.replace(/^(hydra|noclip)\./i, '');
+    const room = getDiscoveryRoom();
+    const params = new URLSearchParams();
+    params.set('peer', `hydra.${addressParam}`);
+    // Keep legacy param for backward compatibility with older scanners.
+    params.set('hydra', `hydra.${addressParam}`);
+    if (room) params.set('room', room);
+    const url = `${base}?${params.toString()}`;
     if (els.qrLink) els.qrLink.textContent = url;
 
     if (els.qrCanvas) {
@@ -569,7 +683,7 @@ function createWorkspaceSync({
     });
   }
 
-  function handleNoclipParam(noclipHex) {
+  function handleNoclipParam(noclipHex, context = {}) {
     try {
       // Generate a unique node ID for this NoClip bridge
       const nodeId = `noclip-bridge-${noclipHex.slice(0, 8)}`;
@@ -583,7 +697,31 @@ function createWorkspaceSync({
       // Configure the bridge to connect to the NoClip peer
       record.config.targetPub = noclipHex;
       record.config.autoConnect = true;
-      record.config.room = 'auto'; // Use auto room derivation by default
+      record.config.room = typeof context.room === 'string' && context.room.trim()
+        ? context.room.trim()
+        : 'auto'; // Use auto room derivation by default
+      if (typeof context.sessionId === 'string' && context.sessionId.trim()) {
+        record.config.sessionId = context.sessionId.trim();
+      }
+      if (typeof context.objectUuid === 'string' && context.objectUuid.trim()) {
+        record.config.objectUuid = context.objectUuid.trim();
+      }
+      if (typeof context.overlayId === 'string' && context.overlayId.trim()) {
+        record.config.overlayId = context.overlayId.trim();
+      }
+      if (typeof context.itemId === 'string' && context.itemId.trim()) {
+        record.config.itemId = context.itemId.trim();
+      }
+      if (typeof context.layerId === 'string' && context.layerId.trim()) {
+        record.config.layerId = context.layerId.trim();
+      }
+      record.config.interopTarget = {
+        sessionId: record.config.sessionId || '',
+        objectUuid: record.config.objectUuid || '',
+        overlayId: record.config.overlayId || '',
+        itemId: record.config.itemId || '',
+        layerId: record.config.layerId || ''
+      };
 
       // Save the configuration
       NodeStore.save();
@@ -602,7 +740,14 @@ function createWorkspaceSync({
       }
 
       // Show toast notification
-      setBadge(`NoClip bridge node created: ${nodeId}`, true);
+      const targetBits = [
+        record.config.objectUuid ? `object ${record.config.objectUuid}` : '',
+        record.config.sessionId ? `session ${record.config.sessionId}` : '',
+        record.config.overlayId ? `overlay ${record.config.overlayId}` : '',
+        record.config.itemId ? `item ${record.config.itemId}` : ''
+      ].filter(Boolean);
+      const suffix = targetBits.length ? ` (${targetBits.join(' • ')})` : '';
+      setBadge(`NoClip bridge node created: ${nodeId}${suffix}`, true);
 
     } catch (err) {
       log(`[sync] Failed to handle NoClip param: ${err?.message || err}`);
@@ -627,7 +772,7 @@ function createWorkspaceSync({
         // Handle NoClip bridge auto-injection
         ensureNknTransport();
         setBadge(`NoClip peer detected: noclip.${hex.slice(0, 8)}...`);
-        handleNoclipParam(hex);
+        handleNoclipParam(hex, searchParam.context || {});
       }
     }
 

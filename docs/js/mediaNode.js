@@ -19,6 +19,8 @@ const MEDIA_ROUTE_RETRY_LIMIT = 2;
 const MEDIA_PULL_INTERVAL_MIN_MS = 120;
 const MEDIA_PULL_INTERVAL_MAX_MS = 4_000;
 const MEDIA_STALE_TRANSPORT_TTL_MS = 90_000;
+const MEDIA_PACKET_CHUNK = 1;
+const MEDIA_PACKET_TOTAL = 1;
 
 const HANDSHAKE_DEFAULT = {
   status: 'idle',
@@ -152,6 +154,29 @@ const base64ToArrayBuffer = (b64) => {
   for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 };
+
+const checksumHex = (value) => {
+  const text = typeof value === 'string' ? value : (() => {
+    try { return JSON.stringify(value); } catch (_) { return String(value || ''); }
+  })();
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const normalizeTransportLabelStrict = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'cloudflared' || key === 'cf') return 'cloudflare';
+  if (key === 'localhost' || key === 'lan') return 'local';
+  if (key === 'cloudflare' || key === 'upnp' || key === 'nats' || key === 'nkn' || key === 'local') return key;
+  return 'nkn';
+};
+
+const makeMediaMessageId = (kind = 'media') =>
+  `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRelayState = () => {} }) {
   const state = new Map();
@@ -2205,15 +2230,29 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
       const mime = dataUrl.slice(5, dataUrl.indexOf(';')) || 'image/webp';
       const ts = Date.now();
       const seq = (st.frameSeq = (st.frameSeq || 0) + 1);
+      const selectedTransport = normalizeTransportLabelStrict(CFG.transport || 'nkn');
+      const messageId = makeMediaMessageId('video');
+      const assetId = `video-${id}-${seq}`;
       const packet = {
         type: 'nkndm.media',
+        event: 'interop.asset.media',
         op: 'video',
         kind: 'video',
+        messageId,
+        assetId,
+        asset_id: assetId,
+        chunk: MEDIA_PACKET_CHUNK,
+        total: MEDIA_PACKET_TOTAL,
         mime,
+        contentType: mime,
+        content_type: mime,
+        checksum: checksumHex(b64),
         b64,
         image: b64,
         width: st.canvas.width,
         height: st.canvas.height,
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
         ts,
         seq,
         nodeId: id,
@@ -2268,17 +2307,32 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
         const seq = (st.audioSeq = (st.audioSeq || 0) + 1);
         const sr = Number(cfg.audioSampleRate) || 48000;
         const channels = Number(cfg.audioChannels) || 1;
+        const selectedTransport = normalizeTransportLabelStrict(CFG.transport || 'nkn');
+        const messageId = makeMediaMessageId('audio');
+        const assetId = `audio-${id}-${seq}`;
+        const mimeType = event.data.type || targetMime;
         const packet = {
           type: 'nkndm.media',
+          event: 'interop.asset.media',
           op: 'audio',
           kind: 'audio',
-          mime: event.data.type || targetMime,
+          messageId,
+          assetId,
+          asset_id: assetId,
+          chunk: MEDIA_PACKET_CHUNK,
+          total: MEDIA_PACKET_TOTAL,
+          mime: mimeType,
+          contentType: mimeType,
+          content_type: mimeType,
+          checksum: checksumHex(b64),
           b64,
           ts,
           route: 'media.audio',
           format: usePcm ? 'pcm16' : 'opus',
           sr,
           channels,
+          selected_transport: selectedTransport,
+          transport: selectedTransport,
           nodeId: id,
           seq
         };
@@ -2356,13 +2410,17 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
     }
 
     if (data && typeof data === 'object' && data.payload && typeof data.payload === 'object') {
-      data = data.payload;
+      data = { ...data.payload, ...data };
     }
 
     if (!data || typeof data !== 'object') return;
 
     if (data.type === 'nkndm.media' && data.payload && typeof data.payload === 'object') {
       data = { ...data, ...data.payload };
+    }
+    if (!data.kind && data.event === 'interop.asset.media') {
+      const mediaKind = String(data.op || data.mediaKind || data.media_kind || '').toLowerCase();
+      if (mediaKind === 'audio' || mediaKind === 'video') data.kind = mediaKind;
     }
     if (!data.kind && typeof data.op === 'string') data.kind = data.op;
     if (!data.route && typeof payload?.route === 'string') data.route = payload.route;

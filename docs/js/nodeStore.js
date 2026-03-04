@@ -225,7 +225,19 @@ const NodeStore = {
       targetPub: '',
       targetAddr: '',
       room: 'auto',
-      autoConnect: true
+      autoConnect: true,
+      sessionId: '',
+      objectUuid: '',
+      overlayId: '',
+      itemId: '',
+      layerId: '',
+      interopTarget: {
+        sessionId: '',
+        objectUuid: '',
+        overlayId: '',
+        itemId: '',
+        layerId: ''
+      }
     },
     MCP: {
       base: 'http://127.0.0.1:9003',

@@ -43,6 +43,34 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
     return chunks.join('');
   }
 
+  function stableJson(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value || '');
+    }
+  }
+
+  function checksumHex(value) {
+    const text = stableJson(value);
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function selectedTransportLabel() {
+    const key = String(CFG?.transport || 'nkn').trim().toLowerCase();
+    if (key === 'cloudflared' || key === 'cf') return 'cloudflare';
+    if (key === 'localhost' || key === 'lan') return 'local';
+    if (key === 'cloudflare' || key === 'upnp' || key === 'nats' || key === 'nkn' || key === 'local') return key;
+    return 'nkn';
+  }
+
   function ensureState(nodeId) {
     const key = String(nodeId || '').trim();
     if (!key) return null;
@@ -582,7 +610,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
     });
   }
 
-  async function exportGLB(nodeId) {
+  async function exportGLB(nodeId, { emitChunks = true, download = true } = {}) {
     const state = ensureState(nodeId);
     if (!state || !state.currentPointcloud) return null;
 
@@ -592,13 +620,46 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
     try {
       const fullUrl = `${baseUrl}/api/export/glb`;
       const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
-      const url = URL.createObjectURL(blob);
+      if (download) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'pointcloud.glb';
+        a.click();
+        URL.revokeObjectURL(url);
+      }
 
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'pointcloud.glb';
-      a.click();
-      URL.revokeObjectURL(url);
+      if (emitChunks) {
+        const dataUrl = await blobToDataUrl(blob);
+        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        const chunks = chunkBase64(b64, Math.max(32 * 1024, Math.min(256 * 1024, Math.floor(MAX_CHUNK_SIZE / 2))));
+        const assetId = `glb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const selectedTransport = selectedTransportLabel();
+        const fullChecksum = checksumHex(b64);
+        for (let i = 0; i < chunks.length; i++) {
+          Router.sendFrom(nodeId, 'pointcloud', {
+            type: 'hybrid-bridge-geometry',
+            event: 'interop.asset.geometry',
+            kind: 'glb',
+            messageId: `glbmsg-${assetId}-${i}`,
+            assetId,
+            asset_id: assetId,
+            chunk: i,
+            chunk_number: i + 1,
+            total: chunks.length,
+            chunk_payload: chunks[i],
+            payload_encoding: 'base64',
+            checksum: fullChecksum,
+            chunk_checksum: checksumHex(chunks[i]),
+            contentType: 'model/gltf-binary',
+            content_type: 'model/gltf-binary',
+            selected_transport: selectedTransport,
+            transport: selectedTransport,
+            ts: Date.now(),
+            filename: 'pointcloud.glb'
+          });
+        }
+      }
 
       return blob;
     } catch (err) {
@@ -654,12 +715,33 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
   function chunkPointcloudData(pointcloud, maxChunkSize = MAX_CHUNK_SIZE) {
     if (!pointcloud) return [];
 
+    const assetId = `pc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const selectedTransport = selectedTransportLabel();
     const serialized = JSON.stringify(pointcloud);
+    const fullChecksum = checksumHex(serialized);
     if (serialized.length <= maxChunkSize) {
-      return [{ chunk: 0, total: 1, data: pointcloud }];
+      return [{
+        type: 'hybrid-bridge-geometry',
+        event: 'interop.asset.geometry',
+        kind: 'pointcloud',
+        messageId: `pcmsg-${assetId}-0`,
+        assetId,
+        asset_id: assetId,
+        chunk: 0,
+        chunk_number: 1,
+        total: 1,
+        checksum: fullChecksum,
+        chunk_checksum: fullChecksum,
+        contentType: 'application/json',
+        content_type: 'application/json',
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
+        ts: Date.now(),
+        data: pointcloud
+      }];
     }
 
-    const verticesPerChunk = Math.floor(maxChunkSize / 100);
+    const verticesPerChunk = Math.max(1, Math.floor(maxChunkSize / 100));
     const totalVertices = pointcloud.vertices.length;
     const numChunks = Math.ceil(totalVertices / verticesPerChunk);
 
@@ -667,15 +749,30 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
     for (let i = 0; i < numChunks; i++) {
       const start = i * verticesPerChunk;
       const end = Math.min(start + verticesPerChunk, totalVertices);
+      const chunkPayload = {
+        vertices: pointcloud.vertices.slice(start, end),
+        colors: pointcloud.colors ? pointcloud.colors.slice(start, end) : null,
+        metadata: i === 0 ? pointcloud.metadata : null
+      };
 
       chunks.push({
+        type: 'hybrid-bridge-geometry',
+        event: 'interop.asset.geometry',
+        kind: 'pointcloud',
+        messageId: `pcmsg-${assetId}-${i}`,
+        assetId,
+        asset_id: assetId,
         chunk: i,
+        chunk_number: i + 1,
         total: numChunks,
-        data: {
-          vertices: pointcloud.vertices.slice(start, end),
-          colors: pointcloud.colors ? pointcloud.colors.slice(start, end) : null,
-          metadata: i === 0 ? pointcloud.metadata : null
-        }
+        checksum: fullChecksum,
+        chunk_checksum: checksumHex(chunkPayload),
+        contentType: 'application/json',
+        content_type: 'application/json',
+        selected_transport: selectedTransport,
+        transport: selectedTransport,
+        ts: Date.now(),
+        data: chunkPayload
       });
     }
 
@@ -686,39 +783,75 @@ function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
     const state = ensureState(nodeId);
     if (!state) return null;
 
-    const { chunk, total, data } = chunkData;
+    const total = Math.max(1, Number(chunkData?.total || 1) || 1);
+    const rawChunk = Number(chunkData?.chunk || 0);
+    const rawChunkNumber = Number(chunkData?.chunk_number || chunkData?.chunkNumber || 0);
+    const chunk = Number.isFinite(rawChunkNumber) && rawChunkNumber > 0
+      ? Math.max(0, rawChunkNumber - 1)
+      : Math.max(0, rawChunk);
+    const assetId = String(chunkData?.assetId || chunkData?.asset_id || 'current').trim() || 'current';
+    const payloadObject = chunkData?.data ?? chunkData?.payload ?? null;
+    const chunkText = typeof chunkData?.chunk_payload === 'string'
+      ? chunkData.chunk_payload
+      : (typeof chunkData?.chunkPayload === 'string' ? chunkData.chunkPayload : '');
+    const mode = chunkText ? 'text' : 'object';
 
-    if (!state.receivedChunks.has('current')) {
-      state.receivedChunks.set('current', {
+    if (!state.receivedChunks.has(assetId)) {
+      state.receivedChunks.set(assetId, {
+        mode,
+        total,
         chunks: new Array(total),
-        received: 0
+        received: new Set(),
+        checksum: String(chunkData?.checksum || '').trim()
       });
     }
 
-    const assembly = state.receivedChunks.get('current');
-    assembly.chunks[chunk] = data;
-    assembly.received++;
+    const assembly = state.receivedChunks.get(assetId);
+    if (!assembly || chunk >= total) return null;
+    if (!assembly.received.has(chunk)) {
+      assembly.chunks[chunk] = mode === 'text' ? chunkText : payloadObject;
+      assembly.received.add(chunk);
+    }
 
-    if (assembly.received === total) {
-      const metadata = assembly.chunks[0].metadata;
-      const vertices = [];
-      const colors = [];
-
-      for (const chunkData of assembly.chunks) {
-        vertices.push(...chunkData.vertices);
-        if (chunkData.colors) {
-          colors.push(...chunkData.colors);
+    if (assembly.received.size === total) {
+      let pointcloud = null;
+      if (assembly.mode === 'text') {
+        try {
+          pointcloud = JSON.parse(assembly.chunks.join(''));
+        } catch (err) {
+          state.receivedChunks.delete(assetId);
+          return null;
         }
       }
 
-      const pointcloud = {
-        vertices,
-        colors: colors.length > 0 ? colors : null,
-        metadata
-      };
+      if (!pointcloud) {
+        const metadata = assembly.chunks[0]?.metadata;
+        const vertices = [];
+        const colors = [];
+
+        for (const chunkItem of assembly.chunks) {
+          if (!chunkItem || !Array.isArray(chunkItem.vertices)) continue;
+          vertices.push(...chunkItem.vertices);
+          if (Array.isArray(chunkItem.colors)) colors.push(...chunkItem.colors);
+        }
+
+        pointcloud = {
+          vertices,
+          colors: colors.length > 0 ? colors : null,
+          metadata
+        };
+      }
+
+      if (assembly.checksum) {
+        const assembledChecksum = checksumHex(pointcloud);
+        if (assembledChecksum !== assembly.checksum) {
+          state.receivedChunks.delete(assetId);
+          return null;
+        }
+      }
 
       state.currentPointcloud = pointcloud;
-      state.receivedChunks.delete('current');
+      state.receivedChunks.delete(assetId);
       updatePointcloudViewer(nodeId, pointcloud);
 
       return pointcloud;

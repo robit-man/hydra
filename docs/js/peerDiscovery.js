@@ -1,5 +1,6 @@
 import { qs, LS } from './utils.js';
 import { createDiscovery as createNoClipDiscovery } from './nats.js';
+import { openQrScanner } from './qrScanner.js';
 
 const NATS_MODULE_URL = 'https://cdn.jsdelivr.net/npm/nats.ws/+esm';
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
@@ -7,6 +8,8 @@ const DEFAULT_HEARTBEAT_SEC = 12;
 const OFFLINE_AFTER_SECONDS = 150; // allow longer grace to reduce list flapping
 const PING_TIMEOUT_MS = 8000;
 const USERNAME_KEY = 'hydra.peer.username';
+const DISCOVERY_ROOM_KEY = 'hydra.discovery.room';
+const DISCOVERY_ROOM_DEFAULT = 'nexus';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -28,6 +31,88 @@ const stripGraphPrefix = (value) => {
 };
 
 const normalizePubKey = (value) => normalizeKey(stripGraphPrefix(value));
+
+const normalizeNetwork = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'hydra' || key === 'noclip') return key;
+  return '';
+};
+
+const inferNetworkFromAddress = (value) => {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text.startsWith('noclip.')) return 'noclip';
+  if (text.startsWith('hydra.') || text.startsWith('graph.')) return 'hydra';
+  return '';
+};
+
+const canonicalAddressForNetwork = (network, addr, fallbackKey) => {
+  const direct = String(addr || '').trim();
+  const key = String(fallbackKey || '').trim();
+  const base = direct || key;
+  if (!base) return '';
+  if (base.includes('.')) return base;
+  const normalized = normalizeNetwork(network);
+  if (normalized) return `${normalized}.${base}`;
+  return base;
+};
+
+const MANUAL_PEER_KEYS = ['peer', 'address', 'nkn', 'hydra', 'noclip'];
+
+const readQrAddressValue = (raw) => {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+
+  const directNetwork = inferNetworkFromAddress(text);
+  if (directNetwork) return text;
+
+  try {
+    const url = new URL(text);
+    for (const key of MANUAL_PEER_KEYS) {
+      const value = String(url.searchParams.get(key) || '').trim();
+      if (!value) continue;
+      if (key === 'hydra') return value.toLowerCase().startsWith('hydra.') ? value : `hydra.${value}`;
+      if (key === 'noclip') return value.toLowerCase().startsWith('noclip.') ? value : `noclip.${value}`;
+      return value;
+    }
+  } catch (_) {
+    // ignore URL parse errors
+  }
+
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        for (const key of MANUAL_PEER_KEYS) {
+          const value = String(parsed[key] || '').trim();
+          if (!value) continue;
+          if (key === 'hydra') return value.toLowerCase().startsWith('hydra.') ? value : `hydra.${value}`;
+          if (key === 'noclip') return value.toLowerCase().startsWith('noclip.') ? value : `noclip.${value}`;
+          return value;
+        }
+      }
+    } catch (_) {
+      // ignore JSON parse failures
+    }
+  }
+
+  return text;
+};
+
+const loadDiscoveryRoom = () => {
+  const fromStorage = sanitizeRoomName(LS.get(DISCOVERY_ROOM_KEY, DISCOVERY_ROOM_DEFAULT) || DISCOVERY_ROOM_DEFAULT);
+  return fromStorage || DISCOVERY_ROOM_DEFAULT;
+};
+
+const saveDiscoveryRoom = (room) => {
+  const normalized = sanitizeRoomName(room || DISCOVERY_ROOM_DEFAULT);
+  try {
+    LS.set(DISCOVERY_ROOM_KEY, normalized || DISCOVERY_ROOM_DEFAULT);
+  } catch (_) {
+    // ignore persistence failures
+  }
+  return normalized || DISCOVERY_ROOM_DEFAULT;
+};
 
 const sanitizeUsername = (value) => {
   if (typeof value !== 'string') return '';
@@ -353,7 +438,7 @@ class DiscoveryClient extends EventHub {
 function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip }) {
   // Use 'nexus' as the shared discovery room for cross-application peer discovery
   // This enables Hydra (hydra.nexus) and NoClip (noclip.nexus) to discover each other
-  const derivedRoom = 'nexus';
+  const derivedRoom = saveDiscoveryRoom(loadDiscoveryRoom());
   const sharedStore = new Store(derivedRoom);
   const noclipPeerListeners = new Set();
   const notifyNoclipListeners = () => {
@@ -409,7 +494,14 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     pokeNoticeTimer: null,
     nknListenerAttached: false,
     nknMessageHandler: null,
-    nknClient: null
+    nknClient: null,
+    telemetry: {
+      sends: { nkn: 0, nats: 0, failed: 0 },
+      discoveryFallbacks: 0,
+      discoveryStatus: 'idle',
+      lastSource: '',
+      events: []
+    }
   };
   state.store = sharedStore;
 
@@ -515,6 +607,30 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       return text.trim();
     } catch (_) {
       return '';
+    }
+  }
+
+  function recordDiscoveryEvent(kind, detail = {}) {
+    const entry = {
+      ts: Date.now(),
+      kind: String(kind || '').trim() || 'event',
+      ...(detail && typeof detail === 'object' ? detail : {})
+    };
+    const list = state.telemetry.events;
+    list.push(entry);
+    if (list.length > 120) list.splice(0, list.length - 120);
+    state.telemetry.lastSource = String(entry.source || entry.via || '');
+    if (entry.via === 'nkn') state.telemetry.sends.nkn += 1;
+    if (entry.via === 'nats') state.telemetry.sends.nats += 1;
+    if (entry.failed) state.telemetry.sends.failed += 1;
+    try {
+      log?.(`[peers.telemetry] ${entry.kind} ${JSON.stringify({
+        source: entry.source || '',
+        via: entry.via || '',
+        reason: entry.reason || ''
+      })}`);
+    } catch (_) {
+      // best effort
     }
   }
 
@@ -780,7 +896,10 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
             const natsTarget = normalizePubKey(destination);
             if (!natsTarget) throw new Error('invalid nats target');
             message.transport = 'nats';
+            message.discovery_source = 'nats';
             state.discovery.dm(natsTarget, message);
+            state.telemetry.discoveryFallbacks += 1;
+            recordDiscoveryEvent('send', { via: 'nats', source: 'fallback_no_local_addr', target: destination });
             try {
               console.debug('[peers] send', {
                 dest: destination,
@@ -796,6 +915,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
             // ignore fallback failure
           }
         }
+        recordDiscoveryEvent('send', { via: 'none', source: 'nkn', target: destination, failed: true, reason: err?.message || String(err || '') });
         log?.(`[peers] nkn send failed: ${err?.message || err}`);
         return false;
       }
@@ -806,9 +926,11 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       message.meta = getPresenceMeta();
     }
     message.transport = 'nkn';
+    message.discovery_source = 'nkn';
     try {
       const client = await waitForNknClient(timeout);
       await client.send(destination, JSON.stringify(message), { noReply: true, maxHoldingSeconds: 120 });
+      recordDiscoveryEvent('send', { via: 'nkn', source: 'direct', target: destination });
       try {
         console.debug('[peers] send', {
           dest: destination,
@@ -826,7 +948,10 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
           const natsTarget = normalizePubKey(destination);
           if (!natsTarget) throw new Error('invalid nats target');
           message.transport = 'nats';
+          message.discovery_source = 'nats';
           state.discovery.dm(natsTarget, message);
+          state.telemetry.discoveryFallbacks += 1;
+          recordDiscoveryEvent('send', { via: 'nats', source: 'fallback_after_nkn_error', target: destination, reason: err?.message || String(err || '') });
           try {
             console.debug('[peers] send', {
               dest: destination,
@@ -842,6 +967,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
           // ignore fallback failure
         }
       }
+      recordDiscoveryEvent('send', { via: 'none', source: 'nkn', target: destination, failed: true, reason: err?.message || String(err || '') });
       log?.(`[peers] nkn send failed: ${err?.message || err}`);
       return false;
     }
@@ -1023,7 +1149,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       graphId: CFG.graphId || '',
       origin: window.location.origin || '',
       username: sanitizeUsername(state.username || ''),
-      network: 'hydra'  // Identify as Hydra peer for cross-app discovery
+      network: 'hydra',
+      discoveryRoom: state.room || DISCOVERY_ROOM_DEFAULT
     };
   }
 
@@ -1052,6 +1179,9 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     chatFav: null,
     search: null,
     favToggle: null,
+    manualInput: null,
+    manualAdd: null,
+    manualScan: null,
     tabs: null,
     tabButtons: []
   };
@@ -1080,6 +1210,9 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     els.chatFav = qs('#chatFavoriteBtn');
     els.search = qs('#peerSearchInput');
     els.favToggle = qs('#peerFavoritesToggle');
+    els.manualInput = qs('#peerManualAddressInput');
+    els.manualAdd = qs('#peerManualAddBtn');
+    els.manualScan = qs('#peerManualScanBtn');
     els.tabs = qs('#peerTabs');
     els.tabButtons = els.tabs ? Array.from(els.tabs.querySelectorAll('.peer-tab')) : [];
     els.networkTabs = qs('#peerNetworkTabs');
@@ -1120,6 +1253,106 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     if (delta < 60) return `${delta}s ago`;
     if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
     return `${Math.floor(delta / 3600)}h ago`;
+  }
+
+  function resolveTransportLabel(peer) {
+    const direct =
+      peer?.selectedTransport ||
+      peer?.selected_transport ||
+      peer?.meta?.selectedTransport ||
+      peer?.meta?.selected_transport ||
+      '';
+    const normalized = String(direct || '').trim().toLowerCase();
+    if (normalized) return normalized;
+    const source = String(peer?.source || '').trim().toLowerCase();
+    if (source === 'noclip') return 'nats';
+    return 'nkn';
+  }
+
+  function resolveNetworkLabel(peer) {
+    return (
+      normalizeNetwork(peer?.meta?.network) ||
+      normalizeNetwork(peer?.network) ||
+      inferNetworkFromAddress(peer?.addr || peer?.originalPub || peer?.nknPub || '') ||
+      'hydra'
+    );
+  }
+
+  function resolveManualPeerAddress(rawValue) {
+    const parsed = readQrAddressValue(rawValue);
+    if (!parsed) return '';
+    let candidate = String(parsed).trim();
+    if (!candidate) return '';
+    const inferred = inferNetworkFromAddress(candidate);
+    if (!inferred) {
+      const activeNetwork = state.layout.activeNetwork === 'noclip' ? 'noclip' : 'hydra';
+      candidate = `${activeNetwork}.${candidate.replace(/^graph\./i, '')}`;
+    }
+    const [prefix, rest] = candidate.split('.', 2);
+    const network = normalizeNetwork(prefix);
+    const key = normalizePubKey(rest || '');
+    if (!network || !key) return '';
+    return `${network}.${key}`;
+  }
+
+  async function addManualPeer(rawValue, { source = 'manual' } = {}) {
+    const address = resolveManualPeerAddress(rawValue);
+    if (!address) {
+      setBadge?.('Invalid peer address', false);
+      return false;
+    }
+    const network = resolveNetworkLabel({ addr: address }) || 'hydra';
+    const key = normalizePubKey(address);
+    if (!key) {
+      setBadge?.('Invalid peer address', false);
+      return false;
+    }
+
+    const targetMap = network === 'noclip' ? state.noclip.peers : state.peers;
+    const existing = targetMap.get(key) || {};
+    const merged = {
+      ...existing,
+      nknPub: key,
+      addr: address,
+      originalPub: address,
+      network,
+      meta: {
+        ...(existing.meta || {}),
+        network,
+        source: 'manual'
+      },
+      last: existing.last || nowSeconds(),
+      lastSeenAt: existing.lastSeenAt || 0,
+      online: !!existing.online,
+      probing: true,
+      source
+    };
+    targetMap.set(key, merged);
+    if (network === 'noclip') notifyNoclipListeners();
+    scheduleRender();
+
+    const ok = await sendPeerPayload(address, {
+      type: 'peer-ping',
+      note: 'manual-add',
+      meta: {
+        username: sanitizeUsername(state.username || ''),
+        network: 'hydra'
+      }
+    });
+    const current = targetMap.get(key);
+    if (current) {
+      current.probing = false;
+      if (ok) {
+        current.online = true;
+        current.last = nowSeconds();
+        current.lastSeenAt = Date.now();
+      }
+      targetMap.set(key, current);
+    }
+    if (network === 'noclip') notifyNoclipListeners();
+    scheduleRender();
+    setBadge?.(ok ? `Peer added: ${formatAddress(address)}` : `Peer saved: ${formatAddress(address)}`);
+    return true;
   }
 
   function setStatus(text, sticky = false) {
@@ -1291,6 +1524,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     const addrTrimmed = typeof addrValue === 'string' ? addrValue.trim() : String(addrValue || '').trim();
     const meta = entry.meta && typeof entry.meta === 'object' ? { ...entry.meta } : {};
     if (meta.username) meta.username = sanitizeUsername(meta.username);
+    const inferredNetwork = normalizeNetwork(meta.network)
+      || inferNetworkFromAddress(addrTrimmed)
+      || inferNetworkFromAddress(nknPub)
+      || inferNetworkFromAddress(rawPub);
+    if (inferredNetwork) meta.network = inferredNetwork;
+    const canonicalAddr = canonicalAddressForNetwork(inferredNetwork, addrTrimmed || rawPub || nknPub, nknPub);
     const sharedRaw = [];
     if (Array.isArray(entry.sharedSources)) sharedRaw.push(...entry.sharedSources);
     if (Array.isArray(entry.sharedFrom)) sharedRaw.push(...entry.sharedFrom);
@@ -1314,9 +1553,10 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     });
     return {
       nknPub,
-      addr: addrTrimmed || rawPub || nknPub,
+      addr: canonicalAddr || addrTrimmed || rawPub || nknPub,
       originalPub: typeof rawPub === 'string' ? rawPub.trim() : String(rawPub || '').trim() || nknPub,
       meta,
+      network: inferredNetwork || '',
       last: typeof entry.last === 'number' ? entry.last : nowSeconds(),
       sharedSources
     };
@@ -1339,7 +1579,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     const payload = {
       type: 'peer-directory',
       pub: state.meAddr,
-      meta: { username: sanitizeUsername(state.username || ''), graphId: CFG.graphId || '' },
+      meta: {
+        username: sanitizeUsername(state.username || ''),
+        graphId: CFG.graphId || '',
+        network: 'hydra',
+        discoveryRoom: state.room || DISCOVERY_ROOM_DEFAULT
+      },
       peers
     };
     try {
@@ -1359,7 +1604,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         addr: peer.addr || peer.originalPub || peer.nknPub,
         meta: {
           ...(peer.meta || {}),
-          username
+          username,
+          network: normalizeNetwork(peer.meta?.network || peer.network) || inferNetworkFromAddress(peer.addr || peer.nknPub) || 'hydra'
         },
         last: peer.last || nowSeconds(),
         sharedSources: (peer.sharedSources || []).map((src) => ({
@@ -1372,7 +1618,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       entries.push({
         nknPub: state.mePub || state.meAddr,
         addr: state.meAddr,
-        meta: { self: true, username: sanitizeUsername(state.username || '') },
+        meta: {
+          self: true,
+          username: sanitizeUsername(state.username || ''),
+          network: 'hydra',
+          discoveryRoom: state.room || DISCOVERY_ROOM_DEFAULT
+        },
         last: nowSeconds(),
         sharedSources: []
       });
@@ -1443,6 +1694,11 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     const existing = state.peers.get(key) || {};
     const added = !existing.nknPub;
     ensurePeerOrder(key);
+    const explicitNetwork = normalizeNetwork(peer?.meta?.network || peer?.network);
+    const network = explicitNetwork
+      || normalizeNetwork(existing?.meta?.network || existing?.network)
+      || inferNetworkFromAddress(peer?.addr || peer?.originalPub || key)
+      || inferNetworkFromAddress(existing?.addr || existing?.originalPub || key);
     const lastSeconds = typeof peer.last === 'number' ? peer.last : existing.last || 0;
     const lastSeenAt =
       typeof peer.lastSeenAt === 'number'
@@ -1456,7 +1712,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       nknPub: key,
       last: lastSeconds,
       lastSeenAt,
-      addr: peer.addr || existing.addr || peer.nknPub || key,
+      addr: canonicalAddressForNetwork(network, peer.addr || existing.addr || peer.nknPub || key, key),
       originalPub: peer.nknPub || existing.originalPub || key
     };
     if (peer.meta && typeof peer.meta === 'object') {
@@ -1464,12 +1720,15 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       const nextMeta = { ...prevMeta, ...peer.meta };
       if (!nextMeta.username && prevMeta.username) nextMeta.username = prevMeta.username;
       if (nextMeta.username) nextMeta.username = sanitizeUsername(nextMeta.username);
+      if (network && !normalizeNetwork(nextMeta.network)) nextMeta.network = network;
       merged.meta = nextMeta;
     } else if (existing.meta) {
       merged.meta = existing.meta;
     } else if (!merged.meta) {
       merged.meta = {};
     }
+    if (network && !normalizeNetwork(merged.meta.network)) merged.meta.network = network;
+    if (network) merged.network = network;
     if (online !== undefined) merged.online = online;
     if (probing !== undefined) merged.probing = probing;
 
@@ -2038,16 +2297,19 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       infoEl.className = 'peer-info';
       const parts = [];
       const statusText = peer.online ? 'Online' : peer.probing ? 'Checking...' : 'Offline';
+      const networkLabel = resolveNetworkLabel(peer);
+      const transportLabel = resolveTransportLabel(peer);
       const lastSeconds = peer.last
         ? peer.last
         : peer.lastSeenAt
           ? Math.floor(peer.lastSeenAt / 1000)
           : 0;
-      parts.push(statusText);
-      parts.push(`Last seen ${formatLast(lastSeconds)}`);
+      parts.push(`Status: ${statusText}`);
+      parts.push(`Network: ${networkLabel}`);
+      parts.push(`Transport: ${transportLabel}`);
+      parts.push(`Last Seen: ${formatLast(lastSeconds)}`);
       const graphLabel = peer.meta?.graphId;
-      if (graphLabel) parts.push(`Graph ${String(graphLabel).slice(0, 8)}`);
-      if (!isHydra) parts.push('NoClip network');
+      if (graphLabel) parts.push(`Graph: ${String(graphLabel).slice(0, 8)}`);
       infoEl.textContent = parts.join(' • ');
       meta.appendChild(infoEl);
 
@@ -2094,6 +2356,16 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         });
         actions.appendChild(chatBtn);
       } else {
+        const chatBtn = document.createElement('button');
+        chatBtn.className = 'ghost';
+        chatBtn.textContent = 'Chat';
+        chatBtn.title = 'Request to chat';
+        chatBtn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          await openChatWithPeer(peer);
+        });
+        actions.appendChild(chatBtn);
+
         if (NoClip?.requestSync) {
           const syncBtn = document.createElement('button');
           syncBtn.className = 'secondary';
@@ -2152,7 +2424,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
   function rememberPeersFromDiscovery() {
     if (!state.discovery) return;
     const nowSec = nowSeconds();
-    state.discovery.peers.forEach((peer) => {
+    state.discovery.peers.forEach((peerRaw) => {
+      const peer = normalizePeerEntry(peerRaw);
       if (!peer?.nknPub) return;
       const last = typeof peer.last === 'number' ? peer.last : 0;
       const online = last ? nowSec - last <= OFFLINE_AFTER_SECONDS : false;
@@ -2174,13 +2447,19 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     client.on('peer', (peer) => {
       if (!peer?.nknPub) return;
 
-      // Determine peer network based on addr/nknPub prefix
-      const addr = peer.addr || peer.nknPub || '';
-      const isNoclipPeer = addr.toLowerCase().startsWith('noclip.');
-      const isHydraPeer = addr.toLowerCase().startsWith('hydra.') || addr.toLowerCase().startsWith('graph.');
+      // Determine peer network based on explicit metadata first, then address prefix.
+      const networkHint = normalizeNetwork(peer?.meta?.network)
+        || inferNetworkFromAddress(peer?.addr || peer?.nknPub || '');
+      const isNoclipPeer = networkHint === 'noclip';
+      const isHydraPeer = networkHint === 'hydra';
 
       // If no recognizable prefix, default to hydra for backward compatibility
       const shouldAddToHydra = isHydraPeer || (!isNoclipPeer && !isHydraPeer);
+      recordDiscoveryEvent('peer', {
+        source: 'nats',
+        network: networkHint || 'unknown',
+        target: peer?.addr || peer?.nknPub || ''
+      });
 
       if (isNoclipPeer) {
         // Route noclip peers to the noclip peer store
@@ -2223,6 +2502,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     });
     client.on('status', (info) => {
       if (!info) return;
+      state.telemetry.discoveryStatus = String(info.type || 'update');
+      recordDiscoveryEvent('discovery-status', { source: 'nats', state: info.type || 'update' });
       if (info.type === 'disconnect') {
         setStatus('Reconnecting to discovery...', true);
       } else if (info.type === 'reconnect') {
@@ -2286,6 +2567,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         return;
       }
       const sourceAddr = payload.pub || payload.from || payload.addr || '';
+      recordDiscoveryEvent('dm', { source: 'nats', target: sourceAddr || '' });
       if (handlePeerMessage(payload, { transport: 'nats', sourceAddr })) return;
     });
 
@@ -2321,6 +2603,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     }
     const promise = (async () => {
       setStatus('Waiting for NKN...', true);
+      state.telemetry.discoveryStatus = 'connecting';
+      recordDiscoveryEvent('discovery-status', { source: 'nats', state: 'connecting' });
       const addr = await waitForNknAddress();
       const pub = normalizePubKey(addr);
       state.meAddr = addr;
@@ -2360,6 +2644,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       await client.startHeartbeat(meta);
 
       state.discovery = client;
+      state.telemetry.discoveryStatus = 'ready';
+      recordDiscoveryEvent('discovery-status', { source: 'nats', state: 'ready' });
 
       // Attach any external DM handlers that were registered
       if (state.externalDmHandlers && state.externalDmHandlers.length > 0) {
@@ -2382,6 +2668,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     })().catch((err) => {
       log?.(`[peers] discovery connect failed: ${err?.message || err}`);
       setStatus('Discovery unavailable', true);
+      state.telemetry.discoveryStatus = 'error';
+      recordDiscoveryEvent('discovery-status', { source: 'nats', state: 'error', reason: err?.message || String(err || '') });
       throw err;
     }).finally(() => {
       state.connecting = null;
@@ -2396,15 +2684,23 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     const msg = evt.msg || {};
     const from = normalizePubKey(evt.from || msg.pub || msg.from);
     if (!from) return;
+    const inferredNetwork = normalizeNetwork(msg?.meta?.network) || 'noclip';
     const existing = state.noclip.peers.get(from) || { nknPub: from };
     const merged = {
       ...existing,
       nknPub: from,
-      addr: msg.addr || existing.addr || evt.from || from,
+      addr: canonicalAddressForNetwork(inferredNetwork, msg.addr || existing.addr || evt.from || from, from),
       last: msg.ts || nowSeconds(),
-      meta: { ...(existing.meta || {}), lastMessageType: msg.type || existing.meta?.lastMessageType || '' }
+      meta: {
+        ...(existing.meta || {}),
+        ...(msg.meta && typeof msg.meta === 'object' ? msg.meta : {}),
+        network: inferredNetwork,
+        lastMessageType: msg.type || existing.meta?.lastMessageType || ''
+      },
+      network: inferredNetwork
     };
     state.noclip.peers.set(from, merged);
+    recordDiscoveryEvent('dm', { source: 'noclip', target: merged.addr || from });
     if (state.layout.activeNetwork === 'noclip') scheduleRender();
     updateBadge();
     notifyNoclipListeners();
@@ -2421,14 +2717,18 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       }
       const addr = state.meAddr || Net.nkn?.addr || '';
       const pub = normalizePubKey(state.mePub || addr);
-      const roomName = 'nexus';
+      const roomName = state.room || DISCOVERY_ROOM_DEFAULT;
       const discovery = await createNoClipDiscovery({
         room: roomName,
         servers: DEFAULT_SERVERS,
         me: {
           nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
           addr,
-          meta: { username: state.username || '', network: 'hydra' }
+          meta: {
+            username: state.username || '',
+            network: 'hydra',
+            discoveryRoom: roomName
+          }
         }
       });
       discovery.on('peer', (peer) => {
@@ -2448,10 +2748,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         if (state.layout.activeNetwork === 'noclip') scheduleRender();
       });
       state.noclip.status = { state: 'ready', detail: '' };
+      recordDiscoveryEvent('discovery-status', { source: 'noclip', state: 'ready' });
       state.noclip.discovery = discovery;
       return discovery;
     })().catch((err) => {
       state.noclip.status = { state: 'error', detail: err?.message || 'connect failed' };
+      recordDiscoveryEvent('discovery-status', { source: 'noclip', state: 'error', reason: err?.message || String(err || '') });
       throw err;
     }).finally(() => {
       state.noclip.connecting = null;
@@ -2530,6 +2832,54 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
         scheduleRender();
       });
       els.favToggle._peerBound = true;
+    }
+
+    if (els.manualAdd && !els.manualAdd._peerBound) {
+      const submitManual = async (source = 'manual') => {
+        const raw = (els.manualInput?.value || '').trim();
+        if (!raw) {
+          setBadge?.('Enter a peer address first', false);
+          return;
+        }
+        const ok = await addManualPeer(raw, { source });
+        if (ok && els.manualInput) {
+          els.manualInput.value = resolveManualPeerAddress(raw);
+        }
+      };
+
+      els.manualAdd.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await submitManual('manual');
+      });
+      els.manualAdd._peerBound = true;
+
+      if (els.manualInput && !els.manualInput._peerManualBound) {
+        els.manualInput.addEventListener('keydown', async (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          await submitManual('manual');
+        });
+        els.manualInput._peerManualBound = true;
+      }
+    }
+
+    if (els.manualScan && !els.manualScan._peerBound) {
+      els.manualScan.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await openQrScanner(els.manualInput, async (text) => {
+          const parsed = resolveManualPeerAddress(text);
+          if (!parsed) {
+            setBadge?.('QR did not contain a valid peer address', false);
+            return;
+          }
+          if (els.manualInput) {
+            els.manualInput.value = parsed;
+            els.manualInput.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          await addManualPeer(parsed, { source: 'qr' });
+        }, { populateTarget: false });
+      });
+      els.manualScan._peerBound = true;
     }
 
     if (els.tabButtons && els.tabButtons.length) {

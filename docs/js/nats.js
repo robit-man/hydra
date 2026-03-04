@@ -31,6 +31,46 @@ const DEFAULTS = {
 
 function nowS() { return Math.floor(Date.now() / 1000); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sanitizeRoomName(value) {
+  return String(value || 'public').trim().replace(/[^a-zA-Z0-9_.-]+/g, '_') || 'public';
+}
+function inferNetworkFromAddress(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text.startsWith('noclip.')) return 'noclip';
+  if (text.startsWith('hydra.') || text.startsWith('graph.')) return 'hydra';
+  return '';
+}
+function normalizePeerNetwork(meta, addr, fallback = '') {
+  const fromMeta = String((meta && meta.network) || '').trim().toLowerCase();
+  if (fromMeta === 'hydra' || fromMeta === 'noclip') return fromMeta;
+  const inferred = inferNetworkFromAddress(addr);
+  if (inferred) return inferred;
+  const fromFallback = String(fallback || '').trim().toLowerCase();
+  if (fromFallback === 'hydra' || fromFallback === 'noclip') return fromFallback;
+  return '';
+}
+function canonicalPeerAddress(pub, addr, network = '') {
+  const rawAddr = String(addr || '').trim();
+  if (rawAddr) return rawAddr;
+  const rawPub = String(pub || '').trim();
+  if (!rawPub) return '';
+  if (rawPub.includes('.')) return rawPub;
+  const cleanNetwork = String(network || '').trim().toLowerCase();
+  if (cleanNetwork === 'hydra' || cleanNetwork === 'noclip') return `${cleanNetwork}.${rawPub}`;
+  return rawPub;
+}
+function stableDmId(msg = {}) {
+  const id = String(msg?.id || msg?.message_id || msg?.mid || '').trim();
+  if (id) return id;
+  const kind = String(msg?.type || msg?.event || '').trim();
+  const pub = String(msg?.pub || msg?.from || msg?.addr || '').trim();
+  const ts = Number(msg?.ts || 0) || 0;
+  const payload = (() => {
+    try { return JSON.stringify(msg?.payload ?? msg?.data ?? null); } catch (_) { return ''; }
+  })();
+  return `${kind}|${pub}|${ts}|${payload.slice(0, 256)}`;
+}
 
 // ---------------------------------------------------------------------------
 // Storage adapter (Node FS or browser localStorage)
@@ -113,20 +153,27 @@ export class NatsDiscovery extends Evt {
       me = { nknPub: 'unknown', meta: {} },
       heartbeatSec = DEFAULTS.heartbeatSec,
       persistDir = DEFAULTS.persistDir,
-      name = `disco-${(me.nknPub||'anon').slice(0, 8)}`
+      name = `disco-${(me.nknPub||'anon').slice(0, 8)}`,
+      allowLegacyDmSubject = true,
+      publishLegacyDmSubject = true
     } = opts || {};
     this.servers = servers;
-    this.room = room;
+    this.room = sanitizeRoomName(room);
     this.me = { ...me };
     this.heartbeatSec = heartbeatSec;
-    this.persist = new Store(room, persistDir);
+    this.persist = new Store(this.room, persistDir);
     this.nc = null;
     this.sc = null; // String codec
     this._hb = null;
+    this.name = String(name || `disco-${(me.nknPub||'anon').slice(0, 8)}`);
+    this.allowLegacyDmSubject = !!allowLegacyDmSubject;
+    this.publishLegacyDmSubject = !!publishLegacyDmSubject;
+    this._dmSeen = new Map();
 
     // subjects
-    this.subPresence = `discovery.${room}.presence`;
-    this.subDM = (pub) => `discovery.dm.${pub}`;
+    this.subPresence = `discovery.${this.room}.presence`;
+    this.subDM = (pub) => `discovery.${this.room}.dm.${pub}`;
+    this.subDMLegacy = (pub) => `discovery.dm.${pub}`;
   }
 
   get peers() {
@@ -151,44 +198,49 @@ export class NatsDiscovery extends Evt {
         const msg = this._decode(m);
         if (!msg || msg.type !== 'presence') continue;
         if (msg.pub === this.me.nknPub) continue; // ignore self
-        const peer = this.persist.upsert({
-          nknPub: msg.pub,
-          addr: msg.addr || msg.pub, // for parity with your Python code
-          meta: msg.meta || {},
-          last: msg.ts || nowS()
-        });
-        this.emit('peer', peer);
+        const peer = this._upsertPeer(msg);
+        if (peer) this.emit('peer', peer);
       }
     })();
 
     // Personal DM inbox
-    const subD = await this.nc.subscribe(this.subDM(this.me.nknPub));
-    (async () => {
-      for await (const m of subD) {
-        const msg = this._decode(m);
-        if (!msg || !msg.type) continue;
-        if (msg.type === 'handshake') {
-          const peer = this.persist.upsert({
-            nknPub: msg.pub,
-            addr: msg.addr || msg.pub,
-            meta: msg.meta || {},
-            last: msg.ts || nowS()
-          });
-          this.emit('handshake', peer);
-          // optional auto-ack
-          if (msg.wantAck) await this.dm(msg.pub, { type: 'handshake_ack', pub: this.me.nknPub, meta: this.me.meta || {}, ts: nowS() });
-          this.emit('peer', peer);
-        } else if (msg.type === 'handshake_ack') {
-          const peer = this.persist.upsert({
-            nknPub: msg.pub,
-            last: msg.ts || nowS()
-          });
-          this.emit('handshake_ack', peer);
-        } else {
-          this.emit('dm', { from: msg.pub, msg });
-        }
+    const processDmMessage = async (m) => {
+      const msg = this._decode(m);
+      if (!msg || !msg.type) return;
+      if (this._isDuplicateDm(msg)) return;
+      if (msg.type === 'handshake') {
+        const peer = this._upsertPeer(msg);
+        if (!peer) return;
+        this.emit('handshake', peer);
+        // optional auto-ack
+        if (msg.wantAck) await this.dm(msg.pub, { type: 'handshake_ack', pub: this.me.nknPub, meta: this.me.meta || {}, ts: nowS() });
+        this.emit('peer', peer);
+      } else if (msg.type === 'handshake_ack') {
+        const peer = this._upsertPeer(msg);
+        if (peer) this.emit('handshake_ack', peer);
+      } else {
+        this.emit('dm', { from: msg.pub, msg });
       }
-    })();
+    };
+
+    const subscribeDm = async (subject) => {
+      const sub = await this.nc.subscribe(subject);
+      (async () => {
+        for await (const m of sub) {
+          await processDmMessage(m);
+        }
+      })();
+      return sub;
+    };
+
+    await subscribeDm(this.subDM(this.me.nknPub));
+    if (this.allowLegacyDmSubject) {
+      const legacySubject = this.subDMLegacy(this.me.nknPub);
+      const currentSubject = this.subDM(this.me.nknPub);
+      if (legacySubject !== currentSubject) {
+        await subscribeDm(legacySubject);
+      }
+    }
 
     // lifecycle
     (async () => {
@@ -205,11 +257,14 @@ export class NatsDiscovery extends Evt {
   // Publish a presence beacon
   async presence(extraMeta = {}) {
     if (!this.nc) throw new Error('not connected');
+    const mergedMeta = { ...(this.me.meta || {}), ...extraMeta };
+    const network = normalizePeerNetwork(mergedMeta, this.me.addr || this.me.nknPub, inferNetworkFromAddress(this.me.addr || this.me.nknPub));
+    if (network) mergedMeta.network = network;
     const payload = {
       type: 'presence',
       pub: this.me.nknPub,
-      addr: this.me.addr || this.me.nknPub,
-      meta: { ...(this.me.meta || {}), ...extraMeta },
+      addr: canonicalPeerAddress(this.me.nknPub, this.me.addr || this.me.nknPub, network),
+      meta: mergedMeta,
       ts: nowS()
     };
     this.nc.publish(this.subPresence, this._encode(payload));
@@ -227,9 +282,11 @@ export class NatsDiscovery extends Evt {
   // Change room (resubscribes)
   async setRoom(room) {
     this.stopHeartbeat();
-    this.room = room;
-    this.persist = new Store(room, this.persist.persistDir);
-    this.subPresence = `discovery.${room}.presence`;
+    this.room = sanitizeRoomName(room);
+    this.persist = new Store(this.room, this.persist.persistDir);
+    this.subPresence = `discovery.${this.room}.presence`;
+    this.subDM = (pub) => `discovery.${this.room}.dm.${pub}`;
+    this.subDMLegacy = (pub) => `discovery.dm.${pub}`;
     // Reconnect/re-sub simplest path:
     await this.close();
     await this.connect();
@@ -241,6 +298,12 @@ export class NatsDiscovery extends Evt {
     const subj = this.subDM(toPub);
     const msg = { ...obj, pub: this.me.nknPub, ts: nowS() };
     this.nc.publish(subj, this._encode(msg));
+    if (this.publishLegacyDmSubject) {
+      const legacySubj = this.subDMLegacy(toPub);
+      if (legacySubj && legacySubj !== subj) {
+        this.nc.publish(legacySubj, this._encode(msg));
+      }
+    }
   }
 
   // Initiate a handshake to one peer (they'll store you; you store them on ack)
@@ -267,6 +330,39 @@ export class NatsDiscovery extends Evt {
   // Helpers
   _encode(obj) { return this.sc.encode(JSON.stringify(obj)); }
   _decode(msg) { try { return JSON.parse(this.sc.decode(msg.data)); } catch { return null; } }
+  _upsertPeer(msg = {}) {
+    const meta = msg.meta && typeof msg.meta === 'object' ? { ...msg.meta } : {};
+    const network = normalizePeerNetwork(meta, msg.addr || msg.pub, inferNetworkFromAddress(msg.addr || msg.pub));
+    if (network && !meta.network) meta.network = network;
+    const pub = String(msg.pub || '').trim();
+    if (!pub) return null;
+    const peerAddr = canonicalPeerAddress(pub, msg.addr || '', network);
+    return this.persist.upsert({
+      nknPub: pub,
+      addr: peerAddr || pub,
+      canonical_addr: peerAddr || pub,
+      network: network || '',
+      meta,
+      last: msg.ts || nowS()
+    });
+  }
+  _isDuplicateDm(msg = {}) {
+    const key = stableDmId(msg);
+    if (!key) return false;
+    const now = Date.now();
+    for (const [id, expiresAt] of this._dmSeen.entries()) {
+      if (!id || !Number.isFinite(expiresAt) || expiresAt <= now) this._dmSeen.delete(id);
+    }
+    const knownUntil = Number(this._dmSeen.get(key) || 0);
+    if (knownUntil > now) return true;
+    this._dmSeen.set(key, now + (2 * 60 * 1000));
+    while (this._dmSeen.size > 1024) {
+      const oldest = this._dmSeen.keys().next();
+      if (oldest.done) break;
+      this._dmSeen.delete(oldest.value);
+    }
+    return false;
+  }
 
   async close() {
     this.stopHeartbeat();

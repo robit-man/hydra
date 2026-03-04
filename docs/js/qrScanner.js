@@ -14,6 +14,78 @@ const QRScan = {
 };
 
 let globalResultHandler = null;
+const QR_HINT_KEYS = [
+  'peer',
+  'address',
+  'nkn',
+  'hydra',
+  'noclip',
+  'router',
+  'router_target',
+  'router_nkn',
+  'relay',
+  'target'
+];
+
+function normalizeQrCandidate(value, key = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  if (key === 'hydra') return lower.startsWith('hydra.') ? text : `hydra.${text}`;
+  if (key === 'noclip') return lower.startsWith('noclip.') ? text : `noclip.${text}`;
+  if (key === 'peer' && !text.includes('.') && /^[a-f0-9]{32,}$/i.test(text)) return `hydra.${text}`;
+  return text;
+}
+
+function readCandidateFromObject(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const key of QR_HINT_KEYS) {
+    const candidate = normalizeQrCandidate(obj[key], key);
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
+function extractAddressFromQrText(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return '';
+  if (/^(hydra|noclip|graph)\./i.test(text)) return text;
+  if (/^[a-f0-9]{32,}$/i.test(text)) return `hydra.${text}`;
+
+  try {
+    const url = new URL(text);
+    for (const key of QR_HINT_KEYS) {
+      const candidate = normalizeQrCandidate(url.searchParams.get(key), key);
+      if (candidate) return candidate;
+    }
+  } catch (_) {
+    // not a URL
+  }
+
+  if (text.startsWith('{') || text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      const candidate = readCandidateFromObject(parsed);
+      if (candidate) return candidate;
+    } catch (_) {
+      // not JSON
+    }
+  }
+
+  if (text.includes('=')) {
+    try {
+      const params = new URLSearchParams(text);
+      for (const key of QR_HINT_KEYS) {
+        const candidate = normalizeQrCandidate(params.get(key), key);
+        if (candidate) return candidate;
+      }
+    } catch (_) {
+      // ignore query parse failures
+    }
+  }
+
+  return '';
+}
 
 function registerQrResultHandler(fn) {
   globalResultHandler = typeof fn === 'function' ? fn : null;
@@ -123,20 +195,30 @@ function scanQrFrame() {
     if (code && code.data) {
       const text = code.data.trim();
       if (text) {
+        const parsedText = extractAddressFromQrText(text);
+        const resolvedText = parsedText || text;
         if (QRScan.target && QRScan.populateTarget) {
-          QRScan.target.value = text;
+          QRScan.target.value = resolvedText;
           QRScan.target.dispatchEvent(new Event('input', { bubbles: true }));
         }
         if (QRScan.onResult) {
           try {
-            QRScan.onResult(text);
+            QRScan.onResult(resolvedText, {
+              rawText: text,
+              parsedText
+            });
           } catch (err) {
             // ignore consumer errors
           }
         }
         if (globalResultHandler && !QRScan.onResult) {
           try {
-            globalResultHandler({ text, target: QRScan.target });
+            globalResultHandler({
+              text: resolvedText,
+              rawText: text,
+              parsedText,
+              target: QRScan.target
+            });
           } catch (err) {
             // ignore
           }
@@ -152,4 +234,4 @@ function scanQrFrame() {
   QRScan.raf = requestAnimationFrame(scanQrFrame);
 }
 
-export { setupQrScanner, openQrScanner, closeQrScanner, registerQrResultHandler };
+export { setupQrScanner, openQrScanner, closeQrScanner, registerQrResultHandler, extractAddressFromQrText };

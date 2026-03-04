@@ -13,7 +13,14 @@ const Net = {
     pend: new Map(),
     streams: new Map(),
     resolvePend: new Map(),
-    rpcPend: new Map()
+    rpcPend: new Map(),
+    telemetry: {
+      resolve: {
+        total: 0,
+        staleRejected: 0,
+        last: null
+      }
+    }
   },
   uploadChunkBytes: 80 * 1024, // default; per-call chunkSize can override
   uploadCache: new Map(), // uploadId -> { chunks, total, url, headers, timeout },
@@ -92,6 +99,7 @@ const Net = {
     const ctx = context && typeof context === 'object' ? context : {};
     let status = Number(ctx.status || 0) || 0;
     let url = String(ctx.url || '').trim();
+    const candidate = String(ctx.candidate || ctx.transport || '').trim().toLowerCase();
     let message = '';
 
     if (input && typeof input === 'object') {
@@ -105,7 +113,9 @@ const Net = {
     if (!message) message = String(input || '');
 
     const lowerMsg = message.toLowerCase();
-    const cloudflare = this.isCloudflareTunnelUrl(url) || /trycloudflare|cfargotunnel|cloudflare/.test(lowerMsg);
+    const cloudflare = this.isCloudflareTunnelUrl(url)
+      || candidate === 'cloudflare'
+      || /trycloudflare|cfargotunnel|cloudflare/.test(lowerMsg);
     const expiredHint = /stale|expired|offline|tunnel process is not running|url is stale|tunnel.*(dead|down)/.test(lowerMsg);
     const unavailableHint = /failed to fetch|networkerror|network error|connection reset|temporar|gateway|unreachable|timeout/.test(lowerMsg);
 
@@ -117,11 +127,120 @@ const Net = {
     return {
       stale,
       cloudflare,
+      candidate,
       status,
       url,
       reason,
       message
     };
+  },
+
+  _firstEndpoint(...values) {
+    for (const value of values) {
+      if (!value) continue;
+      if (typeof value === 'string') {
+        const text = value.trim();
+        if (text) return text;
+        continue;
+      }
+      if (typeof value !== 'object') continue;
+      const endpoint = String(
+        value.base_url ||
+        value.baseUrl ||
+        value.http_endpoint ||
+        value.httpEndpoint ||
+        value.public_base_url ||
+        value.nkn_address ||
+        value.address ||
+        value.url ||
+        ''
+      ).trim();
+      if (endpoint) return endpoint;
+    }
+    return '';
+  },
+
+  _extractResolveCandidates(entry = {}) {
+    const fallback = entry && typeof entry.fallback === 'object' ? entry.fallback : {};
+    const candidates = entry && typeof entry.candidates === 'object' ? entry.candidates : {};
+    return {
+      cloudflare: this._firstEndpoint(
+        candidates.cloudflare,
+        entry.cloudflare,
+        entry.tunnel_url,
+        entry.stale_tunnel_url,
+        fallback.cloudflare
+      ),
+      nkn: this._firstEndpoint(
+        candidates.nkn,
+        entry.nkn,
+        fallback.nkn
+      ),
+      local: this._firstEndpoint(
+        candidates.local,
+        entry.local,
+        entry.base_url,
+        fallback.local
+      )
+    };
+  },
+
+  _collectResolveDiagnostics(reply = {}) {
+    const resolved = (reply && typeof reply.resolved === 'object')
+      ? reply.resolved
+      : (reply?.snapshot && typeof reply.snapshot.resolved === 'object' ? reply.snapshot.resolved : {});
+    const staleRejections = [];
+    const selectedTransports = {};
+    for (const [service, rawEntry] of Object.entries(resolved || {})) {
+      if (!rawEntry || typeof rawEntry !== 'object') continue;
+      const entry = rawEntry;
+      const selected = String(entry.selected_transport || entry.transport || '').trim().toLowerCase();
+      if (selected) selectedTransports[service] = selected;
+      const candidates = this._extractResolveCandidates(entry);
+      const tunnelError = String(entry.tunnel_error || entry.error || '').trim();
+      const tunnelStatus = Number(entry.tunnel_status || 0) || 0;
+      const staleHint = this.classifyTunnelFailure(
+        tunnelError || entry,
+        { status: tunnelStatus, url: entry.tunnel_url || entry.stale_tunnel_url, candidate: 'cloudflare' }
+      );
+      const staleByPayload = !!entry.stale_tunnel_url || staleHint.stale;
+      if (selected === 'cloudflare' && staleByPayload && (candidates.nkn || candidates.local)) {
+        staleRejections.push({
+          service,
+          selected_transport: selected,
+          stale_reason: staleHint.reason || (entry.stale_tunnel_url ? 'stale_tunnel_url' : 'cloudflare_tunnel_stale'),
+          candidates
+        });
+      }
+    }
+    return {
+      selected_transports: selectedTransports,
+      stale_rejections: staleRejections,
+      stale_rejection_count: staleRejections.length
+    };
+  },
+
+  _normalizeResolveReply(reply = {}) {
+    const out = reply && typeof reply === 'object' ? { ...reply } : {};
+    const diagnostics = this._collectResolveDiagnostics(out);
+    out.discovery_source = String(
+      out.discovery_source ||
+      out.source ||
+      out.mode ||
+      (out.source_address ? 'nkn' : 'local')
+    ).trim().toLowerCase();
+    out.transport_decision = diagnostics.selected_transports;
+    out.stale_rejections = diagnostics.stale_rejections;
+    out.stale_rejection_count = diagnostics.stale_rejection_count;
+    this.nkn.telemetry.resolve.total = Number(this.nkn.telemetry.resolve.total || 0) + 1;
+    this.nkn.telemetry.resolve.staleRejected = Number(this.nkn.telemetry.resolve.staleRejected || 0) + diagnostics.stale_rejection_count;
+    this.nkn.telemetry.resolve.last = {
+      ts: Date.now(),
+      source: out.discovery_source || '',
+      stale_rejection_count: diagnostics.stale_rejection_count,
+      request_id: String(out.request_id || '')
+    };
+    return out;
   },
 
   isStaleTunnelFailure(input, context = {}) {
@@ -886,7 +1005,7 @@ const Net = {
           this.nkn.resolvePend.delete(requestId);
           reject(err);
         });
-    });
+    }).then((reply) => this._normalizeResolveReply(reply || {}));
   },
 
   async nknServiceRpc(arg1, arg2, arg3, arg4 = undefined) {
@@ -954,6 +1073,14 @@ const Net = {
       if (out && typeof out === 'object' && out.result && typeof out.result === 'object' && out.ok === undefined) {
         // Compatibility with nested teleoperation-style result payloads.
         Object.assign(out, out.result);
+      }
+      if (out && typeof out === 'object') {
+        if (!out.discovery_source) {
+          out.discovery_source = String(out.source || out.mode || (out.source_address ? 'nkn' : '')).trim().toLowerCase();
+        }
+        if (!out.selected_transport && out.selectedTransport) {
+          out.selected_transport = out.selectedTransport;
+        }
       }
       if (options.decodeBody && out && out.body_b64 && out.json == null) {
         try {
