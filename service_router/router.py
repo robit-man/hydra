@@ -12,6 +12,7 @@ Features
 """
 
 import argparse
+import asyncio
 import atexit
 import base64
 import codecs
@@ -77,14 +78,19 @@ def _ensure_venv() -> None:
 
 def _ensure_deps() -> None:
     need = []
-    for mod in ("requests", "python-dotenv", "qrcode", "flask", "werkzeug"):
+    dep_specs = (
+        ("requests", "requests"),
+        ("dotenv", "python-dotenv"),
+        ("qrcode", "qrcode"),
+        ("flask", "flask"),
+        ("werkzeug", "werkzeug"),
+        ("nats", "nats-py"),
+    )
+    for mod_name, pkg_name in dep_specs:
         try:
-            if mod == "python-dotenv":
-                __import__("dotenv")
-            else:
-                __import__(mod)
+            __import__(mod_name)
         except Exception:
-            need.append(mod)
+            need.append(pkg_name)
     if need:
         subprocess.check_call([str(PIP_BIN), "install", *need], cwd=BASE_DIR)
 
@@ -103,6 +109,10 @@ try:
     import qrcode  # type: ignore
 except Exception:  # pragma: no cover
     qrcode = None  # type: ignore
+try:
+    import nats  # type: ignore
+except Exception:  # pragma: no cover
+    nats = None  # type: ignore
 from cloudflared_manager import CloudflaredManager  # type: ignore
 
 try:
@@ -218,6 +228,20 @@ ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
         "auth_scheme": {"type": "str", "default": "Bearer"},
         "publish_interval_seconds": {"type": "int", "default": 45, "min": 5, "max": 3600},
         "publish_timeout_seconds": {"type": "float", "default": 6.0, "min": 1.0, "max": 120.0},
+        "max_backoff_seconds": {"type": "int", "default": 300, "min": 5, "max": 7200},
+        "include_unhealthy": {"type": "bool", "default": True},
+    },
+    "marketplace_nats": {
+        "enable_publish": {"type": "bool", "default": False},
+        "enable_subscribe": {"type": "bool", "default": False},
+        "broker_urls": {"type": "str", "default": "nats://127.0.0.1:4222"},
+        "catalog_subject": {"type": "str", "default": "hydra.market.catalog.v1"},
+        "status_subject": {"type": "str", "default": "hydra.market.status.v1"},
+        "subscribe_subjects": {"type": "str", "default": "hydra.market.catalog.v1,hydra.market.status.v1"},
+        "client_name": {"type": "str", "default": "hydra-router-marketplace-sync"},
+        "publish_interval_seconds": {"type": "int", "default": 45, "min": 5, "max": 3600},
+        "connect_timeout_seconds": {"type": "float", "default": 4.0, "min": 0.5, "max": 60.0},
+        "publish_timeout_seconds": {"type": "float", "default": 3.0, "min": 0.5, "max": 30.0},
         "max_backoff_seconds": {"type": "int", "default": 300, "min": 5, "max": 7200},
         "include_unhealthy": {"type": "bool", "default": True},
     },
@@ -404,6 +428,7 @@ SERVICE_TARGETS = {
     },
 }
 MARKETPLACE_VISIBILITY = {"public", "friends", "private"}
+NATS_SUBJECT_PATTERN = re.compile(r"^[A-Za-z0-9_.>*-]+$")
 
 
 def _normalize_marketplace_visibility(value: Any, default: str = "public") -> str:
@@ -466,6 +491,70 @@ def _normalize_marketplace_sync_targets(raw_urls: Any, fallback: Optional[List[s
         seen.add(normalized)
         out.append(normalized)
         if len(out) >= 32:
+            break
+    return out
+
+
+def _normalize_marketplace_nats_servers(raw_urls: Any, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    if isinstance(raw_urls, list):
+        values = [str(item or "").strip() for item in raw_urls]
+    elif isinstance(raw_urls, str):
+        values = [part.strip() for part in re.split(r"[,\n\r\t ]+", raw_urls)]
+    elif raw_urls is not None:
+        values = [str(raw_urls).strip()]
+    if not values:
+        values = [str(item or "").strip() for item in (fallback or [])]
+
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        parsed = urllib.parse.urlparse(text)
+        if parsed.scheme not in {"nats", "tls", "ws", "wss"}:
+            continue
+        if not parsed.netloc:
+            continue
+        normalized = urllib.parse.urlunparse(parsed._replace(fragment="")).rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+        if len(out) >= 24:
+            break
+    return out
+
+
+def _normalize_marketplace_nats_subject(raw_value: Any, default: str) -> str:
+    text = str(raw_value or "").strip()
+    if text and NATS_SUBJECT_PATTERN.match(text):
+        return text
+    fallback = str(default or "").strip() or "hydra.market.catalog.v1"
+    return fallback if NATS_SUBJECT_PATTERN.match(fallback) else "hydra.market.catalog.v1"
+
+
+def _normalize_marketplace_nats_subjects(raw_value: Any, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    if isinstance(raw_value, list):
+        values = [str(item or "").strip() for item in raw_value]
+    elif isinstance(raw_value, str):
+        values = [part.strip() for part in re.split(r"[,\n\r\t ]+", raw_value)]
+    elif raw_value is not None:
+        values = [str(raw_value).strip()]
+    if not values:
+        values = [str(item or "").strip() for item in (fallback or [])]
+
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        subject = _normalize_marketplace_nats_subject(value, "")
+        if not subject or subject in seen:
+            continue
+        seen.add(subject)
+        out.append(subject)
+        if len(out) >= 16:
             break
     return out
 
@@ -2656,6 +2745,20 @@ def _default_config() -> dict:
             "auth_scheme": "Bearer",
             "publish_interval_seconds": 45,
             "publish_timeout_seconds": 6.0,
+            "max_backoff_seconds": 300,
+            "include_unhealthy": True,
+        },
+        "marketplace_nats": {
+            "enable_publish": False,
+            "enable_subscribe": False,
+            "broker_urls": "nats://127.0.0.1:4222",
+            "catalog_subject": "hydra.market.catalog.v1",
+            "status_subject": "hydra.market.status.v1",
+            "subscribe_subjects": "hydra.market.catalog.v1,hydra.market.status.v1",
+            "client_name": "hydra-router-marketplace-sync",
+            "publish_interval_seconds": 45,
+            "connect_timeout_seconds": 4.0,
+            "publish_timeout_seconds": 3.0,
             "max_backoff_seconds": 300,
             "include_unhealthy": True,
         },
@@ -6964,6 +7067,36 @@ class Router:
             "failure_count": 0,
             "consecutive_failures": 0,
         }
+        self.marketplace_nats_cfg: Dict[str, Any] = {}
+        self.marketplace_nats_worker: Optional[threading.Thread] = None
+        self.marketplace_nats_state_lock = threading.Lock()
+        self.marketplace_nats_state: Dict[str, Any] = {
+            "worker_running": False,
+            "connected": False,
+            "active_server": "",
+            "connect_attempt_count": 0,
+            "connect_success_count": 0,
+            "publish_count": 0,
+            "publish_status_count": 0,
+            "receive_count": 0,
+            "stale_reject_count": 0,
+            "consecutive_failures": 0,
+            "last_connect_ts_ms": 0,
+            "last_disconnect_ts_ms": 0,
+            "last_publish_ts_ms": 0,
+            "last_receive_ts_ms": 0,
+            "last_publish_subject": "",
+            "last_receive_subject": "",
+            "last_catalog_checksum": "",
+            "last_status_checksum": "",
+            "last_error": "",
+            "next_due_ts_ms": 0,
+            "remote_catalog_count": 0,
+            "remote_provider_ids": [],
+        }
+        self.marketplace_remote_catalog_lock = threading.Lock()
+        self.marketplace_remote_catalogs: Dict[str, Dict[str, Any]] = {}
+        self.marketplace_remote_catalog_events: Deque[Dict[str, Any]] = deque(maxlen=120)
         self.service_publication_cfg: Dict[str, Dict[str, Any]] = {}
         self.catalog_runtime_overrides: Dict[str, Dict[str, Any]] = {}
         self.config_dirty = False
@@ -7201,6 +7334,72 @@ class Router:
         next_cfg["marketplace_sync"] = next_marketplace_sync_cfg
         next_marketplace_sync_runtime = dict(next_marketplace_sync_cfg)
         next_marketplace_sync_runtime["target_urls_list"] = list(next_marketplace_sync_targets)
+        marketplace_nats_cfg = dict(next_cfg.get("marketplace_nats", {}))
+        next_marketplace_nats_cfg = {
+            "enable_publish": self._as_bool(marketplace_nats_cfg.get("enable_publish"), False),
+            "enable_subscribe": self._as_bool(marketplace_nats_cfg.get("enable_subscribe"), False),
+            "broker_urls": str(marketplace_nats_cfg.get("broker_urls") or "").strip(),
+            "catalog_subject": _normalize_marketplace_nats_subject(
+                marketplace_nats_cfg.get("catalog_subject"),
+                "hydra.market.catalog.v1",
+            ),
+            "status_subject": _normalize_marketplace_nats_subject(
+                marketplace_nats_cfg.get("status_subject"),
+                "hydra.market.status.v1",
+            ),
+            "subscribe_subjects": str(marketplace_nats_cfg.get("subscribe_subjects") or "").strip(),
+            "client_name": str(
+                marketplace_nats_cfg.get("client_name") or "hydra-router-marketplace-sync"
+            ).strip() or "hydra-router-marketplace-sync",
+            "publish_interval_seconds": self._as_int(
+                marketplace_nats_cfg.get("publish_interval_seconds"),
+                45,
+                minimum=5,
+                maximum=3600,
+            ),
+            "connect_timeout_seconds": self._as_float(
+                marketplace_nats_cfg.get("connect_timeout_seconds"),
+                4.0,
+                minimum=0.5,
+                maximum=60.0,
+            ),
+            "publish_timeout_seconds": self._as_float(
+                marketplace_nats_cfg.get("publish_timeout_seconds"),
+                3.0,
+                minimum=0.5,
+                maximum=30.0,
+            ),
+            "max_backoff_seconds": self._as_int(
+                marketplace_nats_cfg.get("max_backoff_seconds"),
+                300,
+                minimum=5,
+                maximum=7200,
+            ),
+            "include_unhealthy": self._as_bool(marketplace_nats_cfg.get("include_unhealthy"), True),
+        }
+        next_marketplace_nats_servers = _normalize_marketplace_nats_servers(
+            next_marketplace_nats_cfg.get("broker_urls"),
+            fallback=["nats://127.0.0.1:4222"],
+        )
+        normalized_broker_csv = ",".join(next_marketplace_nats_servers)
+        if normalized_broker_csv != next_marketplace_nats_cfg["broker_urls"]:
+            next_marketplace_nats_cfg["broker_urls"] = normalized_broker_csv
+            changed = True
+        next_marketplace_nats_subscribe_subjects = _normalize_marketplace_nats_subjects(
+            next_marketplace_nats_cfg.get("subscribe_subjects"),
+            fallback=[
+                next_marketplace_nats_cfg["catalog_subject"],
+                next_marketplace_nats_cfg["status_subject"],
+            ],
+        )
+        normalized_subjects_csv = ",".join(next_marketplace_nats_subscribe_subjects)
+        if normalized_subjects_csv != next_marketplace_nats_cfg["subscribe_subjects"]:
+            next_marketplace_nats_cfg["subscribe_subjects"] = normalized_subjects_csv
+            changed = True
+        next_cfg["marketplace_nats"] = next_marketplace_nats_cfg
+        next_marketplace_nats_runtime = dict(next_marketplace_nats_cfg)
+        next_marketplace_nats_runtime["broker_urls_list"] = list(next_marketplace_nats_servers)
+        next_marketplace_nats_runtime["subscribe_subjects_list"] = list(next_marketplace_nats_subscribe_subjects)
         service_publication_cfg = self._normalize_service_publication_map(
             next_cfg.get("service_publication"),
             marketplace_cfg=next_marketplace_cfg,
@@ -7257,6 +7456,7 @@ class Router:
         self.ticket_accepted_kids = list(next_ticket_kids)
         self.marketplace_cfg = next_marketplace_cfg
         self.marketplace_sync_cfg = next_marketplace_sync_runtime
+        self.marketplace_nats_cfg = next_marketplace_nats_runtime
         self.service_publication_cfg = service_publication_cfg
 
         if hasattr(self, "marketplace_sync_state_lock") and hasattr(self, "marketplace_sync_state"):
@@ -7267,6 +7467,15 @@ class Router:
                         self.marketplace_sync_state["next_due_ts_ms"] = int(time.time() * 1000)
                 else:
                     self.marketplace_sync_state["next_due_ts_ms"] = 0
+        if hasattr(self, "marketplace_nats_state_lock") and hasattr(self, "marketplace_nats_state"):
+            with self.marketplace_nats_state_lock:
+                enable_publish = self._as_bool(self.marketplace_nats_cfg.get("enable_publish"), False)
+                has_servers = bool(next_marketplace_nats_servers)
+                if enable_publish and has_servers:
+                    if int(self.marketplace_nats_state.get("next_due_ts_ms") or 0) <= 0:
+                        self.marketplace_nats_state["next_due_ts_ms"] = int(time.time() * 1000)
+                else:
+                    self.marketplace_nats_state["next_due_ts_ms"] = 0
 
         if getattr(self, "ui", None):
             self.ui.set_chunk_upload_kb(next_chunk_upload_kb)
@@ -7437,6 +7646,10 @@ class Router:
             lan_ip = self._detect_lan_ip()
             if lan_ip:
                 urls["lan"] = f"http://{lan_ip}:{port}"
+        nats_cfg = self._marketplace_nats_config_payload()
+        brokers = nats_cfg.get("broker_urls") if isinstance(nats_cfg.get("broker_urls"), list) else []
+        if brokers:
+            urls["nats"] = str(brokers[0] or "")
         return urls
 
     def _detect_lan_ip(self) -> str:
@@ -7538,12 +7751,21 @@ class Router:
             "ws_endpoint": tunnel_url.replace("https://", "wss://") if tunnel_url else "",
             "error": "",
         }
+        nats_payload = {
+            "state": "inactive",
+            "public_base_url": "",
+            "broker_url": "",
+            "subject": "",
+            "error": "",
+        }
+        with contextlib.suppress(Exception):
+            nats_payload = self._marketplace_nats_fallback_payload()
         return {
             "selected_transport": selected,
             "order": ["cloudflare", "upnp", "nats", "nkn", "local"],
             "cloudflare": cloudflare_payload,
             "upnp": {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""},
-            "nats": {"state": "inactive", "broker_url": "", "subject": "", "error": ""},
+            "nats": nats_payload,
             "nkn": {"state": "inactive", "nkn_address": "", "topic": "", "error": ""},
             "local": local_payload,
         }
@@ -7688,7 +7910,7 @@ class Router:
         fallback.setdefault("order", ["cloudflare", "upnp", "nats", "nkn", "local"])
         fallback.setdefault("cloudflare", {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""})
         fallback.setdefault("upnp", {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""})
-        fallback.setdefault("nats", {"state": "inactive", "broker_url": "", "subject": "", "error": ""})
+        fallback.setdefault("nats", self._marketplace_nats_fallback_payload())
         fallback.setdefault("nkn", {"state": "inactive", "nkn_address": "", "topic": "", "error": ""})
         fallback.setdefault(
             "local",
@@ -9310,6 +9532,8 @@ class Router:
                 "marketplace_catalog_overrides": "/marketplace/catalog/overrides",
                 "marketplace_sync": "/marketplace/sync",
                 "marketplace_publish": "/marketplace/catalog/publish",
+                "marketplace_nats": "/marketplace/nats",
+                "marketplace_nats_publish": "/marketplace/nats/publish",
                 "dashboard_data": "/dashboard/data",
             },
         }
@@ -9574,6 +9798,147 @@ class Router:
             return ""
         return str(os.environ.get(env_name) or "").strip()
 
+    def _marketplace_nats_enabled(self, cfg_override: Optional[Dict[str, Any]] = None) -> bool:
+        cfg = cfg_override if isinstance(cfg_override, dict) else (
+            self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
+        )
+        return bool(
+            self._as_bool(cfg.get("enable_publish"), False)
+            or self._as_bool(cfg.get("enable_subscribe"), False)
+        )
+
+    def _marketplace_nats_backoff_seconds(self, consecutive_failures: int = 0) -> int:
+        cfg = self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
+        base_interval = self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600)
+        max_backoff = self._as_int(cfg.get("max_backoff_seconds"), 300, minimum=5, maximum=7200)
+        failures = int(max(0, consecutive_failures))
+        if failures <= 0:
+            return base_interval
+        exponent = min(6, failures - 1)
+        backoff = base_interval * (2 ** exponent)
+        return int(min(max_backoff, max(base_interval, backoff)))
+
+    def _marketplace_nats_config_payload(self) -> Dict[str, Any]:
+        cfg = self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
+        brokers = _normalize_marketplace_nats_servers(
+            cfg.get("broker_urls_list"),
+            fallback=_normalize_marketplace_nats_servers(cfg.get("broker_urls"), fallback=["nats://127.0.0.1:4222"]),
+        )
+        catalog_subject = _normalize_marketplace_nats_subject(cfg.get("catalog_subject"), "hydra.market.catalog.v1")
+        status_subject = _normalize_marketplace_nats_subject(cfg.get("status_subject"), "hydra.market.status.v1")
+        subscribe_subjects = _normalize_marketplace_nats_subjects(
+            cfg.get("subscribe_subjects_list"),
+            fallback=_normalize_marketplace_nats_subjects(
+                cfg.get("subscribe_subjects"),
+                fallback=[catalog_subject, status_subject],
+            ),
+        )
+        return {
+            "enabled": self._marketplace_nats_enabled(cfg),
+            "enable_publish": self._as_bool(cfg.get("enable_publish"), False),
+            "enable_subscribe": self._as_bool(cfg.get("enable_subscribe"), False),
+            "broker_urls": list(brokers),
+            "broker_count": len(brokers),
+            "catalog_subject": catalog_subject,
+            "status_subject": status_subject,
+            "subscribe_subjects": list(subscribe_subjects),
+            "client_name": str(cfg.get("client_name") or "hydra-router-marketplace-sync"),
+            "publish_interval_seconds": self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600),
+            "connect_timeout_seconds": self._as_float(cfg.get("connect_timeout_seconds"), 4.0, minimum=0.5, maximum=60.0),
+            "publish_timeout_seconds": self._as_float(cfg.get("publish_timeout_seconds"), 3.0, minimum=0.5, maximum=30.0),
+            "max_backoff_seconds": self._as_int(cfg.get("max_backoff_seconds"), 300, minimum=5, maximum=7200),
+            "include_unhealthy": self._as_bool(cfg.get("include_unhealthy"), True),
+            "dependency_available": bool(nats is not None),
+        }
+
+    def _marketplace_remote_catalogs_payload(self) -> Dict[str, Any]:
+        with self.marketplace_remote_catalog_lock:
+            providers = sorted(
+                self.marketplace_remote_catalogs.values(),
+                key=lambda item: int(item.get("received_at_ms") or 0),
+                reverse=True,
+            )
+            trimmed = []
+            for item in providers[:48]:
+                trimmed.append(
+                    {
+                        "provider_id": str(item.get("provider_id") or ""),
+                        "provider_network": str(item.get("provider_network") or ""),
+                        "generated_at_ms": int(item.get("generated_at_ms") or 0),
+                        "received_at_ms": int(item.get("received_at_ms") or 0),
+                        "catalog_checksum": str(item.get("catalog_checksum") or ""),
+                        "subject": str(item.get("subject") or ""),
+                        "source": str(item.get("source") or ""),
+                    }
+                )
+            events = list(self.marketplace_remote_catalog_events)[-24:]
+        return {
+            "count": len(providers),
+            "providers": trimmed,
+            "recent_events": events,
+        }
+
+    def _marketplace_nats_state_payload(self) -> Dict[str, Any]:
+        cfg = self._marketplace_nats_config_payload()
+        remote_payload = self._marketplace_remote_catalogs_payload()
+        with self.marketplace_nats_state_lock:
+            st = self.marketplace_nats_state if isinstance(self.marketplace_nats_state, dict) else {}
+            state = {
+                "worker_running": bool(st.get("worker_running")),
+                "connected": bool(st.get("connected")),
+                "active_server": str(st.get("active_server") or ""),
+                "connect_attempt_count": int(st.get("connect_attempt_count") or 0),
+                "connect_success_count": int(st.get("connect_success_count") or 0),
+                "publish_count": int(st.get("publish_count") or 0),
+                "publish_status_count": int(st.get("publish_status_count") or 0),
+                "receive_count": int(st.get("receive_count") or 0),
+                "stale_reject_count": int(st.get("stale_reject_count") or 0),
+                "consecutive_failures": int(st.get("consecutive_failures") or 0),
+                "last_connect_ts_ms": int(st.get("last_connect_ts_ms") or 0),
+                "last_disconnect_ts_ms": int(st.get("last_disconnect_ts_ms") or 0),
+                "last_publish_ts_ms": int(st.get("last_publish_ts_ms") or 0),
+                "last_receive_ts_ms": int(st.get("last_receive_ts_ms") or 0),
+                "last_publish_subject": str(st.get("last_publish_subject") or ""),
+                "last_receive_subject": str(st.get("last_receive_subject") or ""),
+                "last_catalog_checksum": str(st.get("last_catalog_checksum") or ""),
+                "last_status_checksum": str(st.get("last_status_checksum") or ""),
+                "last_error": str(st.get("last_error") or ""),
+                "next_due_ts_ms": int(st.get("next_due_ts_ms") or 0),
+            }
+        state["remote_catalog_count"] = int(remote_payload.get("count") or 0)
+        return {
+            "status": "success",
+            "config": cfg,
+            "state": state,
+            "remote_catalogs": remote_payload,
+        }
+
+    def _marketplace_nats_fallback_payload(self) -> Dict[str, Any]:
+        cfg = self._marketplace_nats_config_payload()
+        with self.marketplace_nats_state_lock:
+            st = self.marketplace_nats_state if isinstance(self.marketplace_nats_state, dict) else {}
+            connected = bool(st.get("connected"))
+            last_error = str(st.get("last_error") or "")
+        servers = cfg.get("broker_urls") if isinstance(cfg.get("broker_urls"), list) else []
+        broker_url = str(servers[0] or "") if servers else ""
+        subject = str(cfg.get("catalog_subject") or "")
+        if connected and broker_url:
+            state = "active"
+        elif self._marketplace_nats_enabled(cfg) and broker_url:
+            state = "configured"
+        else:
+            state = "inactive"
+        public_base = f"{broker_url.rstrip('/')}/{subject}" if broker_url and subject else broker_url
+        return {
+            "state": state,
+            "public_base_url": public_base,
+            "http_endpoint": "",
+            "ws_endpoint": "",
+            "broker_url": broker_url,
+            "subject": subject,
+            "error": last_error if state != "active" else "",
+        }
+
     def _marketplace_sync_backoff_seconds(self, consecutive_failures: int = 0) -> int:
         cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
         base_interval = self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600)
@@ -9611,25 +9976,33 @@ class Router:
         with self.marketplace_sync_state_lock:
             st = self.marketplace_sync_state if isinstance(self.marketplace_sync_state, dict) else {}
             results = list(st.get("results", [])) if isinstance(st.get("results"), deque) else []
-            return {
-                "status": "success",
-                "config": cfg,
-                "state": {
-                    "in_flight": bool(st.get("in_flight")),
-                    "last_trigger": str(st.get("last_trigger") or ""),
-                    "last_attempt_ts_ms": int(st.get("last_attempt_ts_ms") or 0),
-                    "last_success_ts_ms": int(st.get("last_success_ts_ms") or 0),
-                    "last_failure_ts_ms": int(st.get("last_failure_ts_ms") or 0),
-                    "last_error": str(st.get("last_error") or ""),
-                    "last_status_code": int(st.get("last_status_code") or 0),
-                    "next_due_ts_ms": int(st.get("next_due_ts_ms") or 0),
-                    "success_count": int(st.get("success_count") or 0),
-                    "failure_count": int(st.get("failure_count") or 0),
-                    "consecutive_failures": int(st.get("consecutive_failures") or 0),
-                    "last_result": _json_clone(st.get("last_result")) if isinstance(st.get("last_result"), dict) else {},
-                    "recent_results": results[-10:],
-                },
+            http_state = {
+                "in_flight": bool(st.get("in_flight")),
+                "last_trigger": str(st.get("last_trigger") or ""),
+                "last_attempt_ts_ms": int(st.get("last_attempt_ts_ms") or 0),
+                "last_success_ts_ms": int(st.get("last_success_ts_ms") or 0),
+                "last_failure_ts_ms": int(st.get("last_failure_ts_ms") or 0),
+                "last_error": str(st.get("last_error") or ""),
+                "last_status_code": int(st.get("last_status_code") or 0),
+                "next_due_ts_ms": int(st.get("next_due_ts_ms") or 0),
+                "success_count": int(st.get("success_count") or 0),
+                "failure_count": int(st.get("failure_count") or 0),
+                "consecutive_failures": int(st.get("consecutive_failures") or 0),
+                "last_result": _json_clone(st.get("last_result")) if isinstance(st.get("last_result"), dict) else {},
+                "recent_results": results[-10:],
             }
+        nats_payload = self._marketplace_nats_state_payload()
+        return {
+            "status": "success",
+            "config": cfg,
+            "state": http_state,
+            "http": {
+                "config": cfg,
+                "state": http_state,
+            },
+            "nats": nats_payload,
+            "remote_catalogs": nats_payload.get("remote_catalogs") if isinstance(nats_payload, dict) else {},
+        }
 
     def _build_marketplace_sync_event(
         self,
@@ -9664,6 +10037,472 @@ class Router:
                 "summary": summary,
                 "catalog": catalog,
             },
+        }
+
+    def _build_marketplace_status_event(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        include_unhealthy: Optional[bool] = None,
+        subject: str = "",
+    ) -> Dict[str, Any]:
+        catalog = self._marketplace_catalog_payload(snapshot, include_unhealthy=include_unhealthy)
+        provider = catalog.get("provider") if isinstance(catalog.get("provider"), dict) else {}
+        summary = catalog.get("summary") if isinstance(catalog.get("summary"), dict) else {}
+        interop = self._interop_contract_payload()
+        addresses = self._current_node_addresses()
+        source_address = addresses[0] if addresses else ""
+        ts_ms = int(time.time() * 1000)
+        return {
+            "type": "market-service-status",
+            "event": "market.service.status",
+            "message_id": f"market-status-{uuid.uuid4().hex[:16]}",
+            "ts": ts_ms,
+            "source_address": source_address,
+            "source_network": str((self.marketplace_cfg or {}).get("provider_network") or "hydra"),
+            "subject": str(subject or ""),
+            "interop_contract": interop,
+            "interop_contract_version": str(interop.get("version") or ""),
+            "interop_contract_compat_min_version": str(interop.get("compat_min_version") or ""),
+            "interop_contract_namespace": str(interop.get("namespace") or ""),
+            "provider": provider,
+            "summary": summary,
+            "status": {
+                "state": "online",
+                "service_count": int(summary.get("service_count") or 0),
+                "healthy_count": int(summary.get("healthy_count") or 0),
+                "catalog_ready": bool(summary.get("catalog_ready")),
+                "generated_at_ms": int(catalog.get("generated_at_ms") or ts_ms),
+            },
+            "catalog": catalog,
+            "payload": {
+                "provider": provider,
+                "summary": summary,
+                "status": {
+                    "state": "online",
+                    "service_count": int(summary.get("service_count") or 0),
+                    "healthy_count": int(summary.get("healthy_count") or 0),
+                },
+                "catalog": catalog,
+            },
+        }
+
+    @staticmethod
+    def _marketplace_sync_event_checksum(payload: Dict[str, Any]) -> str:
+        digest = hashlib.sha256(
+            json.dumps(payload if isinstance(payload, dict) else {}, sort_keys=True, ensure_ascii=False).encode(
+                "utf-8",
+                errors="replace",
+            )
+        ).hexdigest()
+        return digest
+
+    def _marketplace_nats_prepare_packets(
+        self,
+        *,
+        include_unhealthy: Optional[bool] = None,
+        force_refresh: bool = False,
+        include_catalog: bool = True,
+        include_status: bool = True,
+        catalog_subject: str = "",
+        status_subject: str = "",
+    ) -> List[Dict[str, Any]]:
+        snapshot = self.get_service_snapshot(force_refresh=force_refresh)
+        packets: List[Dict[str, Any]] = []
+        if include_catalog:
+            catalog_event = self._build_marketplace_sync_event(
+                snapshot,
+                include_unhealthy=include_unhealthy,
+                target_url="",
+            )
+            catalog_event["transport"] = "nats"
+            catalog_event["source_network"] = str((self.marketplace_cfg or {}).get("provider_network") or "hydra")
+            catalog_event["subject"] = str(catalog_subject or "")
+            packets.append(
+                {
+                    "event": "market.service.catalog",
+                    "subject": str(catalog_subject or ""),
+                    "payload": catalog_event,
+                    "checksum": self._marketplace_sync_event_checksum(
+                        catalog_event.get("catalog") if isinstance(catalog_event.get("catalog"), dict) else catalog_event
+                    ),
+                }
+            )
+        if include_status:
+            status_event = self._build_marketplace_status_event(
+                snapshot,
+                include_unhealthy=include_unhealthy,
+                subject=status_subject,
+            )
+            status_event["transport"] = "nats"
+            packets.append(
+                {
+                    "event": "market.service.status",
+                    "subject": str(status_subject or ""),
+                    "payload": status_event,
+                    "checksum": self._marketplace_sync_event_checksum(status_event),
+                }
+            )
+        return packets
+
+    def _marketplace_nats_record_error(self, error_text: str) -> None:
+        text = str(error_text or "").strip()
+        if not text:
+            return
+        now_ms = int(time.time() * 1000)
+        with self.marketplace_nats_state_lock:
+            self.marketplace_nats_state["last_error"] = text
+            self.marketplace_nats_state["last_disconnect_ts_ms"] = now_ms
+            self.marketplace_nats_state["connected"] = False
+            self.marketplace_nats_state["consecutive_failures"] = int(
+                self.marketplace_nats_state.get("consecutive_failures") or 0
+            ) + 1
+            delay_s = self._marketplace_nats_backoff_seconds(
+                int(self.marketplace_nats_state.get("consecutive_failures") or 0)
+            )
+            self.marketplace_nats_state["next_due_ts_ms"] = now_ms + int(delay_s * 1000)
+
+    def _marketplace_nats_ingest_envelope(
+        self,
+        payload: Dict[str, Any],
+        *,
+        subject: str = "",
+        source: str = "nats",
+    ) -> Dict[str, Any]:
+        safe_payload = payload if isinstance(payload, dict) else {}
+        event_raw = str(safe_payload.get("event") or safe_payload.get("type") or "").strip().lower()
+        if event_raw in {"market-service-catalog", "market.service.catalog"}:
+            event_name = "market.service.catalog"
+        elif event_raw in {"market-service-status", "market.service.status"}:
+            event_name = "market.service.status"
+        else:
+            return {"ok": False, "error": "unsupported_event"}
+
+        contract_status = self._interop_contract_status_from_payload(safe_payload)
+        if not bool(contract_status.get("ok")):
+            return {"ok": False, "error": "interop_contract_mismatch", "contract": contract_status}
+
+        payload_section = safe_payload.get("payload") if isinstance(safe_payload.get("payload"), dict) else {}
+        catalog = (
+            safe_payload.get("catalog")
+            if isinstance(safe_payload.get("catalog"), dict)
+            else payload_section.get("catalog")
+            if isinstance(payload_section, dict)
+            else {}
+        )
+        if not isinstance(catalog, dict):
+            catalog = {}
+        if not catalog and event_name == "market.service.status":
+            provider = safe_payload.get("provider") if isinstance(safe_payload.get("provider"), dict) else {}
+            summary = safe_payload.get("summary") if isinstance(safe_payload.get("summary"), dict) else {}
+            if isinstance(payload_section, dict):
+                provider = provider if provider else (
+                    payload_section.get("provider") if isinstance(payload_section.get("provider"), dict) else {}
+                )
+                summary = summary if summary else (
+                    payload_section.get("summary") if isinstance(payload_section.get("summary"), dict) else {}
+                )
+            catalog = {
+                "generated_at_ms": int(safe_payload.get("ts") or time.time() * 1000),
+                "provider": provider if isinstance(provider, dict) else {},
+                "summary": summary if isinstance(summary, dict) else {},
+                "services": [],
+            }
+
+        provider = catalog.get("provider") if isinstance(catalog.get("provider"), dict) else {}
+        provider_id = str(
+            provider.get("provider_id")
+            or provider.get("provider_key_fingerprint")
+            or safe_payload.get("source_address")
+            or ""
+        ).strip()
+        if not provider_id:
+            return {"ok": False, "error": "missing_provider_id"}
+
+        local_provider_id = str((self.marketplace_cfg or {}).get("provider_id") or "hydra-router").strip()
+        if provider_id == local_provider_id:
+            return {"ok": False, "error": "self_catalog_ignored"}
+
+        generated_at_ms = int(
+            catalog.get("generated_at_ms")
+            or safe_payload.get("generated_at_ms")
+            or safe_payload.get("ts")
+            or 0
+        )
+        if generated_at_ms <= 0:
+            generated_at_ms = int(time.time() * 1000)
+        catalog_checksum = self._marketplace_sync_event_checksum(catalog)
+        now_ms = int(time.time() * 1000)
+
+        stale = False
+        with self.marketplace_remote_catalog_lock:
+            existing = self.marketplace_remote_catalogs.get(provider_id) if isinstance(self.marketplace_remote_catalogs, dict) else None
+            if isinstance(existing, dict):
+                prev_generated = int(existing.get("generated_at_ms") or 0)
+                prev_checksum = str(existing.get("catalog_checksum") or "")
+                if prev_generated > generated_at_ms:
+                    stale = True
+                elif prev_generated == generated_at_ms and prev_checksum and prev_checksum != catalog_checksum:
+                    stale = True
+            if stale:
+                self.marketplace_remote_catalog_events.append(
+                    {
+                        "ts_ms": now_ms,
+                        "provider_id": provider_id,
+                        "subject": str(subject or ""),
+                        "source": str(source or "nats"),
+                        "event": event_name,
+                        "state": "stale_rejected",
+                    }
+                )
+            else:
+                entry = {
+                    "provider_id": provider_id,
+                    "provider_network": str(provider.get("provider_network") or ""),
+                    "generated_at_ms": generated_at_ms,
+                    "received_at_ms": now_ms,
+                    "catalog_checksum": catalog_checksum,
+                    "subject": str(subject or ""),
+                    "source": str(source or "nats"),
+                    "event": event_name,
+                    "catalog": _json_clone(catalog),
+                }
+                self.marketplace_remote_catalogs[provider_id] = entry
+                self.marketplace_remote_catalog_events.append(
+                    {
+                        "ts_ms": now_ms,
+                        "provider_id": provider_id,
+                        "subject": str(subject or ""),
+                        "source": str(source or "nats"),
+                        "event": event_name,
+                        "state": "ingested",
+                        "catalog_checksum": catalog_checksum,
+                    }
+                )
+
+        with self.marketplace_nats_state_lock:
+            if stale:
+                self.marketplace_nats_state["stale_reject_count"] = int(
+                    self.marketplace_nats_state.get("stale_reject_count") or 0
+                ) + 1
+            else:
+                self.marketplace_nats_state["receive_count"] = int(self.marketplace_nats_state.get("receive_count") or 0) + 1
+                self.marketplace_nats_state["last_receive_ts_ms"] = now_ms
+                self.marketplace_nats_state["last_receive_subject"] = str(subject or "")
+            self.marketplace_nats_state["remote_catalog_count"] = len(self.marketplace_remote_catalogs)
+            self.marketplace_nats_state["remote_provider_ids"] = sorted(list(self.marketplace_remote_catalogs.keys()))[:96]
+
+        return {
+            "ok": not stale,
+            "stale": stale,
+            "provider_id": provider_id,
+            "generated_at_ms": generated_at_ms,
+            "catalog_checksum": catalog_checksum,
+        }
+
+    def _publish_marketplace_catalog_nats_once(
+        self,
+        *,
+        include_unhealthy: Optional[bool] = None,
+        timeout_s: Optional[float] = None,
+        force_refresh: bool = False,
+        dry_run: bool = False,
+        include_catalog: bool = True,
+        include_status: bool = True,
+        catalog_subject_override: str = "",
+        status_subject_override: str = "",
+        trigger: str = "manual",
+    ) -> Dict[str, Any]:
+        cfg = self._marketplace_nats_config_payload()
+        if not bool(cfg.get("enabled")):
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "error": "marketplace_nats_disabled",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+        if nats is None:
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "error": "nats_dependency_unavailable",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+        servers = cfg.get("broker_urls") if isinstance(cfg.get("broker_urls"), list) else []
+        if not servers:
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "error": "no_nats_broker_urls_configured",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+        catalog_subject = _normalize_marketplace_nats_subject(catalog_subject_override, str(cfg.get("catalog_subject") or ""))
+        status_subject = _normalize_marketplace_nats_subject(status_subject_override, str(cfg.get("status_subject") or ""))
+        packets = self._marketplace_nats_prepare_packets(
+            include_unhealthy=include_unhealthy,
+            force_refresh=force_refresh,
+            include_catalog=include_catalog,
+            include_status=include_status,
+            catalog_subject=catalog_subject,
+            status_subject=status_subject,
+        )
+        if not packets:
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "error": "no_packets_selected",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+        if dry_run:
+            return {
+                "ok": True,
+                "trigger": str(trigger or "manual"),
+                "attempted": len(packets),
+                "sent": len(packets),
+                "failed": 0,
+                "error": "",
+                "results": [
+                    {
+                        "event": str(item.get("event") or ""),
+                        "subject": str(item.get("subject") or ""),
+                        "ok": True,
+                        "status": 0,
+                        "catalog_checksum": str(item.get("checksum") or ""),
+                        "dry_run": True,
+                    }
+                    for item in packets
+                ],
+                "dry_run": True,
+            }
+
+        publish_timeout = self._as_float(
+            timeout_s,
+            cfg.get("publish_timeout_seconds") if isinstance(cfg, dict) else 3.0,
+            minimum=0.5,
+            maximum=30.0,
+        )
+        connect_timeout = self._as_float(
+            cfg.get("connect_timeout_seconds"),
+            4.0,
+            minimum=0.5,
+            maximum=60.0,
+        )
+        started_at = time.time()
+        results: List[Dict[str, Any]] = []
+        sent = 0
+
+        async def _publish_async() -> None:
+            nonlocal sent
+            nc = await nats.connect(
+                servers=servers,
+                name=str(cfg.get("client_name") or "hydra-router-marketplace-sync"),
+                connect_timeout=connect_timeout,
+                allow_reconnect=True,
+                max_reconnect_attempts=0,
+            )
+            try:
+                for item in packets:
+                    subject = str(item.get("subject") or "")
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                    event_name = str(item.get("event") or "")
+                    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8", errors="replace")
+                    req_started = time.time()
+                    await nc.publish(subject, encoded)
+                    await nc.flush(timeout=publish_timeout)
+                    latency_ms = round((time.time() - req_started) * 1000.0, 2)
+                    sent += 1
+                    results.append(
+                        {
+                            "event": event_name,
+                            "subject": subject,
+                            "ok": True,
+                            "status": 200,
+                            "latency_ms": latency_ms,
+                            "catalog_checksum": str(item.get("checksum") or ""),
+                            "error": "",
+                        }
+                    )
+            finally:
+                await nc.close()
+
+        try:
+            asyncio.run(_publish_async())
+        except Exception as exc:
+            self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
+            if not results:
+                results.append(
+                    {
+                        "event": "",
+                        "subject": "",
+                        "ok": False,
+                        "status": 0,
+                        "latency_ms": round((time.time() - started_at) * 1000.0, 2),
+                        "catalog_checksum": "",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            attempted = len(packets)
+            failed = max(0, attempted - sent)
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": attempted,
+                "sent": sent,
+                "failed": failed,
+                "error": str(results[-1].get("error") or "nats_publish_failed"),
+                "results": results,
+                "dry_run": False,
+                "duration_ms": int(max(0.0, (time.time() - started_at) * 1000.0)),
+            }
+
+        now_ms = int(time.time() * 1000)
+        with self.marketplace_nats_state_lock:
+            self.marketplace_nats_state["publish_count"] = int(self.marketplace_nats_state.get("publish_count") or 0) + sent
+            self.marketplace_nats_state["publish_status_count"] = int(self.marketplace_nats_state.get("publish_status_count") or 0) + (
+                1 if include_status else 0
+            )
+            self.marketplace_nats_state["last_publish_ts_ms"] = now_ms
+            if packets:
+                self.marketplace_nats_state["last_publish_subject"] = str(packets[-1].get("subject") or "")
+            for item in packets:
+                if str(item.get("event") or "") == "market.service.catalog":
+                    self.marketplace_nats_state["last_catalog_checksum"] = str(item.get("checksum") or "")
+                if str(item.get("event") or "") == "market.service.status":
+                    self.marketplace_nats_state["last_status_checksum"] = str(item.get("checksum") or "")
+            self.marketplace_nats_state["last_error"] = ""
+            self.marketplace_nats_state["consecutive_failures"] = 0
+            delay_s = self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600)
+            self.marketplace_nats_state["next_due_ts_ms"] = now_ms + int(delay_s * 1000)
+
+        attempted = len(packets)
+        failed = max(0, attempted - sent)
+        return {
+            "ok": failed == 0,
+            "trigger": str(trigger or "manual"),
+            "attempted": attempted,
+            "sent": sent,
+            "failed": failed,
+            "error": "",
+            "results": results,
+            "dry_run": False,
+            "duration_ms": int(max(0.0, (time.time() - started_at) * 1000.0)),
+            "generated_at_ms": int(time.time() * 1000),
         }
 
     def _publish_marketplace_catalog_targets(
@@ -10017,6 +10856,223 @@ class Router:
                     "dry_run": False,
                 }
             )
+
+    async def _run_marketplace_nats_worker_async(self) -> None:
+        if nats is None:
+            self._marketplace_nats_record_error("nats_dependency_unavailable")
+            return
+        while not self.stop.is_set():
+            cfg = self._marketplace_nats_config_payload()
+            if not bool(cfg.get("enabled")):
+                break
+            servers = cfg.get("broker_urls") if isinstance(cfg.get("broker_urls"), list) else []
+            if not servers:
+                self._marketplace_nats_record_error("no_nats_broker_urls_configured")
+                await asyncio.sleep(2.0)
+                continue
+            connect_timeout = self._as_float(cfg.get("connect_timeout_seconds"), 4.0, minimum=0.5, maximum=60.0)
+            publish_timeout = self._as_float(cfg.get("publish_timeout_seconds"), 3.0, minimum=0.5, maximum=30.0)
+
+            async def _error_cb(exc: Exception) -> None:
+                self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
+
+            async def _disconnected_cb() -> None:
+                now_ms = int(time.time() * 1000)
+                with self.marketplace_nats_state_lock:
+                    self.marketplace_nats_state["connected"] = False
+                    self.marketplace_nats_state["last_disconnect_ts_ms"] = now_ms
+
+            async def _reconnected_cb() -> None:
+                now_ms = int(time.time() * 1000)
+                with self.marketplace_nats_state_lock:
+                    self.marketplace_nats_state["connected"] = True
+                    self.marketplace_nats_state["last_connect_ts_ms"] = now_ms
+                    self.marketplace_nats_state["consecutive_failures"] = 0
+                    self.marketplace_nats_state["last_error"] = ""
+
+            async def _closed_cb() -> None:
+                now_ms = int(time.time() * 1000)
+                with self.marketplace_nats_state_lock:
+                    self.marketplace_nats_state["connected"] = False
+                    self.marketplace_nats_state["last_disconnect_ts_ms"] = now_ms
+
+            now_ms = int(time.time() * 1000)
+            with self.marketplace_nats_state_lock:
+                self.marketplace_nats_state["connect_attempt_count"] = int(
+                    self.marketplace_nats_state.get("connect_attempt_count") or 0
+                ) + 1
+            nc = None
+            try:
+                nc = await nats.connect(
+                    servers=servers,
+                    name=str(cfg.get("client_name") or "hydra-router-marketplace-sync"),
+                    connect_timeout=connect_timeout,
+                    allow_reconnect=True,
+                    max_reconnect_attempts=-1,
+                    disconnected_cb=_disconnected_cb,
+                    reconnected_cb=_reconnected_cb,
+                    error_cb=_error_cb,
+                    closed_cb=_closed_cb,
+                )
+                with self.marketplace_nats_state_lock:
+                    self.marketplace_nats_state["connected"] = True
+                    self.marketplace_nats_state["last_connect_ts_ms"] = now_ms
+                    self.marketplace_nats_state["connect_success_count"] = int(
+                        self.marketplace_nats_state.get("connect_success_count") or 0
+                    ) + 1
+                    self.marketplace_nats_state["active_server"] = str(
+                        servers[0] if servers else self.marketplace_nats_state.get("active_server") or ""
+                    )
+                    self.marketplace_nats_state["last_error"] = ""
+                    self.marketplace_nats_state["consecutive_failures"] = 0
+
+                if bool(cfg.get("enable_subscribe")):
+                    subscribe_subjects = cfg.get("subscribe_subjects") if isinstance(cfg.get("subscribe_subjects"), list) else []
+                    for subject in subscribe_subjects:
+                        topic = str(subject or "").strip()
+                        if not topic:
+                            continue
+
+                        async def _handler(msg: Any, _topic: str = topic) -> None:
+                            try:
+                                data_raw = bytes(msg.data or b"").decode("utf-8", errors="replace")
+                                payload = json.loads(data_raw)
+                            except Exception as exc:
+                                self._marketplace_nats_record_error(f"nats_subscribe_decode_error: {exc}")
+                                return
+                            if not isinstance(payload, dict):
+                                return
+                            try:
+                                self._marketplace_nats_ingest_envelope(payload, subject=_topic, source="nats")
+                            except Exception as exc:
+                                self._marketplace_nats_record_error(f"nats_ingest_error: {exc}")
+
+                        await nc.subscribe(topic, cb=_handler)
+                    await nc.flush(timeout=publish_timeout)
+
+                while not self.stop.is_set():
+                    cfg = self._marketplace_nats_config_payload()
+                    if not bool(cfg.get("enabled")):
+                        break
+                    if bool(cfg.get("enable_publish")):
+                        now_ms = int(time.time() * 1000)
+                        with self.marketplace_nats_state_lock:
+                            due_ms = int(self.marketplace_nats_state.get("next_due_ts_ms") or 0)
+                        if due_ms <= 0 or now_ms >= due_ms:
+                            try:
+                                packets = self._marketplace_nats_prepare_packets(
+                                    include_unhealthy=self._as_bool(cfg.get("include_unhealthy"), True),
+                                    force_refresh=False,
+                                    include_catalog=True,
+                                    include_status=True,
+                                    catalog_subject=str(cfg.get("catalog_subject") or ""),
+                                    status_subject=str(cfg.get("status_subject") or ""),
+                                )
+                                publish_interval_s = self._as_int(
+                                    cfg.get("publish_interval_seconds"),
+                                    45,
+                                    minimum=5,
+                                    maximum=3600,
+                                )
+                                if packets:
+                                    now_ms = int(time.time() * 1000)
+                                    catalog_packet = next(
+                                        (item for item in packets if str(item.get("event") or "") == "market.service.catalog"),
+                                        {},
+                                    )
+                                    next_catalog_checksum = str(catalog_packet.get("checksum") or "")
+                                    with self.marketplace_nats_state_lock:
+                                        last_checksum = str(self.marketplace_nats_state.get("last_catalog_checksum") or "")
+                                        last_publish_ts = int(self.marketplace_nats_state.get("last_publish_ts_ms") or 0)
+                                    unchanged_recent = bool(
+                                        next_catalog_checksum
+                                        and next_catalog_checksum == last_checksum
+                                        and last_publish_ts > 0
+                                        and (now_ms - last_publish_ts) < int(max(1, publish_interval_s) * 1000)
+                                    )
+                                    if not unchanged_recent:
+                                        for item in packets:
+                                            subject = str(item.get("subject") or "")
+                                            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                                            encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+                                                "utf-8",
+                                                errors="replace",
+                                            )
+                                            await nc.publish(subject, encoded)
+                                        await nc.flush(timeout=publish_timeout)
+                                        with self.marketplace_nats_state_lock:
+                                            self.marketplace_nats_state["publish_count"] = int(
+                                                self.marketplace_nats_state.get("publish_count") or 0
+                                            ) + len(packets)
+                                            self.marketplace_nats_state["last_publish_ts_ms"] = now_ms
+                                            self.marketplace_nats_state["last_publish_subject"] = str(
+                                                packets[-1].get("subject") if packets else ""
+                                            )
+                                            for item in packets:
+                                                if str(item.get("event") or "") == "market.service.catalog":
+                                                    self.marketplace_nats_state["last_catalog_checksum"] = str(
+                                                        item.get("checksum") or ""
+                                                    )
+                                                if str(item.get("event") or "") == "market.service.status":
+                                                    self.marketplace_nats_state["last_status_checksum"] = str(
+                                                        item.get("checksum") or ""
+                                                    )
+                                            self.marketplace_nats_state["last_error"] = ""
+                                            self.marketplace_nats_state["consecutive_failures"] = 0
+                                    with self.marketplace_nats_state_lock:
+                                        self.marketplace_nats_state["next_due_ts_ms"] = now_ms + int(
+                                            publish_interval_s * 1000
+                                        )
+                            except Exception as exc:
+                                self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
+                    await asyncio.sleep(0.5)
+            except Exception as exc:
+                self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
+            finally:
+                if nc is not None:
+                    with contextlib.suppress(Exception):
+                        await nc.close()
+                with self.marketplace_nats_state_lock:
+                    self.marketplace_nats_state["connected"] = False
+                    self.marketplace_nats_state["last_disconnect_ts_ms"] = int(time.time() * 1000)
+            with self.marketplace_nats_state_lock:
+                failures = int(self.marketplace_nats_state.get("consecutive_failures") or 0)
+            await asyncio.sleep(float(self._marketplace_nats_backoff_seconds(failures)))
+
+    def _run_marketplace_nats_worker(self) -> None:
+        with self.marketplace_nats_state_lock:
+            self.marketplace_nats_state["worker_running"] = True
+            self.marketplace_nats_state["last_error"] = ""
+        try:
+            asyncio.run(self._run_marketplace_nats_worker_async())
+        except Exception as exc:
+            self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
+        finally:
+            with self.marketplace_nats_state_lock:
+                self.marketplace_nats_state["worker_running"] = False
+                self.marketplace_nats_state["connected"] = False
+            self.marketplace_nats_worker = None
+
+    def _maybe_start_marketplace_nats_sync(self) -> None:
+        cfg = self._marketplace_nats_config_payload()
+        if not bool(cfg.get("enabled")):
+            return
+        if nats is None:
+            self._marketplace_nats_record_error("nats_dependency_unavailable")
+            return
+        if self.marketplace_nats_worker and self.marketplace_nats_worker.is_alive():
+            return
+        worker = threading.Thread(
+            target=self._run_marketplace_nats_worker,
+            daemon=True,
+            name="marketplace-nats-sync",
+        )
+        self.marketplace_nats_worker = worker
+        try:
+            worker.start()
+        except Exception as exc:
+            self.marketplace_nats_worker = None
+            self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
 
     def _interop_contract_status_from_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         expected = self._interop_contract_payload()
@@ -10536,6 +11592,28 @@ class Router:
                     status_code=503,
                 )
 
+            transport_hint = str(body.get("transport") or "").strip().lower()
+            publish_http = self._as_bool(body.get("publish_http"), True)
+            publish_nats = self._as_bool(body.get("publish_nats"), False)
+            if transport_hint in {"http", "https"}:
+                publish_http = True
+                publish_nats = False
+            elif transport_hint in {"nats"}:
+                publish_http = False
+                publish_nats = True
+            elif transport_hint in {"both", "all"}:
+                publish_http = True
+                publish_nats = True
+            if not publish_http and not publish_nats:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "no transport selected",
+                        "marketplace_sync": self._marketplace_sync_state_payload(),
+                    },
+                    status_code=400,
+                )
+
             include_unhealthy_raw = body.get("include_unhealthy")
             include_unhealthy: Optional[bool] = None
             if include_unhealthy_raw is not None:
@@ -10547,43 +11625,149 @@ class Router:
             dry_run = self._as_bool(body.get("dry_run"), False)
             force_refresh = self._as_bool(body.get("force_refresh"), False) or self._as_bool(body.get("force"), False)
             auth_token = str(body.get("auth_token") or "").strip()
-            requested_targets = _normalize_marketplace_sync_targets(
-                body.get("target_urls"),
-                fallback=_normalize_marketplace_sync_targets(cfg.get("target_urls_list")),
-            )
-            if not requested_targets:
-                return _public_json(
-                    {
-                        "status": "error",
-                        "error": "no target URLs configured",
-                        "marketplace_sync": self._marketplace_sync_state_payload(),
-                    },
-                    status_code=400,
+            http_result: Dict[str, Any] = {}
+            nats_result: Dict[str, Any] = {}
+            if publish_http:
+                requested_targets = _normalize_marketplace_sync_targets(
+                    body.get("target_urls"),
+                    fallback=_normalize_marketplace_sync_targets(cfg.get("target_urls_list")),
+                )
+                if not requested_targets:
+                    return _public_json(
+                        {
+                            "status": "error",
+                            "error": "no target URLs configured",
+                            "marketplace_sync": self._marketplace_sync_state_payload(),
+                        },
+                        status_code=400,
+                    )
+                if not self._marketplace_sync_mark_started("manual", requested_targets):
+                    return _public_json(
+                        {
+                            "status": "error",
+                            "error": "sync already in progress",
+                            "marketplace_sync": self._marketplace_sync_state_payload(),
+                        },
+                        status_code=409,
+                    )
+                http_result = self._run_marketplace_sync_job(
+                    targets=requested_targets,
+                    include_unhealthy=include_unhealthy,
+                    timeout_s=timeout_seconds,
+                    auth_token=auth_token,
+                    trigger="manual",
+                    dry_run=dry_run,
+                    force_refresh=force_refresh,
+                    prestarted=True,
+                )
+            if publish_nats:
+                nats_cfg_raw = body.get("nats") if isinstance(body.get("nats"), dict) else {}
+                nats_catalog_subject = str(
+                    nats_cfg_raw.get("catalog_subject")
+                    or body.get("nats_catalog_subject")
+                    or ""
+                ).strip()
+                nats_status_subject = str(
+                    nats_cfg_raw.get("status_subject")
+                    or body.get("nats_status_subject")
+                    or ""
+                ).strip()
+                nats_timeout_seconds = self._as_float(
+                    nats_cfg_raw.get("timeout_seconds")
+                    if isinstance(nats_cfg_raw, dict)
+                    else body.get("nats_timeout_seconds"),
+                    3.0,
+                    minimum=0.5,
+                    maximum=30.0,
+                )
+                include_catalog = self._as_bool(
+                    nats_cfg_raw.get("include_catalog")
+                    if isinstance(nats_cfg_raw, dict)
+                    else body.get("include_catalog"),
+                    True,
+                )
+                include_status = self._as_bool(
+                    nats_cfg_raw.get("include_status")
+                    if isinstance(nats_cfg_raw, dict)
+                    else body.get("include_status"),
+                    True,
+                )
+                nats_result = self._publish_marketplace_catalog_nats_once(
+                    include_unhealthy=include_unhealthy,
+                    timeout_s=nats_timeout_seconds,
+                    force_refresh=force_refresh,
+                    dry_run=dry_run,
+                    include_catalog=include_catalog,
+                    include_status=include_status,
+                    catalog_subject_override=nats_catalog_subject,
+                    status_subject_override=nats_status_subject,
+                    trigger="manual",
                 )
 
-            if not self._marketplace_sync_mark_started("manual", requested_targets):
-                return _public_json(
-                    {
-                        "status": "error",
-                        "error": "sync already in progress",
-                        "marketplace_sync": self._marketplace_sync_state_payload(),
-                    },
-                    status_code=409,
-                )
+            selected_results = []
+            if publish_http:
+                selected_results.append(http_result)
+            if publish_nats:
+                selected_results.append(nats_result)
+            overall_ok = bool(selected_results) and all(bool(item.get("ok")) for item in selected_results if isinstance(item, dict))
+            combined_error = ""
+            for item in selected_results:
+                if not isinstance(item, dict) or bool(item.get("ok")):
+                    continue
+                combined_error = str(item.get("error") or "")
+                if combined_error:
+                    break
+            primary_result = http_result if publish_http else nats_result
+            payload = {
+                "status": "success" if overall_ok else "error",
+                "result": primary_result,
+                "http_result": http_result if publish_http else {},
+                "nats_result": nats_result if publish_nats else {},
+                "transports": {
+                    "http": bool(publish_http),
+                    "nats": bool(publish_nats),
+                },
+                "error": combined_error,
+                "marketplace_sync": self._marketplace_sync_state_payload(),
+            }
+            status_code = 200 if overall_ok else 502
+            if dry_run and overall_ok:
+                status_code = 200
+            return _public_json(payload, status_code=status_code)
 
-            result = self._run_marketplace_sync_job(
-                targets=requested_targets,
+        @app.route("/marketplace/nats", methods=["GET"])
+        def _marketplace_nats():
+            return _public_json(self._marketplace_nats_state_payload())
+
+        @app.route("/marketplace/nats/publish", methods=["POST"])
+        def _marketplace_nats_publish():
+            body = request.get_json(silent=True) or {}
+            include_unhealthy: Optional[bool] = None
+            include_unhealthy_raw = body.get("include_unhealthy")
+            if include_unhealthy_raw is not None:
+                include_unhealthy = self._as_bool(include_unhealthy_raw, True)
+            dry_run = self._as_bool(body.get("dry_run"), False)
+            force_refresh = self._as_bool(body.get("force_refresh"), False) or self._as_bool(body.get("force"), False)
+            timeout_seconds = self._as_float(body.get("timeout_seconds"), 3.0, minimum=0.5, maximum=30.0)
+            include_catalog = self._as_bool(body.get("include_catalog"), True)
+            include_status = self._as_bool(body.get("include_status"), True)
+            catalog_subject = str(body.get("catalog_subject") or "").strip()
+            status_subject = str(body.get("status_subject") or "").strip()
+            result = self._publish_marketplace_catalog_nats_once(
                 include_unhealthy=include_unhealthy,
                 timeout_s=timeout_seconds,
-                auth_token=auth_token,
-                trigger="manual",
-                dry_run=dry_run,
                 force_refresh=force_refresh,
-                prestarted=True,
+                dry_run=dry_run,
+                include_catalog=include_catalog,
+                include_status=include_status,
+                catalog_subject_override=catalog_subject,
+                status_subject_override=status_subject,
+                trigger="manual_nats",
             )
             payload = {
                 "status": "success" if bool(result.get("ok")) else "error",
                 "result": result,
+                "marketplace_nats": self._marketplace_nats_state_payload(),
                 "marketplace_sync": self._marketplace_sync_state_payload(),
             }
             status_code = 200 if bool(result.get("ok")) else 502
@@ -10810,6 +11994,8 @@ class Router:
             node.stop()
         if self.marketplace_sync_worker and self.marketplace_sync_worker.is_alive():
             self.marketplace_sync_worker.join(timeout=5)
+        if self.marketplace_nats_worker and self.marketplace_nats_worker.is_alive():
+            self.marketplace_nats_worker.join(timeout=5)
         if self.cloudflared_manager:
             self.cloudflared_manager.shutdown(timeout=3.0)
         self.watchdog.shutdown()
@@ -11044,6 +12230,7 @@ class Router:
                     port_detection_counter = 0
                 self._sync_cloudflared_tunnels()
                 self._maybe_start_marketplace_sync()
+                self._maybe_start_marketplace_nats_sync()
                 self._sample_telemetry()
             except Exception as exc:
                 LOGGER.debug("Status monitor error: %s", exc)
