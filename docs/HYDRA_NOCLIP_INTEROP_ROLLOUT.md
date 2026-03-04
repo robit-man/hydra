@@ -13,7 +13,19 @@ This runbook gates rollout of the Hydra/NoClip interop contract (`hydra_noclip_i
   - `feature_flags.cloudflared_manager` as environment requires
 
 ## Required Validation Commands
-1. Smoke test (use live URLs when available):
+1. Unified rollout gate (recommended):
+```bash
+python3 service_router/tools/hydra_noclip_rollout_gate.py \
+  --router-base http://127.0.0.1:9071 \
+  --overlay-ingress-url http://127.0.0.1:8080/api/interop/overlay/ingest \
+  --media-echo-url http://127.0.0.1:8080/api/interop/media/echo \
+  --endpoint-update-url http://127.0.0.1:3001/api/p2p/endpoint/update \
+  --backend-health-url http://127.0.0.1:3001/health \
+  --da3-health-url http://127.0.0.1:3001/api/da3/health \
+  --require-backend-health \
+  --json
+```
+2. Smoke test only (diagnostics):
 ```bash
 python3 service_router/tools/hydra_noclip_interop_smoke.py \
   --router-base http://127.0.0.1:9071 \
@@ -21,13 +33,13 @@ python3 service_router/tools/hydra_noclip_interop_smoke.py \
   --media-echo-url http://127.0.0.1:8080/api/interop/media/echo \
   --json
 ```
-2. Failure drills (live backend auth denial URL if available):
+3. Failure drills only (diagnostics):
 ```bash
 python3 service_router/tools/hydra_noclip_failure_drill.py \
   --endpoint-update-url http://127.0.0.1:3001/api/p2p/endpoint/update \
   --json
 ```
-3. Health-gate sanity:
+4. Health-gate sanity:
 ```bash
 curl -s http://127.0.0.1:9071/health | jq '.rollout_gates'
 curl -s http://127.0.0.1:9071/nkn/resolve -X POST -H 'content-type: application/json' -d '{"refresh_local": true}' | jq '.rollout_gates'
@@ -49,7 +61,7 @@ Rollout proceeds only when all conditions hold:
 
 ## Rollout Procedure
 1. Apply config with feature flags in staging.
-2. Run smoke + failure drills and archive JSON artifacts.
+2. Run unified rollout gate command and archive consolidated + sub-artifacts.
 3. Promote to canary (single router instance + subset of users).
 4. Observe:
   - router `/dashboard/data` telemetry
@@ -70,8 +82,7 @@ Rollout proceeds only when all conditions hold:
   - no crash loops in watchdog, bridge, or WS transport
 6. Remove stale endpoint/session records if needed, then re-run smoke in simulated mode:
 ```bash
-python3 service_router/tools/hydra_noclip_interop_smoke.py --simulate --json
-python3 service_router/tools/hydra_noclip_failure_drill.py --simulate --json
+python3 service_router/tools/hydra_noclip_rollout_gate.py --simulate --json
 ```
 
 ## Failure Modes And Recovery Mapping
@@ -85,7 +96,7 @@ python3 service_router/tools/hydra_noclip_failure_drill.py --simulate --json
   - Expected: endpoint-update attempt returns 401/403, no mutation committed.
 
 ## Artifact Retention
-- Store smoke and failure artifact JSON per rollout window.
+- Store consolidated rollout-gate artifacts and linked smoke/drill artifacts per rollout window.
 - Keep at least:
   - last successful staging run
   - last successful canary run

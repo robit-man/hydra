@@ -62,7 +62,7 @@ Each Hydra service is surfaced through a normalized discovery contract:
 ## 4) Phased Workorders
 
 Canonical execution files live under:
-- `workorders/phase-00` through `workorders/phase-08`
+- `workorders/phase-00` through `workorders/phase-09`
 - Each workorder file includes scoped file targets, acceptance metrics, and failure-mode preventions used by implementation agents.
 
 ## Phase 0 - Discovery Baseline
@@ -518,6 +518,18 @@ Tasks:
 Acceptance:
 - Interop changes ship behind measurable gates with deterministic rollback behavior.
 
+## Phase 9 - Rollout Automation
+
+### WO-09.1 Rollout Gate Orchestrator And Artifact Unification
+Scope:
+- `workorders/phase-09/WO-09.1-rollout-gate-orchestrator-and-artifact-unification.md`
+
+Tasks:
+- Add a one-command gate runner that executes smoke, failure drills, control-plane checks, and optional backend checks while emitting a consolidated artifact.
+
+Acceptance:
+- Release decisions can be driven from one deterministic command output and artifact bundle.
+
 ## 5) Detailed Frontend Change Map (`docs/js`)
 
 ### `docs/js/config.js`
@@ -569,6 +581,7 @@ Acceptance:
 4. Phase 5 after `/services/snapshot` + `/nkn/resolve` payloads are stable.
 5. Phase 6 and Phase 7 before full rollout.
 6. Phase 8 after Phase 4/5 contracts stabilize, with backend migration and interop smoke gates enabled.
+7. Phase 9 to operationalize one-command rollout gate execution and artifact retention.
 
 ## 7) Definition of Done (Program-Level)
 - Hydra router exposes stable control-plane APIs and NKN resolve semantics matching teleoperation behavior.

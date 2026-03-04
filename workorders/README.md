@@ -47,6 +47,8 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-08.8-endpoint-state-federation-and-discovery-interop.md`
   - `WO-08.9-cross-frontend-ui-and-style-unification.md`
   - `WO-08.10-end-to-end-validation-failure-drills-and-rollout-gates.md`
+- `phase-09`
+  - `WO-09.1-rollout-gate-orchestrator-and-artifact-unification.md`
 
 ## Completion Rule
 
