@@ -12,6 +12,7 @@ const CFG_PERSIST_ALLOWLIST = new Set([
   'routerLastResolveError',
   'routerLastResolvedAt',
   'routerLastInteropContractVersion',
+  'routerControlPlaneApiBase',
   'routerLastCatalogSource',
   'routerLastCatalogSourcePriority',
   'featureFlags',
@@ -121,6 +122,7 @@ const CFG_DEFAULTS = {
   routerLastResolveError: '',
   routerLastResolvedAt: 0,
   routerLastInteropContractVersion: '',
+  routerControlPlaneApiBase: 'http://127.0.0.1:9071',
   routerLastCatalogSource: '',
   routerLastCatalogSourcePriority: 0,
   noclipMarketplaceApiBase: 'http://127.0.0.1:3001',
@@ -162,6 +164,8 @@ if (!CFG.routerLastResolveStatus) CFG.routerLastResolveStatus = 'idle';
 if (CFG.routerLastResolveError === undefined) CFG.routerLastResolveError = '';
 if (!Number.isFinite(Number(CFG.routerLastResolvedAt))) CFG.routerLastResolvedAt = 0;
 if (CFG.routerLastInteropContractVersion === undefined) CFG.routerLastInteropContractVersion = '';
+if (typeof CFG.routerControlPlaneApiBase !== 'string') CFG.routerControlPlaneApiBase = 'http://127.0.0.1:9071';
+CFG.routerControlPlaneApiBase = CFG.routerControlPlaneApiBase.trim() || 'http://127.0.0.1:9071';
 if (typeof CFG.routerLastCatalogSource !== 'string') CFG.routerLastCatalogSource = '';
 if (!Number.isFinite(Number(CFG.routerLastCatalogSourcePriority))) CFG.routerLastCatalogSourcePriority = 0;
 if (typeof CFG.noclipMarketplaceApiBase !== 'string') CFG.noclipMarketplaceApiBase = 'http://127.0.0.1:3001';

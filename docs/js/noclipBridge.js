@@ -15,6 +15,11 @@ const MESSAGE_ID_TTL_MS = 2 * 60 * 1000;
 const CHUNK_ASSEMBLY_TTL_MS = 90 * 1000;
 const MAX_MESSAGE_CACHE = 1024;
 const MAX_CHUNK_ASSEMBLIES = 64;
+const MARKET_CATALOG_SUBJECT_DEFAULT = 'hydra.market.catalog.v1';
+const MARKET_STATUS_SUBJECT_DEFAULT = 'hydra.market.status.v1';
+const MAX_MARKET_EVENT_CACHE = 2048;
+const MARKET_EVENT_TTL_MS = 2 * 60 * 1000;
+const MARKET_BROADCAST_DEBOUNCE_MS = 15 * 1000;
 const EVENT_BY_TYPE = Object.freeze({
   'interop-contract-get': 'interop.contract.get',
   'hybrid-bridge-state': 'interop.bridge.state',
@@ -193,6 +198,9 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   let sharedDmRegistered = false;
   let latestRouterCatalog = null;
   let latestCatalogChecksum = '';
+  let lastBroadcastChecksum = '';
+  let lastBroadcastAtMs = 0;
+  const marketEventSeen = new Map();
 
   const nowMs = () => Date.now();
 
@@ -205,6 +213,86 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (key === 'localhost' || key === 'lan') return 'local';
     if (key === 'cloudflare' || key === 'upnp' || key === 'nats' || key === 'nkn' || key === 'local') return key;
     return '';
+  };
+
+  const normalizePublishScope = (value, fallback = 'both') => {
+    const key = String(value || '').trim().toLowerCase();
+    if (key === 'targeted' || key === 'broadcast' || key === 'both') return key;
+    const fb = String(fallback || '').trim().toLowerCase();
+    if (fb === 'targeted' || fb === 'broadcast' || fb === 'both') return fb;
+    return 'both';
+  };
+
+  const sanitizeSubject = (value, fallback = '') => {
+    const raw = String(value || '').trim().replace(/\s+/g, '');
+    if (raw) return raw;
+    return String(fallback || '').trim().replace(/\s+/g, '');
+  };
+
+  const applyRoomTemplateToSubject = (subject, roomName = '') => {
+    const raw = sanitizeSubject(subject, '');
+    if (!raw) return '';
+    if (!raw.includes('{room}')) return raw;
+    const room = String(roomName || '').trim() || 'default';
+    const safeRoom = room.replace(/[^a-z0-9_.-]+/gi, '_').toLowerCase() || 'default';
+    return raw.replace(/\{room\}/g, safeRoom);
+  };
+
+  const marketVisibilityForService = (value = {}) => {
+    const key = String(value.visibility || '').trim().toLowerCase();
+    if (key === 'friends' || key === 'private') return key;
+    return 'public';
+  };
+
+  const pruneMarketEventSeen = () => {
+    const now = nowMs();
+    for (const [key, expiresAt] of marketEventSeen.entries()) {
+      if (!key || Number(expiresAt || 0) <= now) marketEventSeen.delete(key);
+    }
+    while (marketEventSeen.size > MAX_MARKET_EVENT_CACHE) {
+      const oldest = marketEventSeen.keys().next();
+      if (oldest.done) break;
+      marketEventSeen.delete(oldest.value);
+    }
+  };
+
+  const marketDedupeKey = (msg = {}, eventType = '', subject = '') => {
+    const normalizedEvent = String(eventType || msg.event || msg.type || '').trim().toLowerCase();
+    const explicitId = String(msg.messageId || msg.message_id || msg.id || '').trim();
+    if (explicitId) return `${normalizedEvent}:${explicitId}`;
+    const catalog = msg.catalog && typeof msg.catalog === 'object' ? msg.catalog : {};
+    const provider = (msg.provider && typeof msg.provider === 'object')
+      ? msg.provider
+      : (catalog.provider && typeof catalog.provider === 'object' ? catalog.provider : {});
+    const fingerprint = String(
+      provider.providerKeyFingerprint ||
+      provider.provider_key_fingerprint ||
+      provider.providerId ||
+      provider.provider_id ||
+      provider.routerNkn ||
+      provider.router_nkn ||
+      msg.source_address ||
+      msg.pub ||
+      ''
+    ).trim().toLowerCase() || 'unknown';
+    const checksum = String(
+      msg.catalogChecksum ||
+      msg.catalog_checksum ||
+      checksumHex(catalog && Object.keys(catalog).length ? catalog : (msg.services || msg.status || msg))
+    ).trim().toLowerCase();
+    const ts = Number(msg.ts || msg.generated_at_ms || msg.generatedAtMs || 0) || 0;
+    return `${normalizedEvent}:${subject}:${fingerprint}:${checksum}:${ts}`;
+  };
+
+  const rememberMarketEvent = (msg = {}, eventType = '', subject = '') => {
+    pruneMarketEventSeen();
+    const key = marketDedupeKey(msg, eventType, subject);
+    if (!key) return true;
+    const now = nowMs();
+    const knownUntil = Number(marketEventSeen.get(key) || 0);
+    if (knownUntil > now) return false;
+    marketEventSeen.set(key, now + MARKET_EVENT_TTL_MS);
+    return true;
   };
 
   const endpointFromValue = (value) => {
@@ -574,6 +662,56 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
     const sanitized = sanitizeRoomName(raw);
     return sanitized || deriveAutoRoom();
+  };
+
+  const resolveMarketPublishSettings = (cfgValue = {}, options = {}) => {
+    const cfg = cfgValue && typeof cfgValue === 'object' ? cfgValue : {};
+    const opts = options && typeof options === 'object' ? options : {};
+    const fallbackSubjects = Array.isArray(CFG?.marketplaceGossipSubjects)
+      ? CFG.marketplaceGossipSubjects.map((entry) => String(entry || '').trim()).filter(Boolean)
+      : [];
+    const resolvedRoom = resolveRoomName(
+      opts.marketBroadcastRoom ||
+      opts.broadcastRoom ||
+      cfg.marketBroadcastRoom ||
+      cfg.room ||
+      'auto'
+    );
+    const catalogSubjectBase = sanitizeSubject(
+      opts.catalogSubject ||
+      cfg.marketCatalogSubject ||
+      fallbackSubjects[0] ||
+      MARKET_CATALOG_SUBJECT_DEFAULT,
+      MARKET_CATALOG_SUBJECT_DEFAULT
+    );
+    const statusSubjectBase = sanitizeSubject(
+      opts.statusSubject ||
+      cfg.marketStatusSubject ||
+      fallbackSubjects[1] ||
+      MARKET_STATUS_SUBJECT_DEFAULT,
+      MARKET_STATUS_SUBJECT_DEFAULT
+    );
+    const catalogSubject = applyRoomTemplateToSubject(catalogSubjectBase, resolvedRoom);
+    const statusSubject = applyRoomTemplateToSubject(statusSubjectBase, resolvedRoom);
+    const scope = normalizePublishScope(
+      opts.publishScope || opts.scope || cfg.marketPublishScope || cfg.market_publish_scope || 'both',
+      'both'
+    );
+    const includeStatus = opts.includeStatus !== undefined
+      ? opts.includeStatus !== false
+      : normalizeBoolean(cfg.marketPublishIncludeStatus, true);
+    const broadcastPublicOnly = opts.broadcastPublicOnly !== undefined
+      ? opts.broadcastPublicOnly !== false
+      : normalizeBoolean(cfg.marketBroadcastPublicOnly, true);
+    return {
+      scope,
+      includeStatus,
+      broadcastPublicOnly,
+      room: resolvedRoom,
+      catalogSubject,
+      statusSubject,
+      subjects: [catalogSubject, statusSubject].filter(Boolean)
+    };
   };
 
   const consumePeerParam = () => {
@@ -1188,8 +1326,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       step();
     });
 
-  async function ensureDiscovery() {
-    if (sharedPeerDiscovery?.sendDm) {
+  async function ensureDiscovery(options = {}) {
+    const opts = options && typeof options === 'object' ? options : {};
+    const requireBroadcast = opts.requireBroadcast === true;
+    if (discovery) return discovery;
+    if (discoveryInit) return discoveryInit;
+    if (!requireBroadcast && sharedPeerDiscovery?.sendDm) {
       const dm = (pub, payload) => sharedPeerDiscovery.sendDm(pub, payload);
       const handshake = async (pub, meta = {}, { wantAck = true } = {}) => {
         const packet = withInteropContractFields({
@@ -1210,8 +1352,6 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         handshake
       };
     }
-    if (discovery) return discovery;
-    if (discoveryInit) return discoveryInit;
     discoveryInit = (async () => {
       try {
         Net.ensureNkn?.();
@@ -1226,10 +1366,25 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       }
       const pub = sanitizePubKey(client?.getPublicKey?.());
       const addr = client?.addr || Net.nkn?.addr || '';
-      const resolvedRoom = resolveRoomName(overrideRoom ?? NodeStore?.defaultsByType?.NoClipBridge?.room ?? '');
+      const defaultBridgeCfg = NodeStore?.defaultsByType?.NoClipBridge || {};
+      const marketDefaults = resolveMarketPublishSettings(defaultBridgeCfg, {});
+      const cfgMarketSubjects = Array.isArray(CFG?.marketplaceGossipSubjects)
+        ? CFG.marketplaceGossipSubjects.map((entry) => String(entry || '').trim()).filter(Boolean)
+        : [];
+      const marketSubjects = Array.from(new Set([
+        ...cfgMarketSubjects,
+        ...ensureArray(marketDefaults.subjects)
+      ])).filter(Boolean).slice(0, 32);
+      const resolvedRoom = resolveRoomName(
+        overrideRoom ??
+        marketDefaults.room ??
+        defaultBridgeCfg.room ??
+        ''
+      );
       const discoveryClient = await createNatsDiscovery({
         room: resolvedRoom,
         servers: DEFAULT_SERVERS,
+        marketSubjects,
         me: {
           nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
           addr: addr || '',
@@ -1237,6 +1392,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         }
       });
       discoveryClient.on('dm', handleDiscoveryDm);
+      discoveryClient.on('market', handleDiscoveryMarket);
       discoveryClient.on('peer', (peer) => {
         const normalized = sanitizePubKey(peer?.nknPub);
         if (!normalized) return;
@@ -1322,6 +1478,261 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return discoveryInit;
   }
 
+  const processMarketMessage = ({
+    from = '',
+    msg = {},
+    type = '',
+    event = '',
+    watcherIds = [],
+    sendAck = null,
+    source = 'bridge-dm',
+    subject = ''
+  } = {}) => {
+    const message = msg && typeof msg === 'object' ? msg : {};
+    const eventName = normalizeMessageEvent(event, type);
+    const isCatalog = type === 'market-service-catalog' || eventName === 'market.service.catalog';
+    const isStatus = type === 'market-service-status' || eventName === 'market.service.status';
+    if (!isCatalog && !isStatus) return false;
+
+    const dedupeEvent = isCatalog ? 'market.service.catalog' : 'market.service.status';
+    if (!rememberMarketEvent(message, dedupeEvent, subject)) {
+      return true;
+    }
+
+    const explicitWatchers = ensureArray(watcherIds).filter(Boolean);
+    const nodeIds = explicitWatchers.length ? explicitWatchers : Array.from(NODE_STATE.keys());
+    const sourceTag = String(source || 'bridge-dm').trim().toLowerCase() || 'bridge-dm';
+    const peer = String(from || '').trim();
+
+    if (isCatalog) {
+      const catalogRaw = message.catalog || message.marketplaceCatalog || message.marketplace_catalog || message.payload || message;
+      const catalog = normalizeMarketplaceCatalog(catalogRaw);
+      const summary = normalizeCatalogSummary(
+        message.catalog_summary || message.catalogSummary || message.summary || catalog?.summary || {}
+      );
+      const provider = normalizeCatalogProvider(
+        message.provider || catalog?.provider || {}
+      );
+      const catalogChecksum = String(
+        message.catalogChecksum ||
+        message.catalog_checksum ||
+        (catalog ? checksumHex(catalog) : '')
+      ).trim();
+
+      nodeIds.forEach((nodeId) => {
+        const st = ensureNodeState(nodeId);
+        if (!st) return;
+        const catalogState = catalog
+          ? {
+              generatedAtMs: catalog.generatedAtMs,
+              provider: catalog.provider,
+              summary: catalog.summary,
+              services: catalog.services
+            }
+          : null;
+        if (peer) {
+          upsertRemotePeer(st, peer, {
+            meta: {
+              providerId: provider.providerId || '',
+              providerLabel: provider.providerLabel || '',
+              providerNetwork: provider.providerNetwork || '',
+              providerFingerprint: provider.providerKeyFingerprint || '',
+              routerNkn: provider.routerNkn || '',
+              routerNknAddresses: provider.routerNknAddresses || [],
+              marketplaceCatalogSummary: summary,
+              ...(catalogChecksum ? { catalogChecksum } : {})
+            },
+            state: {
+              marketplaceCatalog: catalogState,
+              marketplaceCatalogSummary: summary,
+              provider,
+              discoverySource: sourceTag,
+              ...(catalogChecksum ? { catalogChecksum } : {})
+            },
+            lastTs: message.ts || nowMs()
+          });
+        }
+        Router.sendFrom(nodeId, 'marketCatalog', {
+          nodeId,
+          peer,
+          catalog: catalogState,
+          summary,
+          provider,
+          catalogChecksum: catalogChecksum || '',
+          source: sourceTag,
+          subject: String(subject || ''),
+          ts: message.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer,
+          type: 'market-service-catalog',
+          payload: {
+            ...message,
+            catalog: catalogState,
+            summary,
+            provider,
+            source: sourceTag,
+            subject: String(subject || ''),
+            catalogChecksum: catalogChecksum || ''
+          }
+        });
+        if (peer) {
+          Router.sendFrom(nodeId, 'peers', {
+            nodeId,
+            peer,
+            peers: peersForOutput(st)
+          });
+        }
+      });
+
+      emitMarketUiEvent('hydra-market-catalog', {
+        peer,
+        catalog: catalog
+          ? {
+              generated_at_ms: catalog.generatedAtMs,
+              provider: catalog.provider,
+              summary: catalog.summary,
+              services: catalog.services
+            }
+          : null,
+        summary,
+        provider,
+        source: sourceTag,
+        subject: String(subject || ''),
+        catalogChecksum: catalogChecksum || '',
+        ts: message.ts || nowMs()
+      });
+      if (message.expectAck === true && explicitWatchers.length && typeof sendAck === 'function') {
+        sendAck('ok', 'catalog-received');
+      }
+      return true;
+    }
+
+    const summary = normalizeCatalogSummary(
+      message.catalog_summary || message.catalogSummary || message.summary || {}
+    );
+    const provider = normalizeCatalogProvider(message.provider || {});
+    const services = ensureArray(message.services || message.statuses || message.entries)
+      .map((entry) => normalizeMarketStatusEntry(entry))
+      .filter(Boolean);
+    const statusMap = mergeMarketServiceStatus({}, services);
+    const catalogChecksum = String(message.catalogChecksum || message.catalog_checksum || '').trim();
+
+    nodeIds.forEach((nodeId) => {
+      const st = ensureNodeState(nodeId);
+      if (!st) return;
+      if (peer) {
+        const existingPeer = st.remotePeers?.get?.(peer) || {};
+        const priorStatus = existingPeer?.state?.marketServiceStatus || {};
+        upsertRemotePeer(st, peer, {
+          meta: {
+            providerId: provider.providerId || '',
+            providerLabel: provider.providerLabel || '',
+            providerNetwork: provider.providerNetwork || '',
+            providerFingerprint: provider.providerKeyFingerprint || '',
+            routerNkn: provider.routerNkn || '',
+            routerNknAddresses: provider.routerNknAddresses || [],
+            marketplaceCatalogSummary: summary,
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          state: {
+            marketplaceCatalogSummary: summary,
+            provider,
+            discoverySource: sourceTag,
+            marketServiceStatus: mergeMarketServiceStatus(
+              priorStatus,
+              services
+            ),
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          lastTs: message.ts || nowMs()
+        });
+      }
+      Router.sendFrom(nodeId, 'marketStatus', {
+        nodeId,
+        peer,
+        summary,
+        provider,
+        services,
+        serviceStatusMap: statusMap,
+        source: sourceTag,
+        subject: String(subject || ''),
+        catalogChecksum: catalogChecksum || '',
+        ts: message.ts || nowMs()
+      });
+      Router.sendFrom(nodeId, 'events', {
+        nodeId,
+        peer,
+        type: 'market-service-status',
+        payload: {
+          ...message,
+          summary,
+          provider,
+          services,
+          source: sourceTag,
+          subject: String(subject || ''),
+          serviceStatusMap: statusMap,
+          catalogChecksum: catalogChecksum || ''
+        }
+      });
+      if (peer) {
+        Router.sendFrom(nodeId, 'peers', {
+          nodeId,
+          peer,
+          peers: peersForOutput(st)
+        });
+      }
+    });
+
+    emitMarketUiEvent('hydra-market-status', {
+      peer,
+      summary,
+      provider,
+      services,
+      source: sourceTag,
+      subject: String(subject || ''),
+      serviceStatusMap: statusMap,
+      catalogChecksum: catalogChecksum || '',
+      ts: message.ts || nowMs()
+    });
+    if (message.expectAck === true && explicitWatchers.length && typeof sendAck === 'function') {
+      sendAck('ok', 'status-received');
+    }
+    return true;
+  };
+
+  function handleDiscoveryMarket(evt) {
+    if (!evt || typeof evt !== 'object') return;
+    const rawMsg = evt.msg && typeof evt.msg === 'object'
+      ? evt.msg
+      : (evt.payload && typeof evt.payload === 'object' ? evt.payload : {});
+    if (!rawMsg || typeof rawMsg !== 'object') return;
+    const from = sanitizePubKey(
+      evt.from ||
+      rawMsg.pub ||
+      rawMsg.from ||
+      rawMsg.source_address ||
+      rawMsg.sourceAddress
+    );
+    const normalized = normalizeIncomingMessage(rawMsg);
+    const msg = normalized.message || rawMsg;
+    const type = normalized.type || normalizeMessageType(msg.type, msg.event);
+    const event = normalized.event || normalizeMessageEvent(msg.event, type);
+    if (type && !msg.type) msg.type = type;
+    if (event && !msg.event) msg.event = event;
+    processMarketMessage({
+      from,
+      msg,
+      type,
+      event,
+      watcherIds: [],
+      sendAck: null,
+      source: String(evt.source || 'nats-gossip'),
+      subject: String(evt.subject || '')
+    });
+  }
+
   function handleDiscoveryDm(evt) {
     if (!evt) return;
     const rawMsg = evt.msg || {};
@@ -1334,7 +1745,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     );
     if (!from) return;
     const watchers = TARGET_INDEX.get(from);
-    if (!watchers || !watchers.size) return;
+    const watcherIds = Array.from(watchers || []).filter(Boolean);
 
     const normalized = normalizeIncomingMessage(rawMsg);
     const msg = normalized.message || {};
@@ -1347,14 +1758,19 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     msg.transport = normalizeTransportLabel(msg.transport) || selectedTransport;
     msg.selected_transport = normalizeTransportLabel(msg.selected_transport || msg.selectedTransport) || msg.transport;
     if (!msg.selectedTransport) msg.selectedTransport = msg.selected_transport;
-
-    const watcherIds = Array.from(watchers).filter(Boolean);
-    if (!watcherIds.length) return;
-    const primaryNodeId = watcherIds[0];
+    const isMarketEvent = (
+      type === 'market-service-catalog' ||
+      type === 'market-service-status' ||
+      event === 'market.service.catalog' ||
+      event === 'market.service.status'
+    );
+    if (!watcherIds.length && !isMarketEvent) return;
+    const primaryNodeId = watcherIds[0] || '';
 
     const sendAck = (status = 'ok', detail = 'received', errorCode = '') => {
       const inReplyTo = String(msg.messageId || msg.message_id || '').trim();
       if (!inReplyTo) return;
+      if (!primaryNodeId) return;
       const st = ensureNodeState(primaryNodeId);
       if (!st) return;
       sendBridgePayload(primaryNodeId, st, {
@@ -1539,174 +1955,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       return;
     }
 
-    if (type === 'market-service-catalog' || event === 'market.service.catalog') {
-      const catalogRaw = msg.catalog || msg.marketplaceCatalog || msg.marketplace_catalog || msg.payload || msg;
-      const catalog = normalizeMarketplaceCatalog(catalogRaw);
-      const summary = normalizeCatalogSummary(
-        msg.catalog_summary || msg.catalogSummary || msg.summary || catalog?.summary || {}
-      );
-      const provider = normalizeCatalogProvider(
-        msg.provider || catalog?.provider || {}
-      );
-      const catalogChecksum = String(
-        msg.catalogChecksum ||
-        msg.catalog_checksum ||
-        (catalog ? checksumHex(catalog) : '')
-      ).trim();
-
-      for (const nodeId of watcherIds) {
-        const st = ensureNodeState(nodeId);
-        if (!st) continue;
-        const catalogState = catalog
-          ? {
-              generatedAtMs: catalog.generatedAtMs,
-              provider: catalog.provider,
-              summary: catalog.summary,
-              services: catalog.services
-            }
-          : null;
-        upsertRemotePeer(st, from, {
-          meta: {
-            providerId: provider.providerId || '',
-            providerLabel: provider.providerLabel || '',
-            providerNetwork: provider.providerNetwork || '',
-            providerFingerprint: provider.providerKeyFingerprint || '',
-            routerNkn: provider.routerNkn || '',
-            routerNknAddresses: provider.routerNknAddresses || [],
-            marketplaceCatalogSummary: summary,
-            ...(catalogChecksum ? { catalogChecksum } : {})
-          },
-          state: {
-            marketplaceCatalog: catalogState,
-            marketplaceCatalogSummary: summary,
-            provider,
-            ...(catalogChecksum ? { catalogChecksum } : {})
-          },
-          lastTs: msg.ts || nowMs()
-        });
-        Router.sendFrom(nodeId, 'marketCatalog', {
-          nodeId,
-          peer: from,
-          catalog: catalogState,
-          summary,
-          provider,
-          catalogChecksum: catalogChecksum || '',
-          ts: msg.ts || nowMs()
-        });
-        Router.sendFrom(nodeId, 'events', {
-          nodeId,
-          peer: from,
-          type: 'market-service-catalog',
-          payload: {
-            ...msg,
-            catalog: catalogState,
-            summary,
-            provider,
-            catalogChecksum: catalogChecksum || ''
-          }
-        });
-        Router.sendFrom(nodeId, 'peers', {
-          nodeId,
-          peer: from,
-          peers: peersForOutput(st)
-        });
-      }
-      emitMarketUiEvent('hydra-market-catalog', {
-        peer: from,
-        catalog: catalog
-          ? {
-              generated_at_ms: catalog.generatedAtMs,
-              provider: catalog.provider,
-              summary: catalog.summary,
-              services: catalog.services
-            }
-          : null,
-        summary,
-        provider,
-        catalogChecksum: catalogChecksum || '',
-        ts: msg.ts || nowMs()
-      });
-      if (msg.expectAck === true) sendAck('ok', 'catalog-received');
-      return;
-    }
-
-    if (type === 'market-service-status' || event === 'market.service.status') {
-      const summary = normalizeCatalogSummary(
-        msg.catalog_summary || msg.catalogSummary || msg.summary || {}
-      );
-      const provider = normalizeCatalogProvider(msg.provider || {});
-      const services = ensureArray(msg.services || msg.statuses || msg.entries)
-        .map((entry) => normalizeMarketStatusEntry(entry))
-        .filter(Boolean);
-      const statusMap = mergeMarketServiceStatus({}, services);
-      const catalogChecksum = String(msg.catalogChecksum || msg.catalog_checksum || '').trim();
-
-      for (const nodeId of watcherIds) {
-        const st = ensureNodeState(nodeId);
-        if (!st) continue;
-        const existingPeer = st.remotePeers?.get?.(from) || {};
-        const priorStatus = existingPeer?.state?.marketServiceStatus || {};
-        upsertRemotePeer(st, from, {
-          meta: {
-            providerId: provider.providerId || '',
-            providerLabel: provider.providerLabel || '',
-            providerNetwork: provider.providerNetwork || '',
-            providerFingerprint: provider.providerKeyFingerprint || '',
-            routerNkn: provider.routerNkn || '',
-            routerNknAddresses: provider.routerNknAddresses || [],
-            marketplaceCatalogSummary: summary,
-            ...(catalogChecksum ? { catalogChecksum } : {})
-          },
-          state: {
-            marketplaceCatalogSummary: summary,
-            provider,
-            marketServiceStatus: mergeMarketServiceStatus(
-              priorStatus,
-              services
-            ),
-            ...(catalogChecksum ? { catalogChecksum } : {})
-          },
-          lastTs: msg.ts || nowMs()
-        });
-        Router.sendFrom(nodeId, 'marketStatus', {
-          nodeId,
-          peer: from,
-          summary,
-          provider,
-          services,
-          serviceStatusMap: statusMap,
-          catalogChecksum: catalogChecksum || '',
-          ts: msg.ts || nowMs()
-        });
-        Router.sendFrom(nodeId, 'events', {
-          nodeId,
-          peer: from,
-          type: 'market-service-status',
-          payload: {
-            ...msg,
-            summary,
-            provider,
-            services,
-            serviceStatusMap: statusMap,
-            catalogChecksum: catalogChecksum || ''
-          }
-        });
-        Router.sendFrom(nodeId, 'peers', {
-          nodeId,
-          peer: from,
-          peers: peersForOutput(st)
-        });
-      }
-      emitMarketUiEvent('hydra-market-status', {
-        peer: from,
-        summary,
-        provider,
-        services,
-        serviceStatusMap: statusMap,
-        catalogChecksum: catalogChecksum || '',
-        ts: msg.ts || nowMs()
-      });
-      if (msg.expectAck === true) sendAck('ok', 'status-received');
+    if (processMarketMessage({
+      from,
+      msg,
+      type,
+      event,
+      watcherIds,
+      sendAck,
+      source: 'bridge-dm',
+      subject: ''
+    })) {
       return;
     }
 
@@ -2906,7 +3164,6 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const publishMarketplaceCatalog = async (options = {}) => {
     const opts = options && typeof options === 'object' ? options : {};
     const targetPubFilter = sanitizePubKey(opts.targetPub || opts.target || '');
-    const includeStatus = opts.includeStatus !== false;
     const force = opts.force === true;
     const catalog = normalizeMarketplaceCatalog(latestRouterCatalog);
     if (!catalog) {
@@ -2914,17 +3171,34 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
     const checksum = String(opts.catalogChecksum || latestCatalogChecksum || checksumHex(catalog)).trim();
     const ts = nowMs();
-    const catalogPayloadBase = {
-      type: 'market-service-catalog',
-      event: 'market.service.catalog',
-      provider: catalog.provider,
-      summary: catalog.summary,
-      catalog,
-      catalogChecksum: checksum,
-      generated_at_ms: catalog.generatedAtMs,
-      ts
+    const nodeEntries = Array.from(NODE_STATE.entries());
+    const baseCfg = (nodeEntries[0]?.[1]?.cfg && typeof nodeEntries[0][1].cfg === 'object')
+      ? nodeEntries[0][1].cfg
+      : (NodeStore?.defaultsByType?.NoClipBridge || {});
+    const publishSettings = resolveMarketPublishSettings(baseCfg, opts);
+    const publishScope = normalizePublishScope(opts.publishScope || publishSettings.scope || 'both', 'both');
+    const includeStatus = opts.includeStatus !== undefined
+      ? opts.includeStatus !== false
+      : publishSettings.includeStatus;
+    const broadcastPublicOnly = opts.broadcastPublicOnly !== undefined
+      ? opts.broadcastPublicOnly !== false
+      : publishSettings.broadcastPublicOnly;
+    const localPub = sanitizePubKey(Net?.nkn?.client?.getPublicKey?.() || Net?.nkn?.addr || '');
+    const sourceAddress = String(Net?.nkn?.addr || '').trim();
+
+    const normalizeSummary = (summaryValue = {}, services = []) => {
+      const healthyCount = services.filter((entry) => entry.healthy === true).length;
+      return {
+        ...summaryValue,
+        serviceCount: services.length,
+        service_count: services.length,
+        publishedCount: services.length,
+        published_count: services.length,
+        healthyCount,
+        healthy_count: healthyCount
+      };
     };
-    const statusEntries = ensureArray(catalog.services).map((entry) => ({
+    const createStatusEntries = (services = []) => ensureArray(services).map((entry) => ({
       service_id: entry.serviceId,
       status: entry.status,
       healthy: entry.healthy === true,
@@ -2934,57 +3208,208 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       stale_rejected: entry.staleRejected === true,
       ts
     }));
+    const targetedCatalog = {
+      generatedAtMs: catalog.generatedAtMs,
+      provider: { ...(catalog.provider || {}) },
+      summary: normalizeSummary(catalog.summary || {}, ensureArray(catalog.services)),
+      services: ensureArray(catalog.services)
+    };
+    const broadcastServices = ensureArray(catalog.services).filter((entry) => {
+      if (!broadcastPublicOnly) return true;
+      return marketVisibilityForService(entry) === 'public';
+    });
+    const broadcastCatalog = {
+      generatedAtMs: catalog.generatedAtMs,
+      provider: { ...(catalog.provider || {}) },
+      summary: normalizeSummary(catalog.summary || {}, broadcastServices),
+      services: broadcastServices
+    };
+    const messageIdRoot = String(opts.messageId || newMessageId('market')).trim();
+    const catalogPayloadBase = {
+      type: 'market-service-catalog',
+      event: 'market.service.catalog',
+      provider: targetedCatalog.provider,
+      summary: targetedCatalog.summary,
+      catalog: targetedCatalog,
+      catalogChecksum: checksum,
+      generated_at_ms: targetedCatalog.generatedAtMs,
+      messageId: `${messageIdRoot}-catalog`,
+      ts
+    };
     const statusPayloadBase = {
       type: 'market-service-status',
       event: 'market.service.status',
-      provider: catalog.provider,
-      summary: catalog.summary,
-      services: statusEntries,
+      provider: targetedCatalog.provider,
+      summary: targetedCatalog.summary,
+      services: createStatusEntries(targetedCatalog.services),
       catalogChecksum: checksum,
+      messageId: `${messageIdRoot}-status`,
       ts
     };
+    const broadcastCatalogPayloadBase = {
+      ...catalogPayloadBase,
+      summary: broadcastCatalog.summary,
+      catalog: broadcastCatalog
+    };
+    const broadcastStatusPayloadBase = {
+      ...statusPayloadBase,
+      summary: broadcastCatalog.summary,
+      services: createStatusEntries(broadcastCatalog.services)
+    };
 
-    let attempted = 0;
-    let sent = 0;
-    const nodeEntries = Array.from(NODE_STATE.entries());
-    for (const [nodeId, st] of nodeEntries) {
-      if (!st?.targetPub) continue;
-      if (targetPubFilter && st.targetPub !== targetPubFilter) continue;
-      attempted += 1;
-      const selectedTransport = selectedTransportForPacket(st, {});
-      const catalogPayload = {
-        ...catalogPayloadBase,
-        selected_transport: selectedTransport,
-        transport: selectedTransport
-      };
-      const catalogOk = await sendBridgePayload(nodeId, st, catalogPayload, {
-        targets: [st.targetPub]
-      });
-      if (!catalogOk) continue;
-      sent += 1;
-      if (includeStatus) {
-        const statusPayload = {
-          ...statusPayloadBase,
+    const targeted = { attempted: 0, sent: 0, failed: 0 };
+    const broadcast = { attempted: 0, sent: 0, failed: 0, subjects: [], errors: [] };
+
+    if (publishScope === 'targeted' || publishScope === 'both') {
+      for (const [nodeId, st] of nodeEntries) {
+        if (!st?.targetPub) continue;
+        if (targetPubFilter && st.targetPub !== targetPubFilter) continue;
+        targeted.attempted += 1;
+        const selectedTransport = selectedTransportForPacket(st, {});
+        const catalogPayload = {
+          ...catalogPayloadBase,
           selected_transport: selectedTransport,
           transport: selectedTransport
         };
-        await sendBridgePayload(nodeId, st, statusPayload, {
+        const catalogOk = await sendBridgePayload(nodeId, st, catalogPayload, {
           targets: [st.targetPub]
         });
+        if (!catalogOk) {
+          targeted.failed += 1;
+          continue;
+        }
+        targeted.sent += 1;
+        if (includeStatus) {
+          const statusPayload = {
+            ...statusPayloadBase,
+            selected_transport: selectedTransport,
+            transport: selectedTransport
+          };
+          const statusOk = await sendBridgePayload(nodeId, st, statusPayload, {
+            targets: [st.targetPub]
+          });
+          if (!statusOk) targeted.failed += 1;
+        }
       }
     }
 
-    if (attempted === 0 || sent > 0 || force) {
+    if (publishScope === 'broadcast' || publishScope === 'both') {
+      const shouldSuppress = (
+        !force &&
+        checksum &&
+        checksum === lastBroadcastChecksum &&
+        lastBroadcastAtMs > 0 &&
+        (ts - lastBroadcastAtMs) < MARKET_BROADCAST_DEBOUNCE_MS
+      );
+      if (!shouldSuppress) {
+        try {
+          const disco = await ensureDiscovery({ requireBroadcast: true });
+          const nc = disco?.nc;
+          const sc = disco?.sc;
+          if (!nc || !sc || typeof nc.publish !== 'function') {
+            throw new Error('discovery_broadcast_unavailable');
+          }
+          const catalogSubject = applyRoomTemplateToSubject(publishSettings.catalogSubject, publishSettings.room);
+          const statusSubject = applyRoomTemplateToSubject(publishSettings.statusSubject, publishSettings.room);
+          const packets = [];
+          if (catalogSubject) {
+            packets.push({
+              subject: catalogSubject,
+              payload: {
+                ...broadcastCatalogPayloadBase,
+                transport: 'nats',
+                selected_transport: 'nats'
+              }
+            });
+          }
+          if (includeStatus && statusSubject) {
+            packets.push({
+              subject: statusSubject,
+              payload: {
+                ...broadcastStatusPayloadBase,
+                transport: 'nats',
+                selected_transport: 'nats'
+              }
+            });
+          }
+          for (const packet of packets) {
+            broadcast.attempted += 1;
+            const envelope = withInteropContractFields({
+              ...(packet.payload || {}),
+              pub: localPub || packet.payload?.pub || '',
+              source_address: sourceAddress || packet.payload?.source_address || '',
+              source_network: 'hydra',
+              target_network: 'noclip',
+              discovery_source: 'nats-gossip',
+              subject: packet.subject
+            }, DEFAULT_INTEROP_CONTRACT);
+            try {
+              nc.publish(packet.subject, sc.encode(JSON.stringify(envelope)));
+              broadcast.sent += 1;
+              broadcast.subjects.push(packet.subject);
+            } catch (err) {
+              broadcast.failed += 1;
+              broadcast.errors.push(`${packet.subject}:${err?.message || err}`);
+            }
+          }
+          if (typeof nc.flush === 'function') {
+            await nc.flush();
+          }
+          if (broadcast.sent > 0) {
+            lastBroadcastChecksum = checksum;
+            lastBroadcastAtMs = ts;
+          }
+        } catch (err) {
+          broadcast.failed += 1;
+          broadcast.errors.push(String(err?.message || err || 'broadcast_failed'));
+        }
+      } else {
+        broadcast.errors.push('unchanged_checksum');
+      }
+    }
+
+    if (
+      targeted.attempted === 0 ||
+      targeted.sent > 0 ||
+      broadcast.sent > 0 ||
+      force
+    ) {
       await refreshDiscoveryMetadata();
     }
 
+    const attempted = targeted.attempted + broadcast.attempted;
+    const sent = targeted.sent + broadcast.sent;
+    const failed = targeted.failed + broadcast.failed;
+    const reason = sent > 0
+      ? ''
+      : (String(
+          broadcast.errors[0] ||
+          (attempted <= 0 ? 'no_publish_targets' : 'publish_failed')
+        ).trim() || 'publish_failed');
     if (sent > 0 && opts.silent !== true) {
-      setBadge?.(`Marketplace catalog published to ${sent}/${attempted} peer${attempted === 1 ? '' : 's'}`);
+      const parts = [];
+      if (publishScope === 'targeted' || publishScope === 'both') {
+        parts.push(`targeted ${targeted.sent}/${targeted.attempted}`);
+      }
+      if (publishScope === 'broadcast' || publishScope === 'both') {
+        parts.push(`broadcast ${broadcast.sent}/${broadcast.attempted}`);
+      }
+      setBadge?.(`Marketplace catalog published (${parts.join(' • ') || `${sent}/${attempted}`})`);
     } else if (attempted > 0 && sent === 0 && opts.silent !== true) {
       setBadge?.('Marketplace catalog publish failed', false);
     }
 
-    return { ok: sent > 0, attempted, sent, checksum };
+    return {
+      ok: sent > 0,
+      reason,
+      publishScope,
+      attempted,
+      sent,
+      failed,
+      checksum,
+      targeted,
+      broadcast
+    };
   };
 
   const onRouterCatalog = (catalogValue, options = {}) => {
@@ -3045,7 +3470,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         includeStatus: opts.includeStatus !== false,
         silent: opts.silent === true,
         force: opts.force === true,
-        targetPub: opts.targetPub || ''
+        targetPub: opts.targetPub || '',
+        publishScope: opts.publishScope || ''
       });
     } else {
       void refreshDiscoveryMetadata();

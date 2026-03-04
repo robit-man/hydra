@@ -232,8 +232,8 @@ ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
         "include_unhealthy": {"type": "bool", "default": True},
     },
     "marketplace_nats": {
-        "enable_publish": {"type": "bool", "default": False},
-        "enable_subscribe": {"type": "bool", "default": False},
+        "enable_publish": {"type": "bool", "default": True},
+        "enable_subscribe": {"type": "bool", "default": True},
         "broker_urls": {"type": "str", "default": "nats://127.0.0.1:4222"},
         "catalog_subject": {"type": "str", "default": "hydra.market.catalog.v1"},
         "status_subject": {"type": "str", "default": "hydra.market.status.v1"},
@@ -428,6 +428,7 @@ SERVICE_TARGETS = {
     },
 }
 MARKETPLACE_VISIBILITY = {"public", "friends", "private"}
+MARKETPLACE_TRANSPORT_PREFERENCES = {"auto", "cloudflare", "nats", "nkn", "local", "upnp"}
 NATS_SUBJECT_PATTERN = re.compile(r"^[A-Za-z0-9_.>*-]+$")
 
 
@@ -436,6 +437,16 @@ def _normalize_marketplace_visibility(value: Any, default: str = "public") -> st
     if text in MARKETPLACE_VISIBILITY:
         return text
     return default if default in MARKETPLACE_VISIBILITY else "public"
+
+
+def _normalize_marketplace_transport_preference(value: Any, default: str = "auto") -> str:
+    text = str(value or "").strip().lower()
+    if text in MARKETPLACE_TRANSPORT_PREFERENCES:
+        return text
+    fallback = str(default or "").strip().lower()
+    if fallback in MARKETPLACE_TRANSPORT_PREFERENCES:
+        return fallback
+    return "auto"
 
 
 def _normalize_marketplace_tags(raw_tags: Any, fallback: Optional[List[str]] = None) -> List[str]:
@@ -577,6 +588,7 @@ def _default_service_publication() -> Dict[str, Dict[str, Any]]:
             "repository": "hydra",
             "category": category,
             "capacity_hint": 1,
+            "transport_preference": "auto",
             "tags": _normalize_marketplace_tags([category, service_name], fallback=[service_name]),
             "pricing": {
                 "currency": "USDC",
@@ -2749,8 +2761,8 @@ def _default_config() -> dict:
             "include_unhealthy": True,
         },
         "marketplace_nats": {
-            "enable_publish": False,
-            "enable_subscribe": False,
+            "enable_publish": True,
+            "enable_subscribe": True,
             "broker_urls": "nats://127.0.0.1:4222",
             "catalog_subject": "hydra.market.catalog.v1",
             "status_subject": "hydra.market.status.v1",
@@ -7099,6 +7111,7 @@ class Router:
         self.marketplace_remote_catalog_events: Deque[Dict[str, Any]] = deque(maxlen=120)
         self.service_publication_cfg: Dict[str, Dict[str, Any]] = {}
         self.catalog_runtime_overrides: Dict[str, Dict[str, Any]] = {}
+        self.config_edit_lock = threading.Lock()
         self.config_dirty = False
 
         self.use_ui = use_ui
@@ -7336,8 +7349,8 @@ class Router:
         next_marketplace_sync_runtime["target_urls_list"] = list(next_marketplace_sync_targets)
         marketplace_nats_cfg = dict(next_cfg.get("marketplace_nats", {}))
         next_marketplace_nats_cfg = {
-            "enable_publish": self._as_bool(marketplace_nats_cfg.get("enable_publish"), False),
-            "enable_subscribe": self._as_bool(marketplace_nats_cfg.get("enable_subscribe"), False),
+            "enable_publish": self._as_bool(marketplace_nats_cfg.get("enable_publish"), True),
+            "enable_subscribe": self._as_bool(marketplace_nats_cfg.get("enable_subscribe"), True),
             "broker_urls": str(marketplace_nats_cfg.get("broker_urls") or "").strip(),
             "catalog_subject": _normalize_marketplace_nats_subject(
                 marketplace_nats_cfg.get("catalog_subject"),
@@ -7469,7 +7482,7 @@ class Router:
                     self.marketplace_sync_state["next_due_ts_ms"] = 0
         if hasattr(self, "marketplace_nats_state_lock") and hasattr(self, "marketplace_nats_state"):
             with self.marketplace_nats_state_lock:
-                enable_publish = self._as_bool(self.marketplace_nats_cfg.get("enable_publish"), False)
+                enable_publish = self._as_bool(self.marketplace_nats_cfg.get("enable_publish"), True)
                 has_servers = bool(next_marketplace_nats_servers)
                 if enable_publish and has_servers:
                     if int(self.marketplace_nats_state.get("next_due_ts_ms") or 0) <= 0:
@@ -7517,6 +7530,7 @@ class Router:
                 "repository": "hydra",
                 "category": target or service_name,
                 "capacity_hint": 1,
+                "transport_preference": "auto",
                 "tags": [service_name],
                 "pricing": {
                     "currency": "USDC",
@@ -7542,6 +7556,10 @@ class Router:
             "repository": str(defaults.get("repository") or "hydra").strip() or "hydra",
             "category": str(defaults.get("category") or service_name).strip() or service_name,
             "capacity_hint": self._as_int(defaults.get("capacity_hint"), 1, minimum=0, maximum=100000),
+            "transport_preference": _normalize_marketplace_transport_preference(
+                defaults.get("transport_preference"),
+                default="auto",
+            ),
             "tags": tags,
             "pricing": {
                 "currency": currency,
@@ -7568,6 +7586,10 @@ class Router:
         out["repository"] = str(raw_entry.get("repository") or base.get("repository") or "hydra").strip() or "hydra"
         out["category"] = str(raw_entry.get("category") or base.get("category") or service_name).strip() or service_name
         out["capacity_hint"] = self._as_int(raw_entry.get("capacity_hint"), int(base.get("capacity_hint") or 1), minimum=0, maximum=100000)
+        out["transport_preference"] = _normalize_marketplace_transport_preference(
+            raw_entry.get("transport_preference", raw_entry.get("transport")),
+            default=str(base.get("transport_preference") or "auto"),
+        )
         out["tags"] = _normalize_marketplace_tags(raw_entry.get("tags"), fallback=base.get("tags") if isinstance(base.get("tags"), list) else [service_name])
         market = marketplace_cfg if isinstance(marketplace_cfg, dict) else (self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {})
         default_pricing = base.get("pricing") if isinstance(base.get("pricing"), dict) else {}
@@ -9608,6 +9630,490 @@ class Router:
             "services": keys,
         }
 
+    @staticmethod
+    def _marketplace_config_etag(config_payload: Any) -> str:
+        try:
+            encoded = json.dumps(
+                config_payload if isinstance(config_payload, dict) else {},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        except Exception:
+            encoded = "{}"
+        return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()[:24]
+
+    @staticmethod
+    def _parse_bool_field(value: Any) -> Tuple[bool, bool]:
+        if isinstance(value, bool):
+            return value, True
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if float(value) in (0.0, 1.0):
+                return bool(int(value)), True
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True, True
+        if text in {"0", "false", "no", "off"}:
+            return False, True
+        return False, False
+
+    @staticmethod
+    def _parse_int_field(value: Any) -> Tuple[int, bool]:
+        if isinstance(value, bool):
+            return 0, False
+        if isinstance(value, int):
+            return int(value), True
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value), True
+            return 0, False
+        text = str(value or "").strip()
+        if not text:
+            return 0, False
+        try:
+            return int(text), True
+        except Exception:
+            return 0, False
+
+    @staticmethod
+    def _parse_float_field(value: Any) -> Tuple[float, bool]:
+        if isinstance(value, bool):
+            return 0.0, False
+        if isinstance(value, (int, float)):
+            return float(value), True
+        text = str(value or "").strip()
+        if not text:
+            return 0.0, False
+        try:
+            return float(text), True
+        except Exception:
+            return 0.0, False
+
+    def _marketplace_editor_provider_payload(self) -> Dict[str, Any]:
+        market = self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {}
+        return {
+            "provider_id": str(market.get("provider_id") or "hydra-router").strip() or "hydra-router",
+            "provider_label": str(market.get("provider_label") or "Hydra Router").strip() or "Hydra Router",
+            "provider_network": str(market.get("provider_network") or "hydra").strip().lower() or "hydra",
+            "provider_contact": str(market.get("provider_contact") or "").strip(),
+            "default_currency": str(market.get("default_currency") or "USDC").strip().upper() or "USDC",
+            "default_unit": str(market.get("default_unit") or "request").strip().lower() or "request",
+            "default_price_per_unit": round(
+                self._as_float(market.get("default_price_per_unit"), 0.0, minimum=0.0, maximum=1_000_000.0),
+                8,
+            ),
+            "include_unhealthy": self._as_bool(market.get("include_unhealthy"), True),
+            "catalog_ttl_seconds": self._as_int(market.get("catalog_ttl_seconds"), 20, minimum=2, maximum=600),
+        }
+
+    def _marketplace_editor_services_payload(self) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        for service_name in sorted(SERVICE_TARGETS.keys()):
+            base = self.service_publication_cfg.get(service_name) if isinstance(self.service_publication_cfg.get(service_name), dict) else {}
+            out[service_name] = self._normalize_service_publication_entry(
+                service_name,
+                base,
+                marketplace_cfg=self.marketplace_cfg,
+            )
+        return out
+
+    def _marketplace_config_editor_payload(self) -> Dict[str, Any]:
+        provider = self._marketplace_editor_provider_payload()
+        services = self._marketplace_editor_services_payload()
+        config_payload = {
+            "provider": provider,
+            "services": services,
+        }
+        return {
+            "status": "success",
+            "etag": self._marketplace_config_etag(config_payload),
+            "config": config_payload,
+            "options": {
+                "services": sorted(SERVICE_TARGETS.keys()),
+                "visibility": sorted(MARKETPLACE_VISIBILITY),
+                "transport_preferences": sorted(MARKETPLACE_TRANSPORT_PREFERENCES),
+            },
+            "updated_at_ms": int(time.time() * 1000),
+        }
+
+    def _normalize_marketplace_provider_patch(
+        self,
+        raw_provider: Any,
+        *,
+        base_provider: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        out = dict(base_provider if isinstance(base_provider, dict) else {})
+        errors: List[str] = []
+        if raw_provider is None:
+            return out, errors
+        if not isinstance(raw_provider, dict):
+            return out, ["provider must be an object"]
+        consumed = set()
+
+        def _pull(*keys: str) -> Tuple[Any, bool]:
+            for key in keys:
+                if key in raw_provider:
+                    consumed.add(key)
+                    return raw_provider.get(key), True
+            return None, False
+
+        provider_id_raw, has_provider_id = _pull("provider_id", "providerId")
+        if has_provider_id:
+            provider_id = str(provider_id_raw or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{1,63}", provider_id):
+                errors.append("provider.provider_id must match [a-z0-9][a-z0-9_.:-]{1,63}")
+            else:
+                out["provider_id"] = provider_id
+
+        provider_label_raw, has_provider_label = _pull("provider_label", "providerLabel")
+        if has_provider_label:
+            provider_label = str(provider_label_raw or "").strip()
+            if len(provider_label) < 1 or len(provider_label) > 120:
+                errors.append("provider.provider_label must be 1-120 characters")
+            else:
+                out["provider_label"] = provider_label
+
+        provider_network_raw, has_provider_network = _pull("provider_network", "providerNetwork")
+        if has_provider_network:
+            provider_network = str(provider_network_raw or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,31}", provider_network):
+                errors.append("provider.provider_network must match [a-z0-9][a-z0-9_-]{1,31}")
+            else:
+                out["provider_network"] = provider_network
+
+        provider_contact_raw, has_provider_contact = _pull("provider_contact", "providerContact")
+        if has_provider_contact:
+            provider_contact = str(provider_contact_raw or "").strip()
+            if len(provider_contact) > 160:
+                errors.append("provider.provider_contact must be <= 160 characters")
+            else:
+                out["provider_contact"] = provider_contact
+
+        currency_raw, has_currency = _pull("default_currency", "defaultCurrency")
+        if has_currency:
+            currency = str(currency_raw or "").strip().upper()
+            if not re.fullmatch(r"[A-Z0-9_-]{2,12}", currency):
+                errors.append("provider.default_currency must match [A-Z0-9_-]{2,12}")
+            else:
+                out["default_currency"] = currency
+
+        unit_raw, has_unit = _pull("default_unit", "defaultUnit")
+        if has_unit:
+            unit = str(unit_raw or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9_:-]{1,32}", unit):
+                errors.append("provider.default_unit must match [a-z0-9_:-]{1,32}")
+            else:
+                out["default_unit"] = unit
+
+        base_price_raw, has_base_price = _pull("default_price_per_unit", "defaultPricePerUnit")
+        if has_base_price:
+            base_price, ok = self._parse_float_field(base_price_raw)
+            if (not ok) or base_price < 0.0 or base_price > 1_000_000.0:
+                errors.append("provider.default_price_per_unit must be a number between 0 and 1000000")
+            else:
+                out["default_price_per_unit"] = round(float(base_price), 8)
+
+        include_unhealthy_raw, has_include_unhealthy = _pull("include_unhealthy", "includeUnhealthy")
+        if has_include_unhealthy:
+            include_unhealthy, ok = self._parse_bool_field(include_unhealthy_raw)
+            if not ok:
+                errors.append("provider.include_unhealthy must be boolean")
+            else:
+                out["include_unhealthy"] = bool(include_unhealthy)
+
+        ttl_raw, has_ttl = _pull("catalog_ttl_seconds", "catalogTtlSeconds")
+        if has_ttl:
+            ttl, ok = self._parse_int_field(ttl_raw)
+            if (not ok) or ttl < 2 or ttl > 600:
+                errors.append("provider.catalog_ttl_seconds must be an integer between 2 and 600")
+            else:
+                out["catalog_ttl_seconds"] = int(ttl)
+
+        unknown = sorted(key for key in raw_provider.keys() if key not in consumed)
+        if unknown:
+            errors.append(f"provider contains unknown keys: {', '.join(unknown)}")
+        return out, errors
+
+    def _normalize_marketplace_service_patch(
+        self,
+        service_name: str,
+        raw_patch: Any,
+        *,
+        base_entry: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        canonical = self._canonical_router_service(service_name)
+        out = dict(base_entry if isinstance(base_entry, dict) else {})
+        errors: List[str] = []
+        if not canonical or canonical not in SERVICE_TARGETS:
+            return out, [f"services.{service_name} unknown service"]
+        if not isinstance(raw_patch, dict):
+            return out, [f"services.{canonical} must be an object"]
+        consumed = set()
+
+        def _pull(*keys: str) -> Tuple[Any, bool]:
+            for key in keys:
+                if key in raw_patch:
+                    consumed.add(key)
+                    return raw_patch.get(key), True
+            return None, False
+
+        enabled_raw, has_enabled = _pull("enabled")
+        if not has_enabled:
+            errors.append(f"services.{canonical}.enabled is required")
+        else:
+            enabled, ok = self._parse_bool_field(enabled_raw)
+            if not ok:
+                errors.append(f"services.{canonical}.enabled must be boolean")
+            else:
+                out["enabled"] = bool(enabled)
+
+        visibility_raw, has_visibility = _pull("visibility")
+        if has_visibility:
+            visibility_text = str(visibility_raw or "").strip().lower()
+            if visibility_text not in MARKETPLACE_VISIBILITY:
+                errors.append(f"services.{canonical}.visibility must be one of {sorted(MARKETPLACE_VISIBILITY)}")
+            else:
+                out["visibility"] = visibility_text
+
+        repository_raw, has_repository = _pull("repository")
+        if has_repository:
+            repository = str(repository_raw or "").strip()
+            if not repository or len(repository) > 64:
+                errors.append(f"services.{canonical}.repository must be 1-64 characters")
+            else:
+                out["repository"] = repository
+
+        category_raw, has_category = _pull("category")
+        if has_category:
+            category = str(category_raw or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9_:-]{1,48}", category):
+                errors.append(f"services.{canonical}.category must match [a-z0-9_:-]{1,48}")
+            else:
+                out["category"] = category
+
+        capacity_raw, has_capacity = _pull("capacity_hint", "capacityHint")
+        if has_capacity:
+            capacity, ok = self._parse_int_field(capacity_raw)
+            if (not ok) or capacity < 0 or capacity > 100000:
+                errors.append(f"services.{canonical}.capacity_hint must be an integer between 0 and 100000")
+            else:
+                out["capacity_hint"] = int(capacity)
+
+        transport_raw, has_transport = _pull("transport_preference", "transportPreference", "transport")
+        if has_transport:
+            normalized_transport = _normalize_marketplace_transport_preference(transport_raw, default="")
+            input_transport = str(transport_raw or "").strip().lower()
+            if input_transport not in MARKETPLACE_TRANSPORT_PREFERENCES:
+                errors.append(
+                    f"services.{canonical}.transport_preference must be one of "
+                    f"{sorted(MARKETPLACE_TRANSPORT_PREFERENCES)}"
+                )
+            else:
+                out["transport_preference"] = normalized_transport
+
+        tags_raw, has_tags = _pull("tags")
+        if has_tags:
+            tags = _normalize_marketplace_tags(
+                tags_raw,
+                fallback=out.get("tags") if isinstance(out.get("tags"), list) else [canonical],
+            )
+            if tags_raw not in (None, "", []) and not tags:
+                errors.append(f"services.{canonical}.tags must contain at least one valid tag token")
+            else:
+                out["tags"] = tags
+
+        pricing_raw, has_pricing = _pull("pricing")
+        next_pricing = dict(out.get("pricing") if isinstance(out.get("pricing"), dict) else {})
+        if has_pricing:
+            if not isinstance(pricing_raw, dict):
+                errors.append(f"services.{canonical}.pricing must be an object")
+            else:
+                pricing_obj = pricing_raw
+                pricing_allowed = {
+                    "currency",
+                    "unit",
+                    "base_price",
+                    "basePrice",
+                    "min_units",
+                    "minUnits",
+                    "quote_public",
+                    "quotePublic",
+                }
+                pricing_unknown = sorted(key for key in pricing_obj.keys() if key not in pricing_allowed)
+                if pricing_unknown:
+                    errors.append(
+                        f"services.{canonical}.pricing contains unknown keys: {', '.join(pricing_unknown)}"
+                    )
+                if "currency" in pricing_obj:
+                    currency = str(pricing_obj.get("currency") or "").strip().upper()
+                    if not re.fullmatch(r"[A-Z0-9_-]{2,12}", currency):
+                        errors.append(f"services.{canonical}.pricing.currency must match [A-Z0-9_-]{{2,12}}")
+                    else:
+                        next_pricing["currency"] = currency
+                if "unit" in pricing_obj:
+                    unit = str(pricing_obj.get("unit") or "").strip().lower()
+                    if not re.fullmatch(r"[a-z0-9_:-]{1,32}", unit):
+                        errors.append(f"services.{canonical}.pricing.unit must match [a-z0-9_:-]{{1,32}}")
+                    else:
+                        next_pricing["unit"] = unit
+                base_price_raw = pricing_obj.get("base_price", pricing_obj.get("basePrice"))
+                if "base_price" in pricing_obj or "basePrice" in pricing_obj:
+                    base_price, ok = self._parse_float_field(base_price_raw)
+                    if (not ok) or base_price < 0.0 or base_price > 1_000_000.0:
+                        errors.append(
+                            f"services.{canonical}.pricing.base_price must be a number between 0 and 1000000"
+                        )
+                    else:
+                        next_pricing["base_price"] = round(float(base_price), 8)
+                min_units_raw = pricing_obj.get("min_units", pricing_obj.get("minUnits"))
+                if "min_units" in pricing_obj or "minUnits" in pricing_obj:
+                    min_units, ok = self._parse_int_field(min_units_raw)
+                    if (not ok) or min_units < 1 or min_units > 1_000_000:
+                        errors.append(
+                            f"services.{canonical}.pricing.min_units must be an integer between 1 and 1000000"
+                        )
+                    else:
+                        next_pricing["min_units"] = int(min_units)
+                quote_public_raw = pricing_obj.get("quote_public", pricing_obj.get("quotePublic"))
+                if "quote_public" in pricing_obj or "quotePublic" in pricing_obj:
+                    quote_public, ok = self._parse_bool_field(quote_public_raw)
+                    if not ok:
+                        errors.append(f"services.{canonical}.pricing.quote_public must be boolean")
+                    else:
+                        next_pricing["quote_public"] = bool(quote_public)
+        if next_pricing:
+            out["pricing"] = next_pricing
+
+        unknown = sorted(key for key in raw_patch.keys() if key not in consumed)
+        if unknown:
+            errors.append(f"services.{canonical} contains unknown keys: {', '.join(unknown)}")
+
+        normalized = self._normalize_service_publication_entry(
+            canonical,
+            out,
+            marketplace_cfg=self.marketplace_cfg,
+        )
+        if errors:
+            # Safety guard: never auto-publish a malformed service patch.
+            normalized["enabled"] = False
+        return normalized, errors
+
+    def _apply_marketplace_config_update(
+        self,
+        body: Dict[str, Any],
+        *,
+        if_match: str = "",
+    ) -> Tuple[Dict[str, Any], int]:
+        payload = body if isinstance(body, dict) else {}
+        with self.config_edit_lock:
+            current_payload = self._marketplace_config_editor_payload()
+            current_config = current_payload.get("config") if isinstance(current_payload.get("config"), dict) else {}
+            current_provider = current_config.get("provider") if isinstance(current_config.get("provider"), dict) else {}
+            current_services = current_config.get("services") if isinstance(current_config.get("services"), dict) else {}
+            current_etag = str(current_payload.get("etag") or "")
+
+            expected = str(
+                if_match
+                or payload.get("if_match")
+                or payload.get("ifMatch")
+                or payload.get("etag")
+                or ""
+            ).strip().strip('"')
+            if expected and expected != "*" and expected != current_etag:
+                return {
+                    "status": "error",
+                    "error": "config_conflict",
+                    "message": "Marketplace config changed; refresh and retry",
+                    "expected_etag": expected,
+                    "current_etag": current_etag,
+                    "config": current_config,
+                }, 409
+
+            provider_patch = payload.get("provider")
+            services_patch = payload.get("services")
+            if provider_patch is None and services_patch is None:
+                return {
+                    "status": "error",
+                    "error": "validation_failed",
+                    "message": "Request must include provider and/or services payload",
+                    "errors": ["missing provider/services payload"],
+                    "current_etag": current_etag,
+                }, 400
+
+            next_provider, provider_errors = self._normalize_marketplace_provider_patch(
+                provider_patch,
+                base_provider=current_provider,
+            )
+            next_services: Dict[str, Dict[str, Any]] = {}
+            for service_name in sorted(SERVICE_TARGETS.keys()):
+                base_entry = current_services.get(service_name) if isinstance(current_services.get(service_name), dict) else {}
+                next_services[service_name] = self._normalize_service_publication_entry(
+                    service_name,
+                    base_entry,
+                    marketplace_cfg=self.marketplace_cfg,
+                )
+
+            errors: List[str] = list(provider_errors)
+            if services_patch is not None:
+                if not isinstance(services_patch, dict):
+                    errors.append("services must be an object")
+                else:
+                    for raw_service, raw_entry in services_patch.items():
+                        canonical = self._canonical_router_service(raw_service)
+                        if canonical not in SERVICE_TARGETS:
+                            errors.append(f"services.{raw_service} unknown service")
+                            continue
+                        base_entry = next_services.get(canonical, {})
+                        normalized_entry, svc_errors = self._normalize_marketplace_service_patch(
+                            canonical,
+                            raw_entry,
+                            base_entry=base_entry,
+                        )
+                        next_services[canonical] = normalized_entry
+                        errors.extend(svc_errors)
+
+            if errors:
+                return {
+                    "status": "error",
+                    "error": "validation_failed",
+                    "message": "Marketplace config update rejected",
+                    "errors": errors,
+                    "current_etag": current_etag,
+                }, 400
+
+            next_cfg = _json_clone(self.cfg if isinstance(self.cfg, dict) else {})
+            market_section = dict(next_cfg.get("marketplace", {}))
+            market_section.update(next_provider)
+            next_cfg["marketplace"] = market_section
+            next_cfg["service_publication"] = next_services
+
+            try:
+                self._apply_runtime_config(next_cfg)
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "error": "apply_failed",
+                    "message": str(exc),
+                    "current_etag": current_etag,
+                }, 400
+
+            persist = self._as_bool(payload.get("persist"), True)
+            self.config_dirty = True
+            if persist:
+                self._save_config()
+
+            updated = self._marketplace_config_editor_payload()
+            snapshot = self.get_service_snapshot(force_refresh=True)
+            catalog = self._marketplace_catalog_payload(snapshot)
+            return {
+                "status": "success",
+                "etag": str(updated.get("etag") or ""),
+                "config": updated.get("config") if isinstance(updated.get("config"), dict) else {},
+                "options": updated.get("options") if isinstance(updated.get("options"), dict) else {},
+                "persisted": persist,
+                "catalog": catalog,
+            }, 200
+
     def _apply_catalog_overrides(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         body = payload if isinstance(payload, dict) else {}
         raw_services = body.get("services") if isinstance(body.get("services"), dict) else {}
@@ -9723,6 +10229,10 @@ class Router:
                     "enabled": bool(publication.get("enabled")),
                     "visibility": str(publication.get("visibility") or "public"),
                     "capacity_hint": int(publication.get("capacity_hint") or 0),
+                    "transport_preference": _normalize_marketplace_transport_preference(
+                        publication.get("transport_preference"),
+                        default="auto",
+                    ),
                     "pricing": publication.get("pricing") if isinstance(publication.get("pricing"), dict) else {},
                     "tags": list(publication.get("tags") or []),
                     "selected_transport": selected_transport,
@@ -9803,8 +10313,8 @@ class Router:
             self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
         )
         return bool(
-            self._as_bool(cfg.get("enable_publish"), False)
-            or self._as_bool(cfg.get("enable_subscribe"), False)
+            self._as_bool(cfg.get("enable_publish"), True)
+            or self._as_bool(cfg.get("enable_subscribe"), True)
         )
 
     def _marketplace_nats_backoff_seconds(self, consecutive_failures: int = 0) -> int:
@@ -9835,8 +10345,8 @@ class Router:
         )
         return {
             "enabled": self._marketplace_nats_enabled(cfg),
-            "enable_publish": self._as_bool(cfg.get("enable_publish"), False),
-            "enable_subscribe": self._as_bool(cfg.get("enable_subscribe"), False),
+            "enable_publish": self._as_bool(cfg.get("enable_publish"), True),
+            "enable_subscribe": self._as_bool(cfg.get("enable_subscribe"), True),
             "broker_urls": list(brokers),
             "broker_count": len(brokers),
             "catalog_subject": catalog_subject,
@@ -11446,13 +11956,23 @@ class Router:
 
         def _public_json(payload: Any, status_code: int = 200):
             safe_payload = self._redact_public_payload(payload)
-            if status_code == 200:
-                return jsonify(safe_payload)
-            return jsonify(safe_payload), status_code
+            response = jsonify(safe_payload)
+            response.status_code = int(status_code)
+            return response
 
         @app.before_request
         def _count_requests():
             self.request_counter["value"] = int(self.request_counter.get("value", 0)) + 1
+            if request.method == "OPTIONS":
+                return ("", 204)
+
+        @app.after_request
+        def _cors_headers(response):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type,If-Match"
+            response.headers["Access-Control-Expose-Headers"] = "ETag"
+            return response
 
         @app.route("/", methods=["GET"])
         def _index():
@@ -11577,6 +12097,35 @@ class Router:
         @app.route("/marketplace/sync", methods=["GET"])
         def _marketplace_sync():
             return _public_json(self._marketplace_sync_state_payload())
+
+        @app.route("/marketplace/config", methods=["GET", "PUT", "OPTIONS"])
+        def _marketplace_config():
+            if request.method == "GET":
+                payload = self._marketplace_config_editor_payload()
+                etag = str(payload.get("etag") or "")
+                response = _public_json(payload)
+                with contextlib.suppress(Exception):
+                    response.headers["ETag"] = etag
+                return response
+
+            body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "validation_failed",
+                        "message": "Request body must be JSON object",
+                    },
+                    status_code=400,
+                )
+            if_match = str(request.headers.get("If-Match") or "").strip()
+            payload, status_code = self._apply_marketplace_config_update(body, if_match=if_match)
+            response = _public_json(payload, status_code=status_code)
+            etag = str(payload.get("etag") or payload.get("current_etag") or "")
+            if etag:
+                with contextlib.suppress(Exception):
+                    response.headers["ETag"] = etag
+            return response
 
         @app.route("/marketplace/catalog/publish", methods=["POST"])
         def _marketplace_publish():

@@ -899,6 +899,194 @@ header {
   text-transform: uppercase;
 }
 
+.market-publish-controls {
+  gap: 8px;
+}
+
+.market-publish-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.market-publish-select {
+  min-height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--market-chip-border);
+  background: rgba(255, 255, 255, .04);
+  color: var(--text);
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.market-publish-toggle input {
+  margin: 0;
+}
+
+.market-publish-result {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.market-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  background: rgba(0, 0, 0, .12);
+}
+
+.market-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.market-config-title {
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--accent2);
+}
+
+.market-config-status {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.market-config-status[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.market-config-status[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.market-config-status[data-tone="error"] {
+  color: var(--err);
+}
+
+.market-config-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.market-config-import-label {
+  position: relative;
+  overflow: hidden;
+}
+
+.market-config-import-label input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.market-config-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  gap: 6px;
+}
+
+.market-config-grid.compact {
+  grid-template-columns: repeat(4, minmax(88px, 1fr));
+}
+
+.market-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.market-config-field input,
+.market-service-config-row input,
+.market-service-config-row select {
+  min-height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  background: rgba(255, 255, 255, .04);
+  color: var(--text);
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.market-config-field input.is-invalid,
+.market-service-config-row input.is-invalid,
+.market-service-config-row select.is-invalid {
+  border-color: rgba(255, 107, 107, .8);
+  box-shadow: 0 0 0 1px rgba(255, 107, 107, .25);
+}
+
+.market-config-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding-top: 16px;
+}
+
+.market-config-checkbox input {
+  min-height: 0;
+  width: auto;
+  padding: 0;
+}
+
+.market-service-config-head {
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.market-service-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 182px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.market-service-config-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 1.3fr) minmax(56px, .7fr) minmax(76px, .9fr) minmax(72px, .8fr) minmax(66px, .7fr) minmax(66px, .7fr) minmax(72px, .8fr) minmax(48px, .6fr) minmax(80px, .8fr) minmax(90px, 1fr) minmax(150px, 1.8fr);
+  gap: 4px;
+  align-items: center;
+}
+
+.market-service-config-id {
+  font-size: 10px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.market-service-config-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.market-service-config-row .svc-enabled {
+  min-height: 0;
+  width: auto;
+  padding: 0;
+}
+
 .marketplace-service-badges {
   display: flex;
   flex-wrap: wrap;
@@ -988,6 +1176,22 @@ header {
 
   .marketplace-summary-provider {
     max-width: 100%;
+  }
+
+  .market-config-grid,
+  .market-config-grid.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .market-service-config-row {
+    grid-template-columns: 1fr;
+    gap: 5px;
+    padding: 4px 0;
+    border-bottom: 1px dashed rgba(255, 255, 255, .08);
+  }
+
+  .market-service-config-id {
+    font-size: 11px;
   }
 
   .logdata {

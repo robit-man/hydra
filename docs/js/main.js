@@ -37,6 +37,7 @@ Net.setTransportUpdater(updateTransportButton);
 primeLocalNetworkRequest();
 let MarketplaceSummary = null;
 let MarketplaceDirectory = null;
+let MarketplaceConfigEditor = null;
 let SharedPeerDiscovery = null;
 
 const graphAccess = {
@@ -213,19 +214,50 @@ if (CFG?.routerMarketplaceCatalog && typeof CFG.routerMarketplaceCatalog === 'ob
 window.addEventListener('hydra-provider-publish-catalog', async (event) => {
   try {
     const detail = event?.detail && typeof event.detail === 'object' ? event.detail : {};
+    const publishScope = typeof detail.publishScope === 'string' ? detail.publishScope : '';
+    const resultEl = qs('#marketplacePublishResult');
+    const setResult = (text, ok = true) => {
+      if (!resultEl) return;
+      resultEl.textContent = String(text || 'publish idle');
+      resultEl.style.color = ok ? 'var(--ok)' : 'var(--err)';
+    };
     const result = await NoClipBridge?.publishMarketplaceCatalog?.({
       targetPub: typeof detail.targetPub === 'string' ? detail.targetPub : '',
       includeStatus: detail.includeStatus !== false,
       force: detail.force === true,
-      silent: detail.silent === true
+      silent: detail.silent === true,
+      publishScope
     });
+    const scopeLabel = String(result?.publishScope || publishScope || 'targeted');
+    const targeted = result?.targeted && typeof result.targeted === 'object' ? result.targeted : {};
+    const broadcast = result?.broadcast && typeof result.broadcast === 'object' ? result.broadcast : {};
+    const targetedAttempted = Number(targeted.attempted || 0);
+    const targetedSent = Number(targeted.sent || 0);
+    const broadcastAttempted = Number(broadcast.attempted || 0);
+    const broadcastSent = Number(broadcast.sent || 0);
+    const summaryBits = [];
+    if (targetedAttempted > 0 || scopeLabel === 'targeted' || scopeLabel === 'both') {
+      summaryBits.push(`targeted ${targetedSent}/${targetedAttempted}`);
+    }
+    if (broadcastAttempted > 0 || scopeLabel === 'broadcast' || scopeLabel === 'both') {
+      summaryBits.push(`broadcast ${broadcastSent}/${broadcastAttempted}`);
+    }
+    const summaryText = summaryBits.length ? summaryBits.join(' • ') : `${result?.sent || 0}/${result?.attempted || 0}`;
     if (result?.ok) {
-      setBadge(`Marketplace catalog published (${result.sent}/${result.attempted})`);
+      setBadge(`Marketplace catalog published (${summaryText})`);
+      setResult(`${scopeLabel} ok • ${summaryText}`, true);
     } else {
       setBadge('Marketplace catalog publish skipped', false);
+      const reason = String(result?.reason || result?.error || 'skipped').trim() || 'skipped';
+      setResult(`${scopeLabel} skipped • ${reason}`, false);
     }
   } catch (err) {
     setBadge(`Marketplace catalog publish failed: ${err?.message || err}`, false);
+    const resultEl = qs('#marketplacePublishResult');
+    if (resultEl) {
+      resultEl.textContent = `publish error • ${err?.message || err}`;
+      resultEl.style.color = 'var(--err)';
+    }
   }
 });
 
@@ -249,6 +281,16 @@ const applyRouterResolvedPayload = (reply) => {
   if ((!resolved || typeof resolved !== 'object') && !catalogRaw) return;
   const incomingTs = Number(reply?.timestampMs || reply?.rawReply?.timestamp_ms || catalogGeneratedTs || 0);
   const currentTs = Number(CFG.routerLastResolvedAt || 0);
+  const routerApiBase = String(
+    reply?.network?.local ||
+    reply?.reply?.network?.local ||
+    reply?.rawReply?.network?.local ||
+    CFG.routerControlPlaneApiBase ||
+    ''
+  ).trim();
+  if (routerApiBase) {
+    CFG.routerControlPlaneApiBase = routerApiBase.replace(/\/+$/, '');
+  }
   if (incomingTs > 0 && currentTs > 0 && incomingTs < currentTs) {
     log(`[router.resolve] stale endpoint payload ignored ts=${incomingTs} current=${currentTs}`);
     return;
@@ -782,6 +824,519 @@ const createMarketplaceDirectoryClient = ({ CFG, saveCFG, setBadge, log, onDirec
   };
 };
 
+const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog }) => {
+  const ui = {
+    root: qs('#marketplaceConfigPanel'),
+    status: qs('#marketConfigStatus'),
+    loadBtn: qs('#marketConfigLoadBtn'),
+    saveBtn: qs('#marketConfigSaveBtn'),
+    exportBtn: qs('#marketConfigExportBtn'),
+    importInput: qs('#marketConfigImportInput'),
+    providerId: qs('#marketProviderIdInput'),
+    providerLabel: qs('#marketProviderLabelInput'),
+    providerNetwork: qs('#marketProviderNetworkInput'),
+    providerContact: qs('#marketProviderContactInput'),
+    defaultCurrency: qs('#marketDefaultCurrencyInput'),
+    defaultUnit: qs('#marketDefaultUnitInput'),
+    defaultPrice: qs('#marketDefaultPriceInput'),
+    includeUnhealthy: qs('#marketIncludeUnhealthyInput'),
+    serviceList: qs('#marketServiceConfigList')
+  };
+
+  if (!ui.root) {
+    return {
+      start: () => {},
+      stop: () => {},
+      refresh: async () => ({ ok: false, reason: 'ui_unavailable' })
+    };
+  }
+
+  const state = {
+    etag: '',
+    config: {
+      provider: {},
+      services: {}
+    },
+    inFlight: false,
+    started: false
+  };
+
+  const VISIBILITY_OPTIONS = ['public', 'friends', 'private'];
+  const TRANSPORT_OPTIONS = ['auto', 'cloudflare', 'nats', 'nkn', 'local', 'upnp'];
+
+  const setStatus = (text, tone = 'muted') => {
+    if (!ui.status) return;
+    ui.status.textContent = String(text || 'config idle');
+    ui.status.dataset.tone = String(tone || 'muted');
+  };
+
+  const normalizeApiBase = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw, window.location.href);
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString().replace(/\/+$/, '');
+    } catch (_) {
+      return '';
+    }
+  };
+
+  const resolveRouterApiBase = () => {
+    const candidates = [
+      CFG?.routerControlPlaneApiBase,
+      CFG?.routerLastResolveResult?.network?.local,
+      CFG?.routerLastResolveResult?.reply?.network?.local,
+      CFG?.routerLastResolveResult?.snapshot?.network?.local,
+      window?.location?.origin && window.location.origin.includes(':9071') ? window.location.origin : '',
+      'http://127.0.0.1:9071'
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeApiBase(candidate);
+      if (normalized) return normalized;
+    }
+    return 'http://127.0.0.1:9071';
+  };
+
+  const apiUrl = (path) => {
+    const base = resolveRouterApiBase();
+    return `${base}${path.startsWith('/') ? path : `/${path}`}`;
+  };
+
+  const clearInvalidMarkers = () => {
+    ui.root.querySelectorAll('.is-invalid').forEach((el) => el.classList.remove('is-invalid'));
+  };
+
+  const markInvalid = (el) => {
+    if (!el) return;
+    el.classList.add('is-invalid');
+  };
+
+  const escapeAttr = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  const serviceRowTemplate = (serviceId, entry = {}) => {
+    const pricing = entry.pricing && typeof entry.pricing === 'object' ? entry.pricing : {};
+    const visibility = VISIBILITY_OPTIONS.includes(String(entry.visibility || '').trim().toLowerCase())
+      ? String(entry.visibility || '').trim().toLowerCase()
+      : 'public';
+    const transport = TRANSPORT_OPTIONS.includes(String(entry.transport_preference || '').trim().toLowerCase())
+      ? String(entry.transport_preference || '').trim().toLowerCase()
+      : 'auto';
+    const category = String(entry.category || serviceId).trim().toLowerCase() || serviceId;
+    const tags = Array.isArray(entry.tags) ? entry.tags.join(',') : '';
+    const unit = String(pricing.unit || 'request').trim().toLowerCase() || 'request';
+    const currency = String(pricing.currency || 'USDC').trim().toUpperCase() || 'USDC';
+    const basePrice = Number(pricing.base_price ?? 0);
+    const quotePublic = pricing.quote_public !== false;
+    const capacity = Number(entry.capacity_hint ?? 1);
+    const safeServiceId = escapeAttr(serviceId);
+    const safeRepository = escapeAttr(String(entry.repository || 'hydra').trim() || 'hydra');
+    const safeCategory = escapeAttr(category);
+    const safeTags = escapeAttr(tags);
+    const safeUnit = escapeAttr(unit);
+    const safeCurrency = escapeAttr(currency);
+    return `<div class="market-service-config-row" data-service-id="${safeServiceId}" data-repository="${safeRepository}" data-min-units="${Math.max(1, Math.floor(Number(pricing.min_units || 1)))}">
+      <span class="market-service-config-id" title="${safeServiceId}">${safeServiceId}</span>
+      <label><input class="svc-enabled" type="checkbox" ${entry.enabled !== false ? 'checked' : ''}>on</label>
+      <select class="svc-visibility">${VISIBILITY_OPTIONS.map((value) => `<option value="${value}" ${value === visibility ? 'selected' : ''}>${value}</option>`).join('')}</select>
+      <select class="svc-transport">${TRANSPORT_OPTIONS.map((value) => `<option value="${value}" ${value === transport ? 'selected' : ''}>${value}</option>`).join('')}</select>
+      <input class="svc-capacity" type="number" min="0" max="100000" step="1" value="${Number.isFinite(capacity) ? Math.max(0, Math.floor(capacity)) : 1}" title="capacity hint">
+      <input class="svc-price" type="number" min="0" step="0.000001" value="${Number.isFinite(basePrice) ? Math.max(0, basePrice) : 0}" title="base price">
+      <input class="svc-unit" type="text" maxlength="32" value="${safeUnit}" title="pricing unit">
+      <input class="svc-currency" type="text" maxlength="12" value="${safeCurrency}" title="pricing currency">
+      <label><input class="svc-quote-public" type="checkbox" ${quotePublic ? 'checked' : ''}>quote</label>
+      <input class="svc-category" type="text" maxlength="48" value="${safeCategory}" title="service category">
+      <input class="svc-tags" type="text" maxlength="180" value="${safeTags}" title="tags comma-delimited">
+    </div>`;
+  };
+
+  const renderServices = (servicesMap = {}) => {
+    if (!ui.serviceList) return;
+    const keys = Object.keys(servicesMap).sort();
+    if (!keys.length) {
+      ui.serviceList.innerHTML = '<div class="market-service-config-id">No services</div>';
+      return;
+    }
+    ui.serviceList.innerHTML = keys
+      .map((serviceId) => serviceRowTemplate(serviceId, servicesMap[serviceId] && typeof servicesMap[serviceId] === 'object' ? servicesMap[serviceId] : {}))
+      .join('');
+  };
+
+  const applyConfig = (config = {}, { etag = '', statusText = 'config loaded' } = {}) => {
+    const provider = config.provider && typeof config.provider === 'object' ? config.provider : {};
+    const services = config.services && typeof config.services === 'object' ? config.services : {};
+    state.config = {
+      provider: provider,
+      services: services
+    };
+    state.etag = String(etag || '').trim();
+    if (ui.providerId) ui.providerId.value = String(provider.provider_id || '').trim();
+    if (ui.providerLabel) ui.providerLabel.value = String(provider.provider_label || '').trim();
+    if (ui.providerNetwork) ui.providerNetwork.value = String(provider.provider_network || '').trim();
+    if (ui.providerContact) ui.providerContact.value = String(provider.provider_contact || '').trim();
+    if (ui.defaultCurrency) ui.defaultCurrency.value = String(provider.default_currency || 'USDC').trim();
+    if (ui.defaultUnit) ui.defaultUnit.value = String(provider.default_unit || 'request').trim();
+    if (ui.defaultPrice) {
+      const price = Number(provider.default_price_per_unit ?? 0);
+      ui.defaultPrice.value = Number.isFinite(price) ? String(Math.max(0, price)) : '0';
+    }
+    if (ui.includeUnhealthy) ui.includeUnhealthy.checked = provider.include_unhealthy !== false;
+    renderServices(services);
+    setStatus(statusText, 'ok');
+  };
+
+  const normalizeTags = (raw) => String(raw || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 16);
+
+  const collectPayload = () => {
+    clearInvalidMarkers();
+    const errors = [];
+
+    const providerId = String(ui.providerId?.value || '').trim().toLowerCase();
+    const providerLabel = String(ui.providerLabel?.value || '').trim();
+    const providerNetwork = String(ui.providerNetwork?.value || '').trim().toLowerCase();
+    const providerContact = String(ui.providerContact?.value || '').trim();
+    const defaultCurrency = String(ui.defaultCurrency?.value || '').trim().toUpperCase();
+    const defaultUnit = String(ui.defaultUnit?.value || '').trim().toLowerCase();
+    const defaultPrice = Number(ui.defaultPrice?.value || 0);
+
+    if (!/^[a-z0-9][a-z0-9_.:-]{1,63}$/.test(providerId)) {
+      errors.push('Provider ID must match [a-z0-9][a-z0-9_.:-]{1,63}.');
+      markInvalid(ui.providerId);
+    }
+    if (providerLabel.length < 1 || providerLabel.length > 120) {
+      errors.push('Provider label must be 1-120 characters.');
+      markInvalid(ui.providerLabel);
+    }
+    if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(providerNetwork)) {
+      errors.push('Provider network must match [a-z0-9][a-z0-9_-]{1,31}.');
+      markInvalid(ui.providerNetwork);
+    }
+    if (providerContact.length > 160) {
+      errors.push('Provider contact must be <= 160 characters.');
+      markInvalid(ui.providerContact);
+    }
+    if (!/^[A-Z0-9_-]{2,12}$/.test(defaultCurrency)) {
+      errors.push('Default currency must match [A-Z0-9_-]{2,12}.');
+      markInvalid(ui.defaultCurrency);
+    }
+    if (!/^[a-z0-9_:-]{1,32}$/.test(defaultUnit)) {
+      errors.push('Default unit must match [a-z0-9_:-]{1,32}.');
+      markInvalid(ui.defaultUnit);
+    }
+    if (!Number.isFinite(defaultPrice) || defaultPrice < 0 || defaultPrice > 1_000_000) {
+      errors.push('Default base price must be between 0 and 1000000.');
+      markInvalid(ui.defaultPrice);
+    }
+
+    const provider = {
+      provider_id: providerId,
+      provider_label: providerLabel,
+      provider_network: providerNetwork,
+      provider_contact: providerContact,
+      default_currency: defaultCurrency,
+      default_unit: defaultUnit,
+      default_price_per_unit: Number.isFinite(defaultPrice) ? Number(defaultPrice.toFixed(8)) : 0,
+      include_unhealthy: ui.includeUnhealthy?.checked !== false
+    };
+
+    const services = {};
+    const rows = ui.serviceList ? Array.from(ui.serviceList.querySelectorAll('.market-service-config-row')) : [];
+    rows.forEach((row) => {
+      const serviceId = String(row.getAttribute('data-service-id') || '').trim();
+      if (!serviceId) return;
+      const base = state.config?.services?.[serviceId] && typeof state.config.services[serviceId] === 'object'
+        ? state.config.services[serviceId]
+        : {};
+      const repository = String(row.getAttribute('data-repository') || base.repository || 'hydra').trim() || 'hydra';
+      const minUnits = Math.max(1, Math.floor(Number(row.getAttribute('data-min-units') || base?.pricing?.min_units || 1)));
+      const enabledEl = row.querySelector('.svc-enabled');
+      const visibilityEl = row.querySelector('.svc-visibility');
+      const transportEl = row.querySelector('.svc-transport');
+      const capacityEl = row.querySelector('.svc-capacity');
+      const priceEl = row.querySelector('.svc-price');
+      const unitEl = row.querySelector('.svc-unit');
+      const currencyEl = row.querySelector('.svc-currency');
+      const quoteEl = row.querySelector('.svc-quote-public');
+      const categoryEl = row.querySelector('.svc-category');
+      const tagsEl = row.querySelector('.svc-tags');
+
+      const visibility = String(visibilityEl?.value || 'public').trim().toLowerCase();
+      const transportPreference = String(transportEl?.value || 'auto').trim().toLowerCase();
+      const category = String(categoryEl?.value || serviceId).trim().toLowerCase();
+      const tags = normalizeTags(tagsEl?.value || '');
+      const capacity = Math.floor(Number(capacityEl?.value || 0));
+      const basePrice = Number(priceEl?.value || 0);
+      const unit = String(unitEl?.value || defaultUnit).trim().toLowerCase();
+      const currency = String(currencyEl?.value || defaultCurrency).trim().toUpperCase();
+
+      if (!VISIBILITY_OPTIONS.includes(visibility)) {
+        errors.push(`${serviceId}: visibility must be public/friends/private.`);
+        markInvalid(visibilityEl);
+      }
+      if (!TRANSPORT_OPTIONS.includes(transportPreference)) {
+        errors.push(`${serviceId}: transport preference invalid.`);
+        markInvalid(transportEl);
+      }
+      if (!Number.isFinite(capacity) || capacity < 0 || capacity > 100000) {
+        errors.push(`${serviceId}: capacity must be integer between 0 and 100000.`);
+        markInvalid(capacityEl);
+      }
+      if (!Number.isFinite(basePrice) || basePrice < 0 || basePrice > 1_000_000) {
+        errors.push(`${serviceId}: base price must be between 0 and 1000000.`);
+        markInvalid(priceEl);
+      }
+      if (!/^[a-z0-9_:-]{1,32}$/.test(unit)) {
+        errors.push(`${serviceId}: pricing unit invalid.`);
+        markInvalid(unitEl);
+      }
+      if (!/^[A-Z0-9_-]{2,12}$/.test(currency)) {
+        errors.push(`${serviceId}: pricing currency invalid.`);
+        markInvalid(currencyEl);
+      }
+      if (!/^[a-z0-9_:-]{1,48}$/.test(category)) {
+        errors.push(`${serviceId}: category invalid.`);
+        markInvalid(categoryEl);
+      }
+      if (!tags.length) {
+        errors.push(`${serviceId}: at least one tag required.`);
+        markInvalid(tagsEl);
+      }
+
+      services[serviceId] = {
+        enabled: enabledEl?.checked === true,
+        visibility,
+        repository,
+        category,
+        capacity_hint: Number.isFinite(capacity) ? capacity : 0,
+        transport_preference: transportPreference,
+        tags,
+        pricing: {
+          currency,
+          unit,
+          base_price: Number.isFinite(basePrice) ? Number(basePrice.toFixed(8)) : 0,
+          min_units: minUnits,
+          quote_public: quoteEl?.checked === true
+        }
+      };
+    });
+
+    return {
+      ok: errors.length === 0,
+      errors,
+      payload: {
+        provider,
+        services
+      }
+    };
+  };
+
+  const loadConfig = async ({ silent = false } = {}) => {
+    if (state.inFlight) return { ok: false, reason: 'in_flight' };
+    state.inFlight = true;
+    setStatus('loading...', 'warn');
+    try {
+      const response = await fetch(apiUrl('/marketplace/config'), {
+        method: 'GET',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' }
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload || payload.status !== 'success') {
+        const reason = String(payload?.error || `http_${response.status}` || 'load_failed').trim();
+        setStatus(`load failed • ${reason}`, 'error');
+        if (!silent) setBadge(`Marketplace config load failed: ${reason}`, false);
+        return { ok: false, error: reason };
+      }
+      const etag = String(payload.etag || response.headers.get('ETag') || '').trim().replace(/"/g, '');
+      applyConfig(payload.config, {
+        etag,
+        statusText: `loaded • ${Object.keys(payload?.config?.services || {}).length} services`
+      });
+      CFG.routerControlPlaneApiBase = resolveRouterApiBase();
+      saveCFG();
+      if (!silent) setBadge('Marketplace config loaded');
+      return { ok: true, payload };
+    } catch (err) {
+      const reason = String(err?.message || err || 'load_failed').trim();
+      setStatus(`load failed • ${reason}`, 'error');
+      if (!silent) setBadge(`Marketplace config load failed: ${reason}`, false);
+      return { ok: false, error: reason };
+    } finally {
+      state.inFlight = false;
+    }
+  };
+
+  const saveConfig = async () => {
+    if (state.inFlight) return { ok: false, reason: 'in_flight' };
+    const collected = collectPayload();
+    if (!collected.ok) {
+      const message = collected.errors[0] || 'validation failed';
+      setStatus(`validation failed • ${message}`, 'error');
+      setBadge(`Marketplace config validation failed: ${message}`, false);
+      return { ok: false, error: message, errors: collected.errors };
+    }
+    state.inFlight = true;
+    setStatus('saving...', 'warn');
+    try {
+      const response = await fetch(apiUrl('/marketplace/config'), {
+        method: 'PUT',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(state.etag ? { 'If-Match': state.etag } : {})
+        },
+        body: JSON.stringify({
+          ...collected.payload,
+          persist: true
+        })
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.status === 409) {
+        const reason = String(payload?.message || payload?.error || 'config_conflict').trim();
+        setStatus(`conflict • ${reason}`, 'warn');
+        setBadge(`Marketplace config conflict: ${reason}`, false);
+        return { ok: false, error: reason, conflict: true };
+      }
+      if (!response.ok || !payload || payload.status !== 'success') {
+        const reason = String(payload?.message || payload?.error || `http_${response.status}` || 'save_failed').trim();
+        const firstError = Array.isArray(payload?.errors) && payload.errors.length ? String(payload.errors[0]) : reason;
+        setStatus(`save failed • ${firstError}`, 'error');
+        setBadge(`Marketplace config save failed: ${firstError}`, false);
+        return { ok: false, error: firstError };
+      }
+      applyConfig(payload.config, {
+        etag: String(payload.etag || response.headers.get('ETag') || '').trim().replace(/"/g, ''),
+        statusText: 'saved'
+      });
+      if (payload.catalog && typeof payload.catalog === 'object') {
+        onCatalog?.(payload.catalog);
+      }
+      setBadge('Marketplace config saved');
+      try {
+        window.dispatchEvent(new CustomEvent('hydra-provider-publish-catalog', {
+          detail: {
+            publishScope: 'both',
+            includeStatus: true,
+            force: true,
+            silent: true
+          }
+        }));
+      } catch (_) {
+        // ignore publish dispatch failures
+      }
+      return { ok: true, payload };
+    } catch (err) {
+      const reason = String(err?.message || err || 'save_failed').trim();
+      setStatus(`save failed • ${reason}`, 'error');
+      setBadge(`Marketplace config save failed: ${reason}`, false);
+      return { ok: false, error: reason };
+    } finally {
+      state.inFlight = false;
+    }
+  };
+
+  const exportConfig = () => {
+    const collected = collectPayload();
+    const payload = collected.ok ? collected.payload : (state.config || { provider: {}, services: {} });
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hydra-marketplace-config-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatus('exported', 'ok');
+    } catch (err) {
+      setStatus('export failed', 'error');
+      setBadge(`Marketplace config export failed: ${err?.message || err}`, false);
+    }
+  };
+
+  const importConfigFromFile = async (file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const config = parsed && typeof parsed === 'object' && parsed.config && typeof parsed.config === 'object'
+        ? parsed.config
+        : parsed;
+      if (!config || typeof config !== 'object' || !config.provider || !config.services) {
+        throw new Error('Expected JSON with provider and services sections');
+      }
+      applyConfig(config, {
+        etag: state.etag,
+        statusText: 'imported draft'
+      });
+      setBadge('Marketplace config imported (draft loaded, click Save to apply)');
+      setStatus('imported draft', 'warn');
+    } catch (err) {
+      setStatus('import failed', 'error');
+      setBadge(`Marketplace config import failed: ${err?.message || err}`, false);
+    } finally {
+      if (ui.importInput) ui.importInput.value = '';
+    }
+  };
+
+  const start = () => {
+    if (state.started) return;
+    state.started = true;
+    ui.loadBtn?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (ui.loadBtn.disabled) return;
+      ui.loadBtn.disabled = true;
+      try {
+        await loadConfig();
+      } finally {
+        ui.loadBtn.disabled = false;
+      }
+    });
+    ui.saveBtn?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (ui.saveBtn.disabled) return;
+      ui.saveBtn.disabled = true;
+      try {
+        await saveConfig();
+      } finally {
+        ui.saveBtn.disabled = false;
+      }
+    });
+    ui.exportBtn?.addEventListener('click', (event) => {
+      event.preventDefault();
+      exportConfig();
+    });
+    ui.importInput?.addEventListener('change', async () => {
+      const file = ui.importInput?.files?.[0];
+      await importConfigFromFile(file);
+    });
+    loadConfig({ silent: true });
+  };
+
+  const stop = () => {
+    state.started = false;
+  };
+
+  return {
+    start,
+    stop,
+    refresh: loadConfig
+  };
+};
+
 const RouterDiscovery = createRouterDiscovery({
   Net,
   CFG,
@@ -809,6 +1364,28 @@ MarketplaceDirectory = createMarketplaceDirectoryClient({
       }
     }
     MarketplaceSummary?.onDirectoryPreview?.(detail);
+  }
+});
+MarketplaceConfigEditor = createMarketplaceConfigEditor({
+  CFG,
+  saveCFG,
+  setBadge,
+  log,
+  onCatalog: (catalog) => {
+    if (!catalog || typeof catalog !== 'object') return;
+    const updatedAtMs = Number(catalog.generated_at_ms || catalog.generatedAtMs || Date.now()) || Date.now();
+    CFG.routerMarketplaceCatalog = catalog;
+    CFG.routerLastCatalogAt = updatedAtMs;
+    saveCFG();
+    MarketplaceSummary?.onCatalog?.(catalog, { updatedAtMs });
+    try {
+      NoClipBridge?.onRouterCatalog?.(catalog, {
+        includeStatus: true,
+        silent: true
+      });
+    } catch (err) {
+      log(`[market.config] bridge catalog sync failed: ${err?.message || err}`);
+    }
   }
 });
 if (CFG?.routerMarketplaceCatalog && typeof CFG.routerMarketplaceCatalog === 'object') {
@@ -1547,6 +2124,10 @@ function bindUI() {
   const routerScanBtn = qs('#routerScanBtn');
   const routerAutoBtn = qs('#routerAutoResolveBtn');
   const directoryRefreshBtn = qs('#marketplaceDirectoryRefreshBtn');
+  const publishBtn = qs('#marketplacePublishBtn');
+  const publishScopeSelect = qs('#marketplacePublishScope');
+  const publishIncludeStatus = qs('#marketplacePublishIncludeStatus');
+  const publishResultEl = qs('#marketplacePublishResult');
   const routerStatus = qs('#routerResolveStatus');
   const routerMessage = qs('#routerResolveMessage');
 
@@ -1721,11 +2302,38 @@ function bindUI() {
       }
     });
   }
+  if (publishBtn) {
+    publishBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (publishBtn.disabled) return;
+      const publishScope = String(publishScopeSelect?.value || 'both').trim().toLowerCase();
+      const includeStatus = publishIncludeStatus?.checked !== false;
+      publishBtn.disabled = true;
+      if (publishResultEl) {
+        publishResultEl.textContent = 'publishing...';
+        publishResultEl.style.color = 'var(--warn)';
+      }
+      try {
+        window.dispatchEvent(new CustomEvent('hydra-provider-publish-catalog', {
+          detail: {
+            publishScope,
+            includeStatus,
+            silent: false
+          }
+        }));
+      } finally {
+        setTimeout(() => {
+          publishBtn.disabled = false;
+        }, 250);
+      }
+    });
+  }
   RouterDiscovery.subscribe(renderRouterState);
   renderRouterState({ status: CFG.routerLastResolveStatus || 'idle', target: CFG.routerTargetNknAddress || '' });
   if (CFG.routerAutoResolve) RouterDiscovery.startAuto();
   MarketplaceSummary.start();
   MarketplaceDirectory?.start?.();
+  MarketplaceConfigEditor?.start?.();
 
   if (CFG.transport !== 'nkn') {
     CFG.transport = 'nkn';

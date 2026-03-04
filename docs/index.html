@@ -83,6 +83,75 @@
                                 <span id="marketplaceDirectoryPreview" class="market-directory-preview">Directory: --</span>
                                 <button id="marketplaceDirectoryRefreshBtn" class="ghost market-directory-refresh" title="Refresh NoClip provider directory">Dir Refresh</button>
                             </div>
+                            <div class="marketplace-summary-row compact market-publish-controls">
+                                <label class="market-publish-control">
+                                    Scope
+                                    <select id="marketplacePublishScope" class="market-publish-select">
+                                        <option value="both" selected>both</option>
+                                        <option value="broadcast">broadcast</option>
+                                        <option value="targeted">targeted</option>
+                                    </select>
+                                </label>
+                                <label class="market-publish-control market-publish-toggle">
+                                    <input id="marketplacePublishIncludeStatus" type="checkbox" checked>
+                                    status
+                                </label>
+                                <button id="marketplacePublishBtn" class="ghost market-directory-refresh" title="Publish marketplace catalog now">Publish</button>
+                                <span id="marketplacePublishResult" class="market-publish-result">publish idle</span>
+                            </div>
+                            <div id="marketplaceConfigPanel" class="market-config-panel" aria-live="polite">
+                                <div class="market-config-head">
+                                    <span class="market-config-title">Provider Config</span>
+                                    <span id="marketConfigStatus" class="market-config-status">config idle</span>
+                                </div>
+                                <div class="market-config-toolbar">
+                                    <button id="marketConfigLoadBtn" class="ghost market-directory-refresh" title="Load marketplace config from router">Load</button>
+                                    <button id="marketConfigSaveBtn" class="ghost market-directory-refresh" title="Save marketplace config to router">Save</button>
+                                    <button id="marketConfigExportBtn" class="ghost market-directory-refresh" title="Export marketplace config JSON">Export</button>
+                                    <label class="ghost market-directory-refresh market-config-import-label" title="Import marketplace config JSON">
+                                        Import
+                                        <input id="marketConfigImportInput" type="file" accept="application/json,.json">
+                                    </label>
+                                </div>
+                                <div class="market-config-grid">
+                                    <label class="market-config-field">
+                                        Provider ID
+                                        <input id="marketProviderIdInput" type="text" maxlength="64" placeholder="hydra-router" autocomplete="off" spellcheck="false">
+                                    </label>
+                                    <label class="market-config-field">
+                                        Label
+                                        <input id="marketProviderLabelInput" type="text" maxlength="120" placeholder="Hydra Router" autocomplete="off" spellcheck="false">
+                                    </label>
+                                    <label class="market-config-field">
+                                        Network
+                                        <input id="marketProviderNetworkInput" type="text" maxlength="32" placeholder="hydra" autocomplete="off" spellcheck="false">
+                                    </label>
+                                    <label class="market-config-field">
+                                        Contact
+                                        <input id="marketProviderContactInput" type="text" maxlength="160" placeholder="dm:@handle or email" autocomplete="off" spellcheck="false">
+                                    </label>
+                                </div>
+                                <div class="market-config-grid compact">
+                                    <label class="market-config-field">
+                                        Currency
+                                        <input id="marketDefaultCurrencyInput" type="text" maxlength="12" placeholder="USDC" autocomplete="off" spellcheck="false">
+                                    </label>
+                                    <label class="market-config-field">
+                                        Unit
+                                        <input id="marketDefaultUnitInput" type="text" maxlength="32" placeholder="request" autocomplete="off" spellcheck="false">
+                                    </label>
+                                    <label class="market-config-field">
+                                        Base Price
+                                        <input id="marketDefaultPriceInput" type="number" min="0" step="0.000001" placeholder="0.0">
+                                    </label>
+                                    <label class="market-config-field market-config-checkbox">
+                                        <input id="marketIncludeUnhealthyInput" type="checkbox">
+                                        Include unhealthy
+                                    </label>
+                                </div>
+                                <div class="market-service-config-head">Service Publication</div>
+                                <div id="marketServiceConfigList" class="market-service-config-list"></div>
+                            </div>
                             <div id="marketplaceServiceBadges" class="marketplace-service-badges"></div>
                         </div>
                         <a class="router-download" href="/router.py" download="router.py">
