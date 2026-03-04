@@ -1,4 +1,5 @@
 import { ensureLocalNetworkAccess } from './localNetwork.js';
+import { resolveServiceEndpoint } from './endpointResolver.js';
 
 function createLLM({
   getNode,
@@ -16,6 +17,7 @@ function createLLM({
   const MODEL_CACHE = new Map();
   const MODEL_REFRESH_TIMER = new Map();
   const MODEL_LISTENERS = new Map();
+  const RESOLVE_META = new Map();
   const MODEL_REFRESH_MS = 60 * 1000;
   const IMAGE_PAYLOADS = new Map();
   const MODEL_INFO_CACHE = new Map();
@@ -197,7 +199,7 @@ function createLLM({
       try {
         const rec = NodeStore.ensure(nodeId, 'LLM');
         const cfg = rec?.config || {};
-        const endpoint = resolveEndpointConfig(cfg);
+        const endpoint = resolveEndpointConfig(nodeId, cfg);
         const needsOverride = entry.base !== endpoint.base || entry.relay !== endpoint.relay || entry.api !== endpoint.api || (entry.mode || 'auto') !== endpoint.mode;
         const override = needsOverride
           ? { base: entry.base, relay: entry.relay, api: entry.api, endpointMode: entry.mode }
@@ -281,26 +283,64 @@ function createLLM({
     };
   }
 
-  function resolveEndpointConfig(baseCfg, override = null) {
+  function normalizeEndpointSource(value) {
+    return String(value || '').trim().toLowerCase() === 'manual' ? 'manual' : 'router';
+  }
+
+  function persistResolveMeta(nodeId, cfg, endpoint) {
+    if (!nodeId || !endpoint || !cfg || typeof cfg !== 'object') return;
+    const service = String(cfg.service || endpoint.service || 'ollama_farm').trim() || 'ollama_farm';
+    const endpointSource = normalizeEndpointSource(cfg.endpointSource);
+    const endpointMode = String(cfg.endpointMode || endpoint.mode || 'auto').trim().toLowerCase() || 'auto';
+    const diagnostics = endpoint.resolveDiagnostics || null;
+    const signature = JSON.stringify({
+      service,
+      endpointSource,
+      endpointMode,
+      selectedTransport: endpoint.selectedTransport || '',
+      activeSource: endpoint.endpointSource || '',
+      base: endpoint.base || '',
+      relay: endpoint.relay || '',
+      reason: diagnostics?.reason || '',
+      diagnostics
+    });
+    const previousSignature = RESOLVE_META.get(nodeId);
+    const sameSignature = previousSignature === signature;
+    const nextLastResolvedAt = endpoint.endpointSource === 'router'
+      ? (sameSignature ? Number(cfg.lastResolvedAt || 0) : Number(endpoint.resolvedAt || Date.now()))
+      : Number(cfg.lastResolvedAt || 0);
+    const sameDiagnostics = JSON.stringify(cfg.resolveDiagnostics || null) === JSON.stringify(diagnostics || null);
+    const sameFields =
+      cfg.service === service &&
+      normalizeEndpointSource(cfg.endpointSource) === endpointSource &&
+      String(cfg.endpointMode || 'auto').trim().toLowerCase() === endpointMode &&
+      Number(cfg.lastResolvedAt || 0) === nextLastResolvedAt &&
+      sameDiagnostics;
+    if (sameSignature && sameFields) return;
+
+    NodeStore.update(nodeId, {
+      type: 'LLM',
+      service,
+      endpointSource,
+      endpointMode,
+      lastResolvedAt: nextLastResolvedAt,
+      resolveDiagnostics: diagnostics
+    });
+    RESOLVE_META.set(nodeId, signature);
+  }
+
+  function resolveEndpointConfig(nodeId, baseCfg, override = null) {
     const effective = Object.assign({}, baseCfg || {}, override || {});
-    const base = String(effective.base || '').trim();
-    const relayRaw = String(effective.relay || '').trim();
-    const api = String(effective.api || '').trim();
-    const mode = String(effective.endpointMode || 'auto').toLowerCase();
-    const hasRelay = !!relayRaw;
-    let useRelay = false;
-    if (mode === 'remote') useRelay = hasRelay;
-    else if (mode === 'auto') useRelay = hasRelay;
-    else useRelay = false;
-    return {
-      base,
-      api,
-      relay: useRelay ? relayRaw : '',
-      rawRelay: relayRaw,
-      viaNkn: useRelay && hasRelay,
-      mode,
-      relayOnly: mode === 'remote'
-    };
+    const endpoint = resolveServiceEndpoint({
+      cfg: effective,
+      service: effective.service || 'ollama_farm',
+      routerResolvedEndpoints: CFG?.routerResolvedEndpoints,
+      routerTargetNknAddress: CFG?.routerTargetNknAddress
+    });
+    if (!override) {
+      persistResolveMeta(nodeId, baseCfg || effective, endpoint);
+    }
+    return endpoint;
   }
 
   function cacheModelInfo(nodeId, modelId, info) {
@@ -378,7 +418,7 @@ function createLLM({
     const { force = false, override = null } = options || {};
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
-    const endpoint = resolveEndpointConfig(cfg, override);
+    const endpoint = resolveEndpointConfig(nodeId, cfg, override);
     const { base, relay, api, viaNkn, relayOnly } = endpoint;
     if (!base) return null;
 
@@ -470,7 +510,7 @@ function createLLM({
   }
 
   async function ensureModelMetadata(nodeId, cfg, { force = false, override = null } = {}) {
-    const endpoint = resolveEndpointConfig(cfg, override);
+    const endpoint = resolveEndpointConfig(nodeId, cfg, override);
     const { base, relay, api, viaNkn, mode, relayOnly } = endpoint;
     if (!base) {
       setCachedMeta(nodeId, { list: [], base: '', relay: '', api: '', fetchedAt: Date.now(), mode });
@@ -503,7 +543,8 @@ function createLLM({
   }
 
   async function ensureModelConfigured(nodeId, cfg) {
-    const base = (cfg.base || '').trim();
+    const endpoint = resolveEndpointConfig(nodeId, cfg);
+    const base = (endpoint.base || '').trim();
     if (!base) return cfg;
     const metadata = await ensureModelMetadata(nodeId, cfg);
     if (!metadata.length) return cfg;
@@ -545,7 +586,7 @@ function createLLM({
 
     const rec = NodeStore.ensure(nodeId, 'LLM');
     const cfg = rec?.config || {};
-    const endpoint = resolveEndpointConfig(cfg, override);
+    const endpoint = resolveEndpointConfig(nodeId, cfg, override);
     const { base, api, relay, viaNkn, mode } = endpoint;
     if (!base) throw new Error('Base URL is required');
     if (mode === 'remote' && !viaNkn) throw new Error('Relay address required for remote mode');
@@ -634,6 +675,7 @@ function createLLM({
     clearModelRefresh(nodeId);
     MODEL_CACHE.delete(nodeId);
     MODEL_LISTENERS.delete(nodeId);
+    RESOLVE_META.delete(nodeId);
     for (const key of Array.from(MODEL_PROMISE.keys())) {
       if (key.startsWith(`${nodeId}::`)) MODEL_PROMISE.delete(key);
     }
@@ -654,7 +696,7 @@ function createLLM({
     const rec = NodeStore.ensure(nodeId, 'LLM');
     let cfg = rec.config || {};
     cfg = await ensureModelConfigured(nodeId, cfg);
-    const endpoint = resolveEndpointConfig(cfg);
+    const endpoint = resolveEndpointConfig(nodeId, cfg);
     const { base, api, relay, viaNkn, relayOnly } = endpoint;
     if (relayOnly && !viaNkn) throw new Error('Relay address required for remote mode');
     const model = (cfg.model || '').trim();

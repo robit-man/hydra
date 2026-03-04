@@ -53,6 +53,18 @@
                                 class="icon inverted"></button>
                     </div>
                     <div class="header-actions">
+                        <div class="router-controls-wrap">
+                            <div class="router-controls">
+                                <input id="routerTargetInput" class="router-target-input" type="text"
+                                    placeholder="Router NKN address" autocomplete="off" spellcheck="false">
+                                <button id="routerResolveBtn" class="ghost" title="Resolve remote router endpoints">Resolve</button>
+                                <button id="routerReconnectBtn" class="ghost" title="Reconnect NKN and resolve">Reconnect</button>
+                                <button id="routerScanBtn" class="ghost" title="Scan router address QR">Scan</button>
+                                <button id="routerAutoResolveBtn" class="ghost" title="Toggle auto resolve">Auto</button>
+                                <span id="routerResolveStatus" class="router-status">idle</span>
+                            </div>
+                            <div id="routerResolveMessage" class="router-status-message">Router discovery idle</div>
+                        </div>
                         <a class="router-download" href="/router.py" download="router.py">
                             <button><img src="img/code.svg" alt="" class="icon"></button>
                         </a>

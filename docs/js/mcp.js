@@ -1,4 +1,5 @@
 import { ensureLocalNetworkAccess } from './localNetwork.js';
+import { resolveServiceEndpoint } from './endpointResolver.js';
 
 function createMCP({
   getNode,
@@ -11,6 +12,7 @@ function createMCP({
   setRelayState = () => {}
 }) {
   const stateByNode = new Map();
+  const RESOLVE_META = new Map();
 
   function ensureState(nodeId) {
     if (!stateByNode.has(nodeId)) {
@@ -31,6 +33,71 @@ function createMCP({
     const raw = (cfg.base || '').trim();
     if (!raw) return '';
     return raw.replace(/\/+$/, '');
+  }
+
+  function normalizeEndpointSource(value) {
+    return String(value || '').trim().toLowerCase() === 'manual' ? 'manual' : 'router';
+  }
+
+  function persistResolveMeta(nodeId, cfg, endpoint) {
+    if (!nodeId || !endpoint || !cfg || typeof cfg !== 'object') return;
+    const service = String(cfg.service || endpoint.service || 'mcp_server').trim() || 'mcp_server';
+    const endpointSource = normalizeEndpointSource(cfg.endpointSource);
+    const endpointMode = String(cfg.endpointMode || endpoint.mode || 'auto').trim().toLowerCase() || 'auto';
+    const diagnostics = endpoint.resolveDiagnostics || null;
+    const signature = JSON.stringify({
+      service,
+      endpointSource,
+      endpointMode,
+      selectedTransport: endpoint.selectedTransport || '',
+      activeSource: endpoint.endpointSource || '',
+      base: endpoint.base || '',
+      relay: endpoint.relay || '',
+      reason: diagnostics?.reason || '',
+      diagnostics
+    });
+    const previousSignature = RESOLVE_META.get(nodeId);
+    const sameSignature = previousSignature === signature;
+    const nextLastResolvedAt = endpoint.endpointSource === 'router'
+      ? (sameSignature ? Number(cfg.lastResolvedAt || 0) : Number(endpoint.resolvedAt || Date.now()))
+      : Number(cfg.lastResolvedAt || 0);
+    const sameDiagnostics = JSON.stringify(cfg.resolveDiagnostics || null) === JSON.stringify(diagnostics || null);
+    const sameFields =
+      cfg.service === service &&
+      normalizeEndpointSource(cfg.endpointSource) === endpointSource &&
+      String(cfg.endpointMode || 'auto').trim().toLowerCase() === endpointMode &&
+      Number(cfg.lastResolvedAt || 0) === nextLastResolvedAt &&
+      sameDiagnostics;
+    if (sameSignature && sameFields) return;
+
+    NodeStore.update(nodeId, {
+      type: 'MCP',
+      service,
+      endpointSource,
+      endpointMode,
+      lastResolvedAt: nextLastResolvedAt,
+      resolveDiagnostics: diagnostics
+    });
+    RESOLVE_META.set(nodeId, signature);
+  }
+
+  function resolveEndpointConfig(nodeId, override = null) {
+    const cfg = Object.assign({}, NodeStore.ensure(nodeId, 'MCP').config || {}, override || {});
+    const endpoint = resolveServiceEndpoint({
+      cfg,
+      service: cfg.service || 'mcp_server',
+      routerResolvedEndpoints: CFG?.routerResolvedEndpoints,
+      routerTargetNknAddress: CFG?.routerTargetNknAddress,
+      defaultBase: 'http://127.0.0.1:9003'
+    });
+    const resolved = {
+      ...endpoint,
+      base: normalizeBase({ base: endpoint.base || 'http://127.0.0.1:9003' })
+    };
+    if (!override) {
+      persistResolveMeta(nodeId, cfg, resolved);
+    }
+    return resolved;
   }
 
   function parseListInput(value) {
@@ -153,22 +220,27 @@ function createMCP({
 
   async function fetchStatus(nodeId, { quiet = false } = {}) {
     const cfg = NodeStore.ensure(nodeId, 'MCP').config || {};
-    const base = normalizeBase(cfg);
+    const endpoint = resolveEndpointConfig(nodeId);
+    const base = endpoint.base;
     if (!base) {
       updateStatus(nodeId, { status: 'idle', lastError: 'Configure base URL' });
       if (!quiet) setBadge('Configure MCP base URL', false);
       return null;
     }
-    const relay = (cfg.relay || '').trim();
-    const viaNkn = !!relay;
-    const api = (cfg.api || '').trim();
+    const relay = endpoint.relay || '';
+    const viaNkn = !!endpoint.viaNkn;
+    const api = endpoint.api || '';
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
     updateStatus(nodeId, { status: 'loading', lastError: null });
     try {
       if (!viaNkn && base) {
         await ensureLocalNetworkAccess({ requireGesture: true });
       }
-      const data = await Net.getJSON(base, '/mcp/status', api, viaNkn, relay);
+      const data = await Net.getJSON(base, '/mcp/status', api, viaNkn, relay, {
+        service: endpoint.service || 'mcp_server',
+        useServiceTarget: true,
+        forceRelay: !!endpoint.relayOnly
+      });
       updateStatus(nodeId, {
         status: 'ready',
         server: data?.server || null,
@@ -234,7 +306,8 @@ function createMCP({
 
   async function runQuery(nodeId, payload) {
     const cfg = NodeStore.ensure(nodeId, 'MCP').config || {};
-    const base = normalizeBase(cfg);
+    const endpoint = resolveEndpointConfig(nodeId);
+    const base = endpoint.base;
     if (!base) {
       setBadge('Configure MCP base URL', false);
       return;
@@ -257,9 +330,9 @@ function createMCP({
       return;
     }
 
-    const relay = (cfg.relay || '').trim();
-    const viaNkn = !!relay;
-    const api = (cfg.api || '').trim();
+    const relay = endpoint.relay || '';
+    const viaNkn = !!endpoint.viaNkn;
+    const api = endpoint.api || '';
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
 
     if (!viaNkn) {
@@ -288,7 +361,11 @@ function createMCP({
     let result;
     try {
       result = await withRequest(nodeId, async () => {
-        return Net.postJSON(base, '/mcp/query', requestBody, api, viaNkn, relay, timeout);
+        return Net.postJSON(base, '/mcp/query', requestBody, api, viaNkn, relay, timeout, {
+          service: endpoint.service || 'mcp_server',
+          useServiceTarget: true,
+          forceRelay: !!endpoint.relayOnly
+        });
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -367,7 +444,8 @@ function createMCP({
 
   async function runTool(nodeId, payload) {
     const cfg = NodeStore.ensure(nodeId, 'MCP').config || {};
-    const base = normalizeBase(cfg);
+    const endpoint = resolveEndpointConfig(nodeId);
+    const base = endpoint.base;
     if (!base) {
       setBadge('Configure MCP base URL', false);
       return;
@@ -389,9 +467,9 @@ function createMCP({
       return;
     }
 
-    const relay = (cfg.relay || '').trim();
-    const viaNkn = !!relay;
-    const api = (cfg.api || '').trim();
+    const relay = endpoint.relay || '';
+    const viaNkn = !!endpoint.viaNkn;
+    const api = endpoint.api || '';
     const timeout = Number.isFinite(cfg.timeoutMs) ? cfg.timeoutMs : 20000;
 
     log(`[mcp:${nodeId}] tool ${name}`);
@@ -399,7 +477,11 @@ function createMCP({
     let result;
     try {
       result = await withRequest(nodeId, async () => {
-        return Net.postJSON(base, '/mcp/tool', { name, arguments: args }, api, viaNkn, relay, timeout);
+        return Net.postJSON(base, '/mcp/tool', { name, arguments: args }, api, viaNkn, relay, timeout, {
+          service: endpoint.service || 'mcp_server',
+          useServiceTarget: true,
+          forceRelay: !!endpoint.relayOnly
+        });
       });
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -463,6 +545,7 @@ function createMCP({
 
   function dispose(nodeId) {
     stateByNode.delete(nodeId);
+    RESOLVE_META.delete(nodeId);
   }
 
   return {

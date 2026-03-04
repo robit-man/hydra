@@ -12,6 +12,7 @@ Features
 """
 
 import argparse
+import atexit
 import base64
 import codecs
 import contextlib
@@ -20,15 +21,18 @@ import logging
 import math
 import os
 import queue
+import re
 import secrets
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, IO, List, Optional, Tuple
@@ -43,6 +47,14 @@ VENV_DIR = BASE_DIR / ".venv_router"
 BIN_DIR = VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
 PY_BIN = BIN_DIR / ("python.exe" if os.name == "nt" else "python")
 PIP_BIN = BIN_DIR / ("pip.exe" if os.name == "nt" else "pip")
+
+
+def _skip_bootstrap() -> bool:
+    if os.environ.get("HYDRA_ROUTER_SKIP_BOOTSTRAP", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
 
 
 def _in_venv() -> bool:
@@ -63,7 +75,7 @@ def _ensure_venv() -> None:
 
 def _ensure_deps() -> None:
     need = []
-    for mod in ("requests", "python-dotenv", "qrcode"):
+    for mod in ("requests", "python-dotenv", "qrcode", "flask", "werkzeug"):
         try:
             if mod == "python-dotenv":
                 __import__("dotenv")
@@ -75,14 +87,21 @@ def _ensure_deps() -> None:
         subprocess.check_call([str(PIP_BIN), "install", *need], cwd=BASE_DIR)
 
 
-if not _in_venv():
+BOOTSTRAP_SKIPPED = _skip_bootstrap()
+
+if not BOOTSTRAP_SKIPPED and not _in_venv():
     _ensure_venv()
     os.execv(str(PY_BIN), [str(PY_BIN), *sys.argv])
 
-_ensure_deps()
+if not BOOTSTRAP_SKIPPED:
+    _ensure_deps()
 
 import requests  # type: ignore
-import qrcode  # type: ignore
+try:
+    import qrcode  # type: ignore
+except Exception:  # pragma: no cover
+    qrcode = None  # type: ignore
+from cloudflared_manager import CloudflaredManager  # type: ignore
 
 try:
     import curses  # type: ignore
@@ -102,6 +121,103 @@ DEFAULT_TARGETS = {
     "web_scrape": "http://127.0.0.1:8130",
     "depth_any": "http://127.0.0.1:5000",
 }
+ROUTER_CONFIG_SCHEMA_VERSION = 2
+ROUTER_CONFIG_MIGRATION_MAP = {
+    0: "legacy_flat_config",
+    1: "nested_schema_v1",
+    2: "typed_schema_v2",
+}
+
+ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "api": {
+        "enable": {"type": "bool", "default": True, "legacy": ("enable_api", "api_enable")},
+        "host": {"type": "str", "default": "127.0.0.1", "legacy": ("listen_host", "api_host")},
+        "port": {"type": "int", "default": 9071, "min": 1, "max": 65535, "legacy": ("listen_port", "api_port")},
+    },
+    "nkn": {
+        "enable": {"type": "bool", "default": True, "legacy": ("enable_nkn", "nkn_enable")},
+        "dm_retries": {"type": "int", "default": 2, "min": 1, "max": 12},
+        "resolve_timeout_seconds": {"type": "int", "default": 20, "min": 2, "max": 120, "legacy": ("resolve_timeout",)},
+        "rpc_max_request_b": {"type": "int", "default": 512 * 1024, "min": 1024, "max": 64 * 1024 * 1024},
+        "rpc_max_response_b": {"type": "int", "default": 2 * 1024 * 1024, "min": 1024, "max": 128 * 1024 * 1024},
+    },
+    "http": {
+        "workers": {"type": "int", "default": 4, "min": 1, "max": 128, "legacy": ("http_workers",)},
+        "max_body_b": {"type": "int", "default": 2 * 1024 * 1024, "min": 4096, "max": 256 * 1024 * 1024},
+        "verify_default": {"type": "bool", "default": True},
+        "chunk_raw_b": {"type": "int", "default": 12 * 1024, "min": 1024, "max": 4 * 1024 * 1024},
+        "chunk_upload_b": {"type": "int", "default": 600 * 1024, "min": 4 * 1024, "max": 16 * 1024 * 1024},
+        "heartbeat_s": {"type": "int", "default": 10, "min": 2, "max": 300},
+        "batch_lines": {"type": "int", "default": 24, "min": 1, "max": 1024},
+        "batch_latency": {"type": "float", "default": 0.08, "min": 0.01, "max": 30.0},
+        "retries": {"type": "int", "default": 4, "min": 0, "max": 20},
+        "retry_backoff": {"type": "float", "default": 0.5, "min": 0.0, "max": 30.0},
+        "retry_cap": {"type": "float", "default": 4.0, "min": 0.1, "max": 120.0},
+    },
+    "bridge": {
+        "num_subclients": {"type": "int", "default": 2, "min": 1, "max": 32, "legacy": ("subclients",)},
+        "seed_ws": {"type": "str", "default": ""},
+        "self_probe_ms": {"type": "int", "default": 12000, "min": 1000, "max": 300000},
+        "self_probe_fails": {"type": "int", "default": 3, "min": 1, "max": 20},
+    },
+    "watchdog": {
+        "port_reclaim_enabled": {"type": "bool", "default": True},
+        "port_reclaim_force": {"type": "bool", "default": False},
+        "activation_timeout_seconds": {"type": "float", "default": 30.0, "min": 1.0, "max": 600.0},
+        "activation_stability_seconds": {"type": "float", "default": 6.0, "min": 0.5, "max": 120.0},
+        "health_check_interval_seconds": {"type": "float", "default": 2.0, "min": 0.2, "max": 120.0},
+        "health_failure_threshold": {"type": "int", "default": 3, "min": 1, "max": 20},
+        "reclaim_sigint_wait_seconds": {"type": "float", "default": 0.7, "min": 0.0, "max": 30.0},
+        "reclaim_sigterm_wait_seconds": {"type": "float", "default": 1.0, "min": 0.0, "max": 30.0},
+        "reclaim_sigkill_wait_seconds": {"type": "float", "default": 1.0, "min": 0.0, "max": 30.0},
+    },
+    "cloudflared": {
+        "enable": {"type": "bool", "default": False, "legacy": ("enable_tunnel", "cloudflared_enable")},
+        "auto_install_cloudflared": {"type": "bool", "default": False},
+        "binary_path": {"type": "str", "default": ""},
+        "protocol": {"type": "str", "default": "http2"},
+        "restart_initial_seconds": {"type": "float", "default": 2.0, "min": 0.5, "max": 300.0},
+        "restart_cap_seconds": {"type": "float", "default": 90.0, "min": 1.0, "max": 3600.0},
+    },
+    "feature_flags": {
+        "router_control_plane_api": {"type": "bool", "default": True},
+        "resolver_auto_apply": {"type": "bool", "default": True},
+        "cloudflared_manager": {"type": "bool", "default": False},
+    },
+}
+
+ROUTER_TARGET_LEGACY_KEYS: Dict[str, Tuple[str, ...]] = {
+    "ollama": ("ollama_url", "ollama_endpoint", "ollama_base"),
+    "asr": ("asr_url", "whisper_url", "asr_endpoint"),
+    "tts": ("tts_url", "piper_url", "tts_endpoint"),
+    "mcp": ("mcp_url", "mcp_endpoint"),
+    "web_scrape": ("web_scrape_url", "browser_url", "scrape_url"),
+    "depth_any": ("depth_any_url", "depth_url", "pointcloud_url"),
+}
+SENSITIVE_VALUE_PLACEHOLDER = "[redacted]"
+SENSITIVE_FIELD_EXACT = {
+    "seed_hex",
+    "seed",
+    "password",
+    "passphrase",
+    "api_key",
+    "apikey",
+    "token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "client_secret",
+    "private_key",
+    "authorization",
+    "auth_header",
+    "bearer",
+}
+SENSITIVE_FIELD_EXCEPTIONS = {
+    "seed_persisted",
+}
+SENSITIVE_FIELD_REGEX = re.compile(
+    r"(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|auth_header|bearer)"
+)
 
 SERVICE_TARGETS = {
     "whisper_asr": {
@@ -190,6 +306,8 @@ class DaemonManager:
 # QR helpers
 # ──────────────────────────────────────────────────────────────
 def _qr_matrix(text: str, error: str = "H", border: int = 2) -> List[List[bool]]:
+    if qrcode is None:
+        raise RuntimeError("qrcode dependency is not available")
     qr = qrcode.QRCode(
         version=None,
         error_correction={
@@ -253,6 +371,9 @@ LOGS_ROOT = BASE_DIR / ".logs"
 METADATA_ROOT = SERVICES_ROOT / "meta"
 BACKUP_ROOT = BASE_DIR / ".backups"
 BACKUP_KEEP = 5
+WATCHDOG_RUNTIME_ROOT = BASE_DIR / ".watchdog_runtime"
+WATCHDOG_DESIRED_STATE_FILE = WATCHDOG_RUNTIME_ROOT / "desired_state.json"
+WATCHDOG_LOCK_FILE = WATCHDOG_RUNTIME_ROOT / "watchdog.lock"
 
 
 @dataclass
@@ -263,6 +384,13 @@ class ServiceDefinition:
     description: str
     preserve_repo: bool = False  # If True, keep full repo structure instead of extracting only script
     default_stream: bool = False  # If True, prefer streaming responses (chunks) by default
+    health_mode: str = "process"  # process | tcp | http
+    health_port: int = 0
+    health_path: str = "/health"
+    activation_timeout_seconds: float = 30.0
+    activation_stability_seconds: float = 6.0
+    health_check_interval_seconds: float = 2.0
+    health_failure_threshold: int = 3
 
     @property
     def script_name(self) -> str:
@@ -289,11 +417,30 @@ class ServiceState:
     terminal_pid_path: Optional[Path] = None
     fallback_mode: bool = False
     restart_attempts: int = 0
+    desired_enabled: bool = True
+    state: str = "stopped"  # stopped | launching | activating | running | degraded | stopping | error
+    state_reason: str = ""
+    last_state_change_at: float = 0.0
+    activation_deadline: float = 0.0
+    activation_method: str = ""
+    process_stable_since: float = 0.0
+    activation_checks: int = 0
+    activation_failures: int = 0
+    health_checks: int = 0
+    health_failures: int = 0
+    consecutive_health_failures: int = 0
+    last_health_probe_at: float = 0.0
+    last_health_ok_at: float = 0.0
+    last_health_error: str = ""
+    resolved_health_port: int = 0
+    last_port_discovery_at: float = 0.0
 
     def snapshot(self) -> Dict[str, object]:
         running = (self.process is not None and self.process.poll() is None) or self.fallback_mode
         if self.fallback_mode:
             status = "system fallback"
+        elif self.state:
+            status = self.state
         elif running:
             status = "running"
         else:
@@ -311,8 +458,23 @@ class ServiceState:
             "last_exit_at": self.last_exit_at,
             "last_error": self.last_error,
             "status": status,
+            "state": self.state,
+            "state_reason": self.state_reason,
+            "last_state_change_at": self.last_state_change_at,
+            "desired_enabled": bool(self.desired_enabled),
             "terminal_alive": self.terminal_proc is not None and self.terminal_proc.poll() is None,
             "fallback": self.fallback_mode,
+            "health_mode": self.definition.health_mode,
+            "health_port": self.resolved_health_port or self.definition.health_port,
+            "activation_method": self.activation_method,
+            "activation_checks": self.activation_checks,
+            "activation_failures": self.activation_failures,
+            "health_checks": self.health_checks,
+            "health_failures": self.health_failures,
+            "consecutive_health_failures": self.consecutive_health_failures,
+            "last_health_probe_at": self.last_health_probe_at,
+            "last_health_ok_at": self.last_health_ok_at,
+            "last_health_error": self.last_health_error,
         }
 
 
@@ -333,30 +495,46 @@ class ServiceWatchdog:
             repo_url="https://github.com/robit-man/piper-tts-service.git",
             script_path="tts/tts_service.py",
             description="Piper text-to-speech REST service",
+            health_mode="http",
+            health_port=8123,
+            health_path="/health",
         ),
         ServiceDefinition(
             name="whisper_asr",
             repo_url="https://github.com/robit-man/whisper-asr-service.git",
             script_path="asr/asr_service.py",
             description="Whisper ASR streaming/batch REST service",
+            health_mode="http",
+            health_port=8126,
+            health_path="/health",
         ),
         ServiceDefinition(
             name="ollama_farm",
             repo_url="https://github.com/robit-man/ollama-nkn-relay.git",
             script_path="farm/ollama_farm.py",
             description="Ollama parallel proxy with concurrency guard",
+            health_mode="http",
+            health_port=11434,
+            health_path="/",
+            activation_timeout_seconds=20.0,
         ),
         ServiceDefinition(
             name="mcp_server",
             repo_url="https://github.com/robit-man/hydra-mcp-server.git",
             script_path="mcp_server/mcp_service.py",
             description="Hydra MCP context server with WebSocket + REST APIs",
+            health_mode="http",
+            health_port=9003,
+            health_path="/healthz",
         ),
         ServiceDefinition(
             name="web_scrape",
             repo_url="https://github.com/robit-man/web-scrape-service.git",
             script_path="scrape/web_scrape.py",
             description="Headless Chrome scrape/control service",
+            health_mode="http",
+            health_port=8130,
+            health_path="/health",
         ),
         ServiceDefinition(
             name="depth_any",
@@ -365,15 +543,27 @@ class ServiceWatchdog:
             description="Depth Anything 3 depth estimation and pointcloud generation",
             preserve_repo=True,  # Requires full repo structure for dependencies
             default_stream=False,  # Opt-in to streaming per request; UI expects non-stream for metadata calls
+            health_mode="http",
+            health_port=5000,
+            health_path="/api/v1/health",
+            activation_timeout_seconds=60.0,
+            activation_stability_seconds=12.0,
         ),
     ]
 
-    def __init__(self, base_dir: Optional[Path] = None, enable_logs: bool = True):
+    def __init__(
+        self,
+        base_dir: Optional[Path] = None,
+        enable_logs: bool = True,
+        watchdog_config: Optional[Dict[str, Any]] = None,
+    ):
         self.base_dir = Path(base_dir or BASE_DIR)
         self.enable_logs = enable_logs
+        self.watchdog_config = dict(watchdog_config or {})
         SERVICES_ROOT.mkdir(parents=True, exist_ok=True)
         LOGS_ROOT.mkdir(parents=True, exist_ok=True)
         METADATA_ROOT.mkdir(parents=True, exist_ok=True)
+        WATCHDOG_RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
         self._states: Dict[str, ServiceState] = {}
         self._global_stop = threading.Event()
         self._lock = threading.Lock()
@@ -382,6 +572,25 @@ class ServiceWatchdog:
         self._repo_thread: Optional[threading.Thread] = None
         self._core_repo_block_reason: Optional[str] = None
         self._restart_pending: bool = False
+        self._owned_pids: set[int] = set()
+        self._desired_enabled: Dict[str, bool] = {}
+        self._desired_state_path = WATCHDOG_DESIRED_STATE_FILE
+        self._lock_file_path = WATCHDOG_LOCK_FILE
+        self._lock_handle: Optional[IO[str]] = None
+        self._lock_active = False
+
+        self._reclaim_enabled = bool(self.watchdog_config.get("port_reclaim_enabled", True))
+        self._reclaim_force = bool(self.watchdog_config.get("port_reclaim_force", False))
+        self._activation_timeout_default = float(self.watchdog_config.get("activation_timeout_seconds", 30.0))
+        self._activation_stability_default = float(self.watchdog_config.get("activation_stability_seconds", 6.0))
+        self._health_interval_default = float(self.watchdog_config.get("health_check_interval_seconds", 2.0))
+        self._health_fail_threshold_default = max(1, int(self.watchdog_config.get("health_failure_threshold", 3)))
+        self._reclaim_sigint_wait_s = max(0.1, float(self.watchdog_config.get("reclaim_sigint_wait_seconds", 0.7)))
+        self._reclaim_sigterm_wait_s = max(0.1, float(self.watchdog_config.get("reclaim_sigterm_wait_seconds", 1.0)))
+        self._reclaim_sigkill_wait_s = max(0.1, float(self.watchdog_config.get("reclaim_sigkill_wait_seconds", 1.0)))
+
+        self._acquire_instance_lock()
+        atexit.register(self._release_instance_lock)
         if not self._terminal_template:
             print("[watchdog] No terminal emulator found; log windows will not be opened.")
 
@@ -389,14 +598,25 @@ class ServiceWatchdog:
         if not shutil.which("git"):
             raise SystemExit("git is required for ServiceWatchdog; please install git")
 
+        desired = self._load_desired_state()
+        self._desired_enabled = {}
         for definition in self.DEFINITIONS:
-            if service_config is not None and not service_config.get(definition.name, True):
+            ui_default = True if service_config is None else bool(service_config.get(definition.name, True))
+            desired_enabled = bool(desired.get(definition.name, ui_default))
+            self._desired_enabled[definition.name] = desired_enabled
+            if not desired_enabled:
                 continue
             state = self._prepare_service(definition)
+            state.desired_enabled = True
+            self._set_state(state, "stopped", "initialized")
             self._states[definition.name] = state
+        self._save_desired_state()
 
     def start_all(self) -> None:
         for state in self._states.values():
+            if not state.desired_enabled:
+                self._set_state(state, "stopped", "disabled")
+                continue
             if state.supervisor and state.supervisor.is_alive():
                 continue
             state.stop_event.clear()
@@ -420,7 +640,10 @@ class ServiceWatchdog:
             if not state:
                 state = self._prepare_service(definition)
                 self._states[name] = state
+            state.desired_enabled = True
+            self._set_desired_enabled(name, True)
             state.stop_event.clear()
+            state.last_error = None
             if not state.supervisor or not state.supervisor.is_alive():
                 t = threading.Thread(target=self._run_service_loop, args=(state,), daemon=True)
                 state.supervisor = t
@@ -437,32 +660,20 @@ class ServiceWatchdog:
         with self._lock:
             state = self._states.get(name)
             if not state:
+                self._set_desired_enabled(name, False)
                 return
+            self._set_desired_enabled(name, False)
+            state.desired_enabled = False
+            self._set_state(state, "stopping", "stop requested")
             state.stop_event.set()
-            proc = state.process
-            if proc and proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    proc.terminate()
-                try:
-                    proc.wait(timeout=timeout)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        proc.kill()
-            term = state.terminal_proc
-            if term and term.poll() is None:
-                with contextlib.suppress(Exception):
-                    term.terminate()
-                try:
-                    term.wait(timeout=timeout)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        term.kill()
+            self._terminate_process(state, timeout=timeout)
             state.process = None
             state.terminal_proc = None
             self._cleanup_terminal_tail(state)
             if state.supervisor and state.supervisor.is_alive():
                 state.supervisor.join(timeout=timeout)
             state.running_since = None
+            self._set_state(state, "stopped", "disabled")
 
     def shutdown(self, timeout: float = 15.0) -> None:
         self._global_stop.set()
@@ -471,34 +682,178 @@ class ServiceWatchdog:
         if self._repo_thread and self._repo_thread.is_alive():
             self._repo_thread.join(timeout=timeout)
         for state in self._states.values():
+            state.desired_enabled = False
             state.stop_event.set()
-            proc = state.process
-            if proc and proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    proc.terminate()
-                try:
-                    proc.wait(timeout=timeout)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        proc.kill()
-            term = state.terminal_proc
-            if term and term.poll() is None:
-                with contextlib.suppress(Exception):
-                    term.terminate()
-                try:
-                    term.wait(timeout=timeout)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        term.kill()
+            self._set_state(state, "stopping", "shutdown requested")
+            self._terminate_process(state, timeout=timeout)
             state.terminal_proc = None
             self._cleanup_terminal_tail(state)
             if state.supervisor and state.supervisor.is_alive():
                 state.supervisor.join(timeout=timeout)
+            self._set_state(state, "stopped", "shutdown complete")
+        self._save_desired_state()
+        self._release_instance_lock()
 
     def get_snapshot(self) -> List[Dict[str, object]]:
-        return [state.snapshot() for state in self._states.values()]
+        snapshots = [state.snapshot() for state in self._states.values()]
+        known = {snap["name"] for snap in snapshots}
+        for definition in self.DEFINITIONS:
+            if definition.name in known:
+                continue
+            desired = bool(self._desired_enabled.get(definition.name, True))
+            snapshots.append(
+                {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "script": definition.script_path,
+                    "log": str(LOGS_ROOT / f"{definition.name}.log"),
+                    "running": False,
+                    "pid": None,
+                    "restart_count": 0,
+                    "running_since": None,
+                    "last_exit_code": None,
+                    "last_exit_at": None,
+                    "last_error": None,
+                    "status": "stopped",
+                    "state": "stopped",
+                    "state_reason": "disabled" if not desired else "not initialized",
+                    "last_state_change_at": 0.0,
+                    "desired_enabled": desired,
+                    "terminal_alive": False,
+                    "fallback": False,
+                    "health_mode": definition.health_mode,
+                    "health_port": definition.health_port,
+                    "activation_method": "",
+                    "activation_checks": 0,
+                    "activation_failures": 0,
+                    "health_checks": 0,
+                    "health_failures": 0,
+                    "consecutive_health_failures": 0,
+                    "last_health_probe_at": 0.0,
+                    "last_health_ok_at": 0.0,
+                    "last_health_error": "",
+                }
+            )
+        return snapshots
+
+    def desired_state(self) -> Dict[str, bool]:
+        return dict(self._desired_enabled)
 
     # internal helpers -------------------------------------------------
+    def _acquire_instance_lock(self) -> None:
+        try:
+            WATCHDOG_RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+            handle = open(self._lock_file_path, "a+", encoding="utf-8")
+            try:
+                if os.name == "nt":
+                    import msvcrt  # type: ignore
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl  # type: ignore
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                handle.seek(0)
+                raw = handle.read().strip()
+                existing_pid = None
+                with contextlib.suppress(Exception):
+                    existing_pid = int(raw) if raw else None
+                if existing_pid and not self._is_pid_running(existing_pid):
+                    suffix = f" (pid {existing_pid} not alive; stale lock suspected)"
+                else:
+                    suffix = f" (pid {existing_pid})" if existing_pid else ""
+                handle.close()
+                raise RuntimeError(f"Another watchdog instance is already running{suffix}")
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
+            self._lock_handle = handle
+            self._lock_active = True
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to acquire watchdog lock: {exc}") from exc
+
+    def _release_instance_lock(self) -> None:
+        if not self._lock_active:
+            return
+        handle = self._lock_handle
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                if os.name == "nt":
+                    import msvcrt  # type: ignore
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl  # type: ignore
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            with contextlib.suppress(Exception):
+                handle.close()
+        self._lock_handle = None
+        self._lock_active = False
+        with contextlib.suppress(Exception):
+            if self._lock_file_path.exists():
+                raw = self._lock_file_path.read_text(encoding="utf-8").strip()
+                if raw == str(os.getpid()):
+                    self._lock_file_path.unlink()
+
+    @staticmethod
+    def _is_pid_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _load_desired_state(self) -> Dict[str, bool]:
+        path = self._desired_state_path
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("desired state payload must be an object")
+            out: Dict[str, bool] = {}
+            for key, value in payload.items():
+                if isinstance(key, str):
+                    out[key] = bool(value)
+            return out
+        except Exception as exc:
+            print(f"[watchdog] Warning: failed to read desired state ({exc}); using safe defaults")
+            return {}
+
+    def _save_desired_state(self) -> None:
+        payload = {definition.name: bool(self._desired_enabled.get(definition.name, True)) for definition in self.DEFINITIONS}
+        tmp_path = self._desired_state_path.with_suffix(".tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            tmp_path.replace(self._desired_state_path)
+        except Exception as exc:
+            print(f"[watchdog] Warning: failed to write desired state ({exc})")
+            with contextlib.suppress(Exception):
+                if tmp_path.exists():
+                    tmp_path.unlink()
+
+    def _set_desired_enabled(self, service_name: str, enabled: bool) -> None:
+        self._desired_enabled[service_name] = bool(enabled)
+        self._save_desired_state()
+
+    def _set_state(self, state: ServiceState, new_state: str, reason: str = "", error: Optional[str] = None) -> None:
+        old = state.state
+        now = time.time()
+        state.state = new_state
+        state.state_reason = reason
+        if error is not None:
+            state.last_error = error or None
+        if old != new_state:
+            state.last_state_change_at = now
+            print(f"[watchdog] {state.definition.name}: {old or 'unknown'} -> {new_state} ({reason})")
     def _detect_terminal(self) -> Optional[List[str]]:
         for template in self.TERMINAL_TEMPLATES:
             if shutil.which(template[0]):
@@ -698,6 +1053,8 @@ class ServiceWatchdog:
             for state in list(self._states.values()):
                 if self._global_stop.is_set():
                     break
+                if not state.desired_enabled:
+                    continue
                 try:
                     self._maybe_update_service(state)
                 except Exception:
@@ -759,42 +1116,49 @@ class ServiceWatchdog:
         backoff = 1.0
         state.restart_attempts = 0
         while not self._global_stop.is_set() and not state.stop_event.is_set():
+            if not state.desired_enabled:
+                self._set_state(state, "stopped", "disabled")
+                self._global_stop.wait(0.5)
+                continue
             try:
                 if state.definition.name == "ollama_farm":
                     if self._handle_ollama(state):
+                        backoff = 1.0
                         state.restart_attempts = 0
-                        time.sleep(5)
+                        self._global_stop.wait(2.0)
                         continue
                 else:
                     if self._manage_standard_service(state):
+                        backoff = 1.0
                         state.restart_attempts = 0
                         continue
             except Exception as exc:
                 state.last_error = str(exc)
                 state.last_exit_at = time.time()
+                crashed_pid = int(getattr(state.process, "pid", 0) or 0)
                 state.process = None
+                if crashed_pid > 0:
+                    self._owned_pids.discard(crashed_pid)
                 self._close_log(state)
                 state.last_exit_code = None
                 state.restart_count += 1
-                time.sleep(min(backoff, 60.0))
+                self._set_state(state, "error", f"supervisor exception: {exc}", error=str(exc))
+                self._global_stop.wait(min(backoff, 60.0))
                 backoff = min(backoff * 2.0, 60.0)
                 state.restart_attempts += 1
                 continue
             state.restart_count += 1
             state.restart_attempts += 1
-            if state.definition.name != "ollama_farm" and state.restart_attempts == 1:
-                self._free_ports(self._service_ports(state.definition.name))
-                continue
-            if state.restart_attempts <= 2:
-                time.sleep(min(backoff, 60.0))
-                backoff = min(backoff * 2.0, 60.0)
-                continue
             state.last_error = state.last_error or "Repeated startup failures"
             state.process = None
             state.running_since = None
             self._close_log(state)
-            break
+            self._set_state(state, "error", f"restart in {min(backoff, 60.0):.1f}s", error=state.last_error)
+            self._global_stop.wait(min(backoff, 60.0))
+            backoff = min(backoff * 2.0, 60.0)
         state.running_since = None
+        if state.state != "stopped":
+            self._set_state(state, "stopped", "loop ended")
 
     def _preferred_python(self, state: ServiceState) -> Path:
         """Choose a Python interpreter for the service.
@@ -845,17 +1209,42 @@ class ServiceWatchdog:
             bufsize=1,
             env=env,
         )
+        if state.process and state.process.pid:
+            self._owned_pids.add(int(state.process.pid))
         state.running_since = time.time()
+        state.process_stable_since = state.running_since
+        state.activation_checks = 0
+        state.activation_failures = 0
         state.last_error = None
         log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] watchdog: started {cmd}\n")
         log_file.flush()
         self._ensure_terminal_tail(state)
 
     def _handle_ollama(self, state: ServiceState) -> bool:
+        proc = state.process
+        if proc and proc.poll() is None:
+            if self._ollama_health_ok():
+                state.fallback_mode = False
+                state.consecutive_health_failures = 0
+                self._set_state(state, "running", "ollama_farm healthy")
+                return True
+            state.health_failures += 1
+            state.consecutive_health_failures += 1
+            state.last_health_error = "ollama health probe failed"
+            self._set_state(state, "degraded", "ollama health probe failed")
+            if state.consecutive_health_failures >= max(2, self._health_fail_threshold_default * 2):
+                state.last_error = "ollama health failures exceeded threshold"
+                self._set_state(state, "error", state.last_error, error=state.last_error)
+                self._terminate_process(state)
+                return False
+            return True
+
         if state.fallback_mode:
             if self._ollama_health_ok():
+                self._set_state(state, "running", "using system ollama")
                 state.last_error = None
             else:
+                self._set_state(state, "degraded", "system ollama health probe failed")
                 state.last_error = "system ollama unhealthy"
             return True
 
@@ -863,21 +1252,32 @@ class ServiceWatchdog:
             state.fallback_mode = True
             state.last_error = None
             state.running_since = time.time()
+            self._set_state(state, "running", "using existing local ollama")
             return True
 
-        self._free_ports([11434, 8080])
+        ok_ports, reclaim_reason = self._free_ports([11434, 8080], state=state)
+        if not ok_ports:
+            state.last_error = reclaim_reason
+            self._set_state(state, "error", reclaim_reason, error=reclaim_reason)
+            return False
+        state.fallback_mode = False
+        self._set_state(state, "launching", "starting ollama_farm")
         self._start_process(state)
         proc = state.process
         if not proc:
             state.last_error = "ollama_farm failed to spawn"
+            self._set_state(state, "error", state.last_error, error=state.last_error)
             return False
+        self._set_state(state, "activating", "waiting for ollama health")
         ready = self._wait_for_ollama_health(timeout=20)
         if ready:
             state.last_error = None
             state.restart_attempts = 0
+            self._set_state(state, "running", "ollama health passed", error="")
             return True
 
         state.last_error = "ollama_farm failed to start; falling back"
+        self._set_state(state, "degraded", state.last_error, error="")
         self._terminate_process(state)
         if self._ollama_health_ok():
             state.fallback_mode = True
@@ -885,56 +1285,173 @@ class ServiceWatchdog:
             state.process = None
             self._close_log(state)
             state.restart_attempts = 0
+            self._set_state(state, "degraded", "process failed; using system fallback", error="")
             return True
         state.last_error = "ollama fallback unavailable"
+        self._set_state(state, "error", state.last_error, error=state.last_error)
         return False
 
     def _manage_standard_service(self, state: ServiceState) -> bool:
         service_ports = self._service_ports(state.definition.name)
-        if any(self._port_in_use(p) for p in service_ports if p > 0):
-            self._free_ports(service_ports)
+        ok_ports, reclaim_reason = self._free_ports(service_ports, state=state)
+        if not ok_ports:
+            state.last_error = reclaim_reason
+            self._set_state(state, "error", reclaim_reason, error=reclaim_reason)
+            return False
+        self._set_state(state, "launching", "starting process")
         self._start_process(state)
         proc = state.process
         if not proc:
             state.last_error = "spawn failed"
+            self._set_state(state, "error", "spawn failed", error=state.last_error)
             return False
-        ret = proc.wait()
-        state.last_exit_code = ret
-        state.last_exit_at = time.time()
-        state.process = None
-        self._close_log(state)
-        if state.stop_event.is_set() or self._global_stop.is_set():
-            return True
-        state.last_error = f"Exited with code {ret}"
-        return False
+        activation_timeout = max(
+            3.0,
+            float(state.definition.activation_timeout_seconds or self._activation_timeout_default),
+        )
+        stability_window = max(
+            1.5,
+            float(state.definition.activation_stability_seconds or self._activation_stability_default),
+        )
+        health_interval = max(
+            0.6,
+            float(state.definition.health_check_interval_seconds or self._health_interval_default),
+        )
+        health_threshold = max(
+            1,
+            int(state.definition.health_failure_threshold or self._health_fail_threshold_default),
+        )
+        hard_restart_threshold = max(2, health_threshold * 2)
+
+        state.activation_deadline = time.time() + activation_timeout
+        state.last_health_probe_at = 0.0
+        state.last_health_error = ""
+        state.consecutive_health_failures = 0
+        self._set_state(state, "activating", "health probe pending")
+
+        while not self._global_stop.is_set() and not state.stop_event.is_set() and state.desired_enabled:
+            if proc.poll() is not None:
+                ret = int(proc.returncode or 0)
+                state.last_exit_code = ret
+                state.last_exit_at = time.time()
+                state.process = None
+                self._owned_pids.discard(int(proc.pid or 0))
+                self._close_log(state)
+                if state.stop_event.is_set() or self._global_stop.is_set() or not state.desired_enabled:
+                    self._set_state(state, "stopped", "process exited after stop request", error="")
+                    return True
+                state.last_error = f"Exited with code {ret}"
+                self._set_state(state, "error", state.last_error, error=state.last_error)
+                return False
+
+            self._discover_runtime_health_port(state)
+            now = time.time()
+            should_probe = state.last_health_probe_at <= 0 or (now - state.last_health_probe_at) >= health_interval
+            if not should_probe:
+                self._global_stop.wait(0.15)
+                continue
+
+            state.last_health_probe_at = now
+            probe_ok, probe_detail = self._health_probe_with_runtime(state)
+
+            if state.state in ("launching", "activating"):
+                state.activation_checks += 1
+                if probe_ok:
+                    state.activation_method = f"probe:{probe_detail}"
+                    state.last_health_ok_at = now
+                    state.last_health_error = ""
+                    state.consecutive_health_failures = 0
+                    self._set_state(state, "running", f"activated ({probe_detail})", error="")
+                    continue
+
+                state.activation_failures += 1
+                state.last_health_error = probe_detail
+                alive_for = now - (state.process_stable_since or now)
+                if alive_for >= stability_window:
+                    state.activation_method = f"stable-process:{alive_for:.1f}s"
+                    self._set_state(
+                        state,
+                        "degraded",
+                        f"activation fallback by process stability ({probe_detail})",
+                        error="",
+                    )
+                    continue
+
+                if now >= state.activation_deadline:
+                    state.last_error = f"Activation timeout ({probe_detail})"
+                    self._set_state(state, "error", state.last_error, error=state.last_error)
+                    self._terminate_process(state)
+                    return False
+                continue
+
+            state.health_checks += 1
+            if probe_ok:
+                state.last_health_ok_at = now
+                state.last_health_error = ""
+                state.consecutive_health_failures = 0
+                if state.state != "running":
+                    self._set_state(state, "running", f"health restored ({probe_detail})", error="")
+                continue
+
+            state.health_failures += 1
+            state.consecutive_health_failures += 1
+            state.last_health_error = probe_detail
+            if state.consecutive_health_failures >= health_threshold and state.state != "degraded":
+                self._set_state(
+                    state,
+                    "degraded",
+                    f"health degraded ({state.consecutive_health_failures}/{hard_restart_threshold}): {probe_detail}",
+                    error="",
+                )
+            if state.consecutive_health_failures >= hard_restart_threshold:
+                state.last_error = f"Health failures exceeded threshold ({probe_detail})"
+                self._set_state(state, "error", state.last_error, error=state.last_error)
+                self._terminate_process(state)
+                return False
+
+        self._set_state(state, "stopping", "stop requested")
+        self._terminate_process(state)
+        self._set_state(state, "stopped", "stop complete", error="")
+        return True
 
     def _service_ports(self, service_name: str) -> List[int]:
-        if service_name == "piper_tts":
-            return [8123]
-        if service_name == "whisper_asr":
-            return [8126]
-        if service_name == "ollama_farm":
-            return [11434, 8080]
-        if service_name == "mcp_server":
-            return [9003]
-        if service_name == "web_scrape":
-            return [8130]
-        if service_name == "depth_any":
-            return [5000]
+        info = SERVICE_TARGETS.get(service_name) or {}
+        ports = info.get("ports")
+        if isinstance(ports, list) and ports:
+            out: List[int] = []
+            for raw in ports:
+                with contextlib.suppress(Exception):
+                    port = int(raw)
+                    if 1 <= port <= 65535:
+                        out.append(port)
+            if out:
+                return sorted(set(out))
+        definition = next((d for d in self.DEFINITIONS if d.name == service_name), None)
+        if definition and definition.health_port > 0:
+            return [int(definition.health_port)]
         return []
 
-    def _terminate_process(self, state: ServiceState) -> None:
+    def _terminate_process(self, state: ServiceState, timeout: float = 5.0) -> None:
         proc = state.process
         if proc and proc.poll() is None:
+            pid = int(proc.pid or 0)
             with contextlib.suppress(Exception):
-                proc.terminate()
+                proc.send_signal(signal.SIGINT)
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=min(timeout, 2.0))
             except Exception:
                 with contextlib.suppress(Exception):
-                    proc.kill()
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=min(timeout, 2.0))
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+            if pid > 0:
+                self._owned_pids.discard(pid)
         state.process = None
         self._close_log(state)
+        state.process_stable_since = 0.0
 
     def _wait_for_ollama_health(self, timeout: float) -> bool:
         start = time.time()
@@ -954,23 +1471,246 @@ class ServiceWatchdog:
         except Exception:
             return False
 
-    def _free_ports(self, ports: List[int]) -> None:
+    def _resolve_health_port(self, state: ServiceState) -> int:
+        if state.resolved_health_port > 0:
+            return int(state.resolved_health_port)
+        try:
+            static_port = int(state.definition.health_port or 0)
+        except Exception:
+            static_port = 0
+        return static_port if 1 <= static_port <= 65535 else 0
+
+    def _discover_runtime_health_port(self, state: ServiceState) -> int:
+        proc = state.process
+        if not proc or proc.poll() is not None:
+            return self._resolve_health_port(state)
+        pid = int(proc.pid or 0)
+        if pid <= 0:
+            return self._resolve_health_port(state)
+        ports: List[int] = []
+        if shutil.which("lsof"):
+            try:
+                out = subprocess.check_output(
+                    ["lsof", "-Pan", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+                for line in out.splitlines():
+                    match = re.search(r":(\d+)\s+\(LISTEN\)", line)
+                    if not match:
+                        continue
+                    with contextlib.suppress(Exception):
+                        port = int(match.group(1))
+                        if 1 <= port <= 65535:
+                            ports.append(port)
+            except Exception:
+                pass
+        if not ports and shutil.which("ss"):
+            try:
+                out = subprocess.check_output(["ss", "-ltnp"], text=True, stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    if f"pid={pid}," not in line and f"pid={pid})" not in line:
+                        continue
+                    match = re.search(r":(\d+)\s+", line)
+                    if not match:
+                        continue
+                    with contextlib.suppress(Exception):
+                            port = int(match.group(1))
+                            if 1 <= port <= 65535:
+                                ports.append(port)
+            except Exception:
+                pass
+        if not ports:
+            try:
+                lines = state.log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-120:]
+                patterns = [
+                    r"Running on .*:(\d+)",
+                    r"listening on .*:(\d+)",
+                    r"Listening on port (\d+)",
+                    r"http://[^:]+:(\d+)",
+                ]
+                for line in reversed(lines):
+                    for pattern in patterns:
+                        match = re.search(pattern, line, re.IGNORECASE)
+                        if not match:
+                            continue
+                        with contextlib.suppress(Exception):
+                            port = int(match.group(1))
+                            if 1 <= port <= 65535:
+                                ports.append(port)
+                    if ports:
+                        break
+            except Exception:
+                pass
+        if ports:
+            preferred = int(state.definition.health_port or 0)
+            selected = preferred if preferred in ports else sorted(set(ports))[0]
+            state.resolved_health_port = selected
+            state.last_port_discovery_at = time.time()
+        return self._resolve_health_port(state)
+
+    def _probe_http_health(self, port: int, path: str) -> Tuple[bool, str]:
+        if port <= 0:
+            return False, "missing health port"
+        health_path = str(path or "/").strip() or "/"
+        if not health_path.startswith("/"):
+            health_path = f"/{health_path}"
+        url = f"http://127.0.0.1:{port}{health_path}"
+        try:
+            resp = requests.get(url, timeout=2.0)
+            if resp.status_code < 400:
+                return True, f"http:{resp.status_code}"
+            if resp.status_code in (401, 403):
+                return True, f"http:{resp.status_code} auth-gated"
+            return False, f"http:{resp.status_code}"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+
+    def _health_probe_with_runtime(self, state: ServiceState) -> Tuple[bool, str]:
+        proc = state.process
+        if not proc or proc.poll() is not None:
+            return False, "process not running"
+        mode = str(state.definition.health_mode or "process").strip().lower()
+        if mode == "process":
+            return True, "process"
+        port = self._discover_runtime_health_port(state)
+        if mode == "tcp":
+            if port <= 0:
+                return False, "tcp:no-port"
+            return (self._port_in_use(port), f"tcp:{port}")
+        if mode == "http":
+            return self._probe_http_health(port, state.definition.health_path)
+        return True, "process"
+
+    def _wait_for_pid_exit(self, pid: int, timeout_s: float) -> bool:
+        deadline = time.time() + max(0.1, float(timeout_s))
+        while time.time() < deadline:
+            if not self._is_pid_running(pid):
+                return True
+            time.sleep(0.1)
+        return not self._is_pid_running(pid)
+
+    def _terminate_pid_for_reclaim(self, pid: int) -> bool:
+        if pid <= 0 or pid == os.getpid():
+            return False
+        if not self._is_pid_running(pid):
+            return True
+        with contextlib.suppress(Exception):
+            os.kill(pid, signal.SIGINT)
+        if self._wait_for_pid_exit(pid, self._reclaim_sigint_wait_s):
+            return True
+        with contextlib.suppress(Exception):
+            os.kill(pid, signal.SIGTERM)
+        if self._wait_for_pid_exit(pid, self._reclaim_sigterm_wait_s):
+            return True
+        with contextlib.suppress(Exception):
+            os.kill(pid, signal.SIGKILL)
+        return self._wait_for_pid_exit(pid, self._reclaim_sigkill_wait_s)
+
+    def _read_process_commandline(self, pid: int) -> str:
+        if pid <= 0:
+            return ""
+        proc_cmdline = Path(f"/proc/{pid}/cmdline")
+        try:
+            if proc_cmdline.exists():
+                raw = proc_cmdline.read_bytes()
+                return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=2.5,
+            )
+            return (result.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def _pid_likely_owned_by_service(self, pid: int, state: ServiceState) -> bool:
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return False
+        if pid in self._owned_pids:
+            return True
+        if state.process and state.process.pid == pid:
+            return True
+        cmdline = self._read_process_commandline(pid)
+        if not cmdline:
+            return False
+        normalized = cmdline.replace("\\", "/").lower()
+        script_abs = str(state.script_path).replace("\\", "/").lower()
+        script_rel = str(state.definition.script_path).replace("\\", "/").lower()
+        script_name = Path(script_abs).name
+        if script_abs and script_abs in normalized:
+            return True
+        if script_rel and script_rel in normalized:
+            return True
+        if script_name and (
+            normalized.endswith(script_name)
+            or f"/{script_name}" in normalized
+            or f" {script_name} " in normalized
+        ):
+            return True
+        return False
+
+    def _classify_port_owners(self, port: int, state: Optional[ServiceState]) -> Tuple[List[int], List[int], List[int]]:
+        observed = [pid for pid in self._find_pids_on_port(port) if pid != os.getpid()]
+        owned: List[int] = []
+        foreign: List[int] = []
+        for pid in observed:
+            if state and self._pid_likely_owned_by_service(pid, state):
+                owned.append(pid)
+            else:
+                foreign.append(pid)
+        return sorted(set(observed)), sorted(set(owned)), sorted(set(foreign))
+
+    def _free_ports(
+        self,
+        ports: List[int],
+        state: Optional[ServiceState] = None,
+        force: Optional[bool] = None,
+    ) -> Tuple[bool, str]:
+        if not self._reclaim_enabled:
+            for port in ports:
+                if port > 0 and self._port_in_use(port):
+                    return False, f"port reclaim disabled and port {port} is already in use"
+            return True, ""
+
+        reclaim_force = self._reclaim_force if force is None else bool(force)
         for port in ports:
             if port <= 0:
                 continue
-            if not self._port_in_use(port):
+            observed, owned, foreign = self._classify_port_owners(port, state)
+            if not observed:
                 continue
-            pids = self._find_pids_on_port(port)
-            for pid in pids:
-                with contextlib.suppress(Exception):
-                    os.kill(pid, signal.SIGTERM)
-            time.sleep(0.2)
-            if self._port_in_use(port):
-                pids = self._find_pids_on_port(port)
-                for pid in pids:
-                    with contextlib.suppress(Exception):
-                        os.kill(pid, signal.SIGKILL)
-                time.sleep(0.2)
+            reclaim_targets = list(owned)
+            if reclaim_force:
+                reclaim_targets.extend(foreign)
+            reclaim_targets = sorted(set(reclaim_targets))
+            policy = "force" if reclaim_force else "owned-only"
+            print(
+                f"[watchdog] Port reclaim decision svc={state.definition.name if state else 'unknown'} "
+                f"port={port} policy={policy} observed={observed} owned={owned} foreign={foreign} "
+                f"targets={reclaim_targets}"
+            )
+            for pid in reclaim_targets:
+                ok = self._terminate_pid_for_reclaim(pid)
+                result = "ok" if ok else "failed"
+                print(f"[watchdog] Port reclaim result port={port} pid={pid} result={result}")
+
+            remaining = [pid for pid in self._find_pids_on_port(port) if pid != os.getpid()]
+            if remaining:
+                hint = ""
+                if not reclaim_force and any(pid in foreign for pid in remaining):
+                    hint = " (foreign process; enable force reclaim to override)"
+                reason = f"port {port} in use by pid(s) {','.join(str(pid) for pid in remaining)}{hint}"
+                return False, reason
+        return True, ""
 
     def _port_in_use(self, port: int) -> bool:
         import socket
@@ -983,24 +1723,39 @@ class ServiceWatchdog:
                 return False
 
     def _find_pids_on_port(self, port: int) -> List[int]:
-        pids: List[int] = []
+        pids: set[int] = set()
         if shutil.which("lsof"):
             try:
                 out = subprocess.check_output(["lsof", "-ti", f":{port}"], text=True)
                 for line in out.splitlines():
                     with contextlib.suppress(Exception):
-                        pids.append(int(line.strip()))
+                        pid = int(line.strip())
+                        if pid > 0:
+                            pids.add(pid)
             except subprocess.CalledProcessError:
                 pass
-        elif shutil.which("fuser"):
+        if not pids and shutil.which("fuser"):
             try:
                 out = subprocess.check_output(["fuser", "-n", "tcp", str(port)], text=True)
                 for token in out.split():
                     with contextlib.suppress(Exception):
-                        pids.append(int(token))
+                        pid = int(token)
+                        if pid > 0:
+                            pids.add(pid)
             except subprocess.CalledProcessError:
                 pass
-        return pids
+        if not pids and shutil.which("ss"):
+            try:
+                out = subprocess.check_output(["ss", "-ltnp", "sport", "=", f":{int(port)}"], text=True, stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    for match in re.findall(r"pid=(\d+)", line):
+                        with contextlib.suppress(Exception):
+                            pid = int(match)
+                            if pid > 0:
+                                pids.add(pid)
+            except Exception:
+                pass
+        return sorted(pids)
 
     def _ensure_terminal_tail(self, state: ServiceState) -> None:
         if not self._terminal_template:
@@ -1119,6 +1874,395 @@ if not LOGGER.handlers:
 LOGGER.setLevel(logging.INFO)
 
 
+def _json_clone(payload: Any) -> Any:
+    try:
+        return json.loads(json.dumps(payload))
+    except Exception:
+        return payload
+
+
+def _normalize_seed_hex(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("0x", "")
+    if re.fullmatch(r"[0-9a-f]{64}", text or ""):
+        return text
+    return ""
+
+
+def _is_sensitive_field_name(name: Any) -> bool:
+    key = str(name or "").strip().lower().replace("-", "_")
+    if not key:
+        return False
+    if key in SENSITIVE_FIELD_EXCEPTIONS:
+        return False
+    if key in SENSITIVE_FIELD_EXACT:
+        return True
+    return bool(SENSITIVE_FIELD_REGEX.search(key))
+
+
+def _redact_sensitive_fields(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        redacted: Dict[str, Any] = {}
+        for key, value in payload.items():
+            key_text = str(key)
+            if _is_sensitive_field_name(key_text):
+                redacted[key_text] = SENSITIVE_VALUE_PLACEHOLDER
+            else:
+                redacted[key_text] = _redact_sensitive_fields(value)
+        return redacted
+    if isinstance(payload, list):
+        return [_redact_sensitive_fields(item) for item in payload]
+    if isinstance(payload, tuple):
+        return tuple(_redact_sensitive_fields(item) for item in payload)
+    return payload
+
+
+def _coerce_config_value(path: str, raw_value: Any, source_kind: str, spec: Dict[str, Any]) -> Tuple[Any, bool, Optional[str]]:
+    value_type = str(spec.get("type") or "").strip().lower()
+    default = spec.get("default")
+    minimum = spec.get("min")
+    maximum = spec.get("max")
+    canonical = source_kind == "canonical"
+    changed = source_kind != "canonical"
+
+    def _range_fail(kind: str, parsed: Any) -> str:
+        return f"{path}: {kind} out of range ({parsed!r}; expected {minimum!r}..{maximum!r})"
+
+    if raw_value is None and source_kind == "default":
+        return default, changed, None
+
+    if value_type == "bool":
+        if isinstance(raw_value, bool):
+            parsed = raw_value
+        elif isinstance(raw_value, (int, float)) and raw_value in (0, 1):
+            parsed = bool(raw_value)
+            changed = True
+        elif isinstance(raw_value, str):
+            text = raw_value.strip().lower()
+            if text in ("1", "true", "yes", "on"):
+                parsed = True
+                changed = changed or (text != "true")
+            elif text in ("0", "false", "no", "off"):
+                parsed = False
+                changed = changed or (text != "false")
+            else:
+                parsed = None
+        else:
+            parsed = None
+        if parsed is None:
+            msg = f"{path}: expected boolean, got {raw_value!r}"
+            return default, True, msg if canonical else None
+        if not isinstance(raw_value, bool):
+            changed = True
+        return parsed, changed, None
+
+    if value_type == "int":
+        try:
+            if isinstance(raw_value, bool):
+                raise ValueError("bool not allowed for int")
+            parsed = int(raw_value)
+        except Exception:
+            msg = f"{path}: expected integer, got {raw_value!r}"
+            return default, True, msg if canonical else None
+        if minimum is not None and parsed < int(minimum):
+            return default, True, _range_fail("integer", parsed) if canonical else None
+        if maximum is not None and parsed > int(maximum):
+            return default, True, _range_fail("integer", parsed) if canonical else None
+        if parsed != raw_value or not isinstance(raw_value, int) or isinstance(raw_value, bool):
+            changed = True
+        return parsed, changed, None
+
+    if value_type == "float":
+        try:
+            if isinstance(raw_value, bool):
+                raise ValueError("bool not allowed for float")
+            parsed = float(raw_value)
+        except Exception:
+            msg = f"{path}: expected number, got {raw_value!r}"
+            return default, True, msg if canonical else None
+        if minimum is not None and parsed < float(minimum):
+            return default, True, _range_fail("number", parsed) if canonical else None
+        if maximum is not None and parsed > float(maximum):
+            return default, True, _range_fail("number", parsed) if canonical else None
+        if parsed != raw_value or not isinstance(raw_value, (int, float)) or isinstance(raw_value, bool):
+            changed = True
+        return parsed, changed, None
+
+    if value_type == "str":
+        parsed = str(raw_value or "").strip()
+        if not isinstance(raw_value, str):
+            changed = True
+        if isinstance(raw_value, str) and parsed != raw_value:
+            changed = True
+        if not parsed and str(default or "").strip():
+            parsed = str(default).strip()
+            changed = True
+        return parsed, changed, None
+
+    msg = f"{path}: unsupported schema type '{value_type}'"
+    return default, True, msg
+
+
+def _normalize_service_relay_sections(raw_cfg: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[Dict[str, dict], Dict[str, str], List[dict], bool, List[str], List[str]]:
+    warnings: List[str] = []
+    errors: List[str] = []
+    changed = False
+
+    raw_relays_value = raw_cfg.get("service_relays", {})
+    raw_nodes_value = raw_cfg.get("nodes", [])
+    raw_assignments_value = raw_cfg.get("service_assignments", {})
+
+    raw_relays = raw_relays_value if isinstance(raw_relays_value, dict) else {}
+    raw_nodes = raw_nodes_value if isinstance(raw_nodes_value, list) else []
+    raw_assignments = raw_assignments_value if isinstance(raw_assignments_value, dict) else {}
+
+    if "service_relays" in raw_cfg and not isinstance(raw_relays_value, dict):
+        errors.append(f"service_relays: expected object, got {type(raw_relays_value).__name__}")
+    if "nodes" in raw_cfg and not isinstance(raw_nodes_value, list):
+        errors.append(f"nodes: expected list, got {type(raw_nodes_value).__name__}")
+    if "service_assignments" in raw_cfg and not isinstance(raw_assignments_value, dict):
+        errors.append(f"service_assignments: expected object, got {type(raw_assignments_value).__name__}")
+
+    legacy_nodes: Dict[str, str] = {}
+    for idx, node in enumerate(raw_nodes):
+        if not isinstance(node, dict):
+            warnings.append(f"nodes[{idx}] ignored (expected object)")
+            changed = True
+            continue
+        name = str(node.get("name") or "").strip()
+        seed = _normalize_seed_hex(node.get("seed_hex"))
+        if not name:
+            continue
+        if seed:
+            legacy_nodes[name] = seed
+        elif node.get("seed_hex") not in (None, "", seed):
+            warnings.append(f"nodes[{idx}].seed_hex ignored (invalid seed)")
+            changed = True
+
+    service_names = [definition.name for definition in ServiceWatchdog.DEFINITIONS]
+    default_relays = defaults.get("service_relays", {}) if isinstance(defaults.get("service_relays"), dict) else {}
+
+    normalized_relays: Dict[str, dict] = {}
+    normalized_assignments: Dict[str, str] = {}
+    normalized_nodes: List[dict] = []
+    now = int(time.time())
+
+    for service_name in service_names:
+        default_entry = default_relays.get(service_name, {})
+        entry_value = raw_relays.get(service_name, {})
+        entry = entry_value if isinstance(entry_value, dict) else {}
+        if service_name in raw_relays and not isinstance(entry_value, dict):
+            errors.append(f"service_relays.{service_name}: expected object, got {type(entry_value).__name__}")
+
+        seed_source = "default"
+        seed_key = "service_relays.default"
+        raw_seed = entry.get("seed_hex")
+        if raw_seed not in (None, ""):
+            seed_source = "canonical"
+            seed_key = f"service_relays.{service_name}.seed_hex"
+        else:
+            assigned_name = str(raw_assignments.get(service_name) or "").strip()
+            if assigned_name and assigned_name in legacy_nodes:
+                raw_seed = legacy_nodes.get(assigned_name)
+                seed_source = "legacy"
+                seed_key = f"nodes[{assigned_name}]"
+            else:
+                raw_seed = default_entry.get("seed_hex")
+        seed_hex = _normalize_seed_hex(raw_seed)
+        if not seed_hex:
+            if seed_source == "canonical":
+                errors.append(f"{seed_key}: expected 64-char lowercase hex seed")
+            else:
+                seed_hex = _normalize_seed_hex(default_entry.get("seed_hex")) or generate_seed_hex()
+                changed = True
+                warnings.append(f"Generated replacement seed for service '{service_name}'")
+        elif seed_source == "legacy":
+            changed = True
+            warnings.append(f"Promoted legacy seed mapping for service '{service_name}' from nodes/service_assignments")
+
+        relay_name = Router._relay_name_static(service_name, seed_hex)
+        existing_name = str(entry.get("name") or "").strip()
+        if existing_name and existing_name != relay_name:
+            changed = True
+            warnings.append(f"Normalized relay name for service '{service_name}' to '{relay_name}'")
+        elif not existing_name:
+            changed = True
+
+        created_raw = entry.get("created_at", default_entry.get("created_at", now))
+        try:
+            created_at = int(created_raw)
+        except Exception:
+            created_at = now
+            changed = True
+            if "created_at" in entry:
+                warnings.append(f"service_relays.{service_name}.created_at invalid; reset to current time")
+        if created_at <= 0:
+            created_at = now
+            changed = True
+
+        normalized_entry = {
+            "seed_hex": seed_hex,
+            "name": relay_name,
+            "created_at": created_at,
+        }
+        normalized_relays[service_name] = normalized_entry
+        normalized_assignments[service_name] = relay_name
+        normalized_nodes.append({"name": relay_name, "seed_hex": seed_hex})
+
+    for service_name in raw_relays.keys():
+        if service_name not in normalized_relays:
+            warnings.append(f"service_relays.{service_name} removed (unknown service)")
+            changed = True
+
+    return normalized_relays, normalized_assignments, normalized_nodes, changed, warnings, errors
+
+
+def _normalize_router_config(raw_cfg: Any) -> Tuple[dict, bool, List[str], List[str]]:
+    defaults = _default_config()
+    warnings: List[str] = []
+    errors: List[str] = []
+    changed = False
+
+    if not isinstance(raw_cfg, dict):
+        warnings.append("Config root was not an object; replaced with defaults")
+        raw: Dict[str, Any] = {}
+        changed = True
+    else:
+        raw = _json_clone(raw_cfg)
+
+    schema_raw = raw.get("schema", raw.get("schema_version", raw.get("version", ROUTER_CONFIG_SCHEMA_VERSION)))
+    try:
+        schema_in = int(schema_raw)
+    except Exception:
+        schema_in = 0
+        changed = True
+        warnings.append(f"Config schema value {schema_raw!r} invalid; treating as legacy schema 0")
+    if schema_in != ROUTER_CONFIG_SCHEMA_VERSION:
+        changed = True
+        src_tag = ROUTER_CONFIG_MIGRATION_MAP.get(schema_in, f"unknown_v{schema_in}")
+        dst_tag = ROUTER_CONFIG_MIGRATION_MAP.get(ROUTER_CONFIG_SCHEMA_VERSION, f"v{ROUTER_CONFIG_SCHEMA_VERSION}")
+        warnings.append(f"Migrating config schema from {src_tag} to {dst_tag}")
+
+    normalized: Dict[str, Any] = {"schema": ROUTER_CONFIG_SCHEMA_VERSION}
+
+    # Targets
+    raw_targets_value = raw.get("targets", {})
+    raw_targets = raw_targets_value if isinstance(raw_targets_value, dict) else {}
+    if "targets" in raw and not isinstance(raw_targets_value, dict):
+        errors.append(f"targets: expected object, got {type(raw_targets_value).__name__}")
+    targets_out: Dict[str, str] = {}
+    for target_key, default_target in defaults.get("targets", {}).items():
+        source_kind = "default"
+        raw_value = default_target
+        if target_key in raw_targets:
+            source_kind = "canonical"
+            raw_value = raw_targets.get(target_key)
+        else:
+            for legacy_key in ROUTER_TARGET_LEGACY_KEYS.get(target_key, ()):
+                if legacy_key in raw:
+                    source_kind = "legacy"
+                    raw_value = raw.get(legacy_key)
+                    warnings.append(f"Promoted legacy key '{legacy_key}' -> 'targets.{target_key}'")
+                    break
+        text = str(raw_value or "").strip()
+        if not text:
+            if source_kind == "canonical":
+                errors.append(f"targets.{target_key}: expected non-empty URL string")
+                text = str(default_target)
+            else:
+                text = str(default_target)
+                if source_kind == "legacy":
+                    warnings.append(f"targets.{target_key}: invalid legacy value {raw_value!r}; using default")
+            changed = True
+        if source_kind != "canonical":
+            changed = True
+        targets_out[target_key] = text
+    for extra_key, extra_value in raw_targets.items():
+        if extra_key in targets_out:
+            continue
+        text = str(extra_value or "").strip()
+        if not text:
+            warnings.append(f"targets.{extra_key} ignored (empty value)")
+            changed = True
+            continue
+        targets_out[extra_key] = text
+    normalized["targets"] = targets_out
+
+    # Typed sections
+    known_top = {"schema", "schema_version", "version", "targets", "service_relays", "nodes", "service_assignments"}
+    known_top.update(ROUTER_SECTION_FIELD_SPECS.keys())
+    known_legacy_top = set()
+    for section_name, section_spec in ROUTER_SECTION_FIELD_SPECS.items():
+        section_raw_value = raw.get(section_name, {})
+        section_raw = section_raw_value if isinstance(section_raw_value, dict) else {}
+        if section_name in raw and not isinstance(section_raw_value, dict):
+            errors.append(f"{section_name}: expected object, got {type(section_raw_value).__name__}")
+        out_section: Dict[str, Any] = {}
+        allowed_keys = set(section_spec.keys())
+        for field_name, field_spec in section_spec.items():
+            legacy_keys = tuple(field_spec.get("legacy") or ())
+            known_legacy_top.update(legacy_keys)
+            source_kind = "default"
+            raw_value = field_spec.get("default")
+            if field_name in section_raw:
+                raw_value = section_raw.get(field_name)
+                source_kind = "canonical"
+            else:
+                for legacy_key in legacy_keys:
+                    if legacy_key in section_raw:
+                        raw_value = section_raw.get(legacy_key)
+                        source_kind = "legacy"
+                        warnings.append(f"Promoted legacy key '{section_name}.{legacy_key}' -> '{section_name}.{field_name}'")
+                        break
+                    if legacy_key in raw:
+                        raw_value = raw.get(legacy_key)
+                        source_kind = "legacy"
+                        warnings.append(f"Promoted legacy key '{legacy_key}' -> '{section_name}.{field_name}'")
+                        break
+            value, field_changed, field_error = _coerce_config_value(
+                f"{section_name}.{field_name}",
+                raw_value,
+                source_kind,
+                field_spec,
+            )
+            if field_error:
+                errors.append(field_error)
+            if source_kind == "legacy" and field_error is None:
+                changed = True
+            if source_kind == "legacy" and field_error is not None:
+                warnings.append(f"{section_name}.{field_name}: invalid promoted legacy value; using default")
+            if field_changed:
+                changed = True
+            out_section[field_name] = value
+
+        for raw_key in section_raw.keys():
+            if raw_key in allowed_keys:
+                continue
+            if any(raw_key == lk for spec in section_spec.values() for lk in tuple(spec.get("legacy") or ())):
+                continue
+            warnings.append(f"{section_name}.{raw_key} ignored (unknown key)")
+            changed = True
+
+        normalized[section_name] = out_section
+
+    known_legacy_top.update(key for values in ROUTER_TARGET_LEGACY_KEYS.values() for key in values)
+    for top_key in raw.keys():
+        if top_key in known_top or top_key in known_legacy_top:
+            continue
+        warnings.append(f"{top_key} ignored (unknown top-level key)")
+        changed = True
+
+    relays, assignments, nodes, relay_changed, relay_warnings, relay_errors = _normalize_service_relay_sections(raw, defaults)
+    normalized["service_relays"] = relays
+    normalized["service_assignments"] = assignments
+    normalized["nodes"] = nodes
+    if relay_changed:
+        changed = True
+    warnings.extend(relay_warnings)
+    errors.extend(relay_errors)
+
+    return normalized, changed, warnings, errors
+
+
 def _default_config() -> dict:
     service_relays = {}
     nodes = []
@@ -1140,13 +2284,26 @@ def _default_config() -> dict:
         assignments[svc] = name
 
     return {
-        "schema": 1,
+        "schema": ROUTER_CONFIG_SCHEMA_VERSION,
         "targets": targets,
+        "api": {
+            "enable": True,
+            "host": "127.0.0.1",
+            "port": 9071,
+        },
+        "nkn": {
+            "enable": True,
+            "dm_retries": 2,
+            "resolve_timeout_seconds": 20,
+            "rpc_max_request_b": 512 * 1024,
+            "rpc_max_response_b": 2 * 1024 * 1024,
+        },
         "http": {
             "workers": 4,
             "max_body_b": 2 * 1024 * 1024,
             "verify_default": True,
             "chunk_raw_b": 12 * 1024,
+            "chunk_upload_b": 600 * 1024,
             "heartbeat_s": 10,
             "batch_lines": 24,
             "batch_latency": 0.08,
@@ -1160,6 +2317,30 @@ def _default_config() -> dict:
             "self_probe_ms": 12000,
             "self_probe_fails": 3,
         },
+        "watchdog": {
+            "port_reclaim_enabled": True,
+            "port_reclaim_force": False,
+            "activation_timeout_seconds": 30.0,
+            "activation_stability_seconds": 6.0,
+            "health_check_interval_seconds": 2.0,
+            "health_failure_threshold": 3,
+            "reclaim_sigint_wait_seconds": 0.7,
+            "reclaim_sigterm_wait_seconds": 1.0,
+            "reclaim_sigkill_wait_seconds": 1.0,
+        },
+        "cloudflared": {
+            "enable": False,
+            "auto_install_cloudflared": False,
+            "binary_path": "",
+            "protocol": "http2",
+            "restart_initial_seconds": 2.0,
+            "restart_cap_seconds": 90.0,
+        },
+        "feature_flags": {
+            "router_control_plane_api": True,
+            "resolver_auto_apply": True,
+            "cloudflared_manager": False,
+        },
         "service_relays": service_relays,
         "nodes": nodes,
         "service_assignments": assignments,
@@ -1167,36 +2348,37 @@ def _default_config() -> dict:
 
 
 def load_config() -> dict:
+    created_default = False
     if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(_default_config(), indent=2))
+        default_cfg = _default_config()
+        CONFIG_PATH.write_text(json.dumps(default_cfg, indent=2))
+        created_default = True
         print(f"→ wrote default config {CONFIG_PATH}")
-    cfg = json.loads(CONFIG_PATH.read_text())
-    if "schema" not in cfg:
-        cfg["schema"] = 1
-    # ensure targets exist
-    cfg.setdefault("targets", DEFAULT_TARGETS.copy())
-    http = cfg.setdefault("http", {})
-    http.setdefault("workers", 4)
-    http.setdefault("max_body_b", 2 * 1024 * 1024)
-    http.setdefault("verify_default", True)
-    http.setdefault("chunk_raw_b", 12 * 1024)
-    http.setdefault("chunk_upload_b", 600 * 1024)
-    http.setdefault("heartbeat_s", 10)
-    http.setdefault("batch_lines", 24)
-    http.setdefault("batch_latency", 0.08)
-    http.setdefault("retries", 4)
-    http.setdefault("retry_backoff", 0.5)
-    http.setdefault("retry_cap", 4.0)
-    bridge = cfg.setdefault("bridge", {})
-    bridge.setdefault("num_subclients", 2)
-    bridge.setdefault("seed_ws", "")
-    bridge.setdefault("self_probe_ms", 12000)
-    bridge.setdefault("self_probe_fails", 3)
-    nodes = cfg.setdefault("nodes", [])
-    if not nodes:
-        nodes.extend(_default_config()["nodes"])
-    cfg.setdefault("service_assignments", {})
-    return cfg
+
+    try:
+        raw_cfg = json.loads(CONFIG_PATH.read_text())
+    except Exception as exc:
+        raise SystemExit(f"Invalid JSON in config {CONFIG_PATH}: {exc}") from exc
+
+    normalized, changed, warnings, errors = _normalize_router_config(raw_cfg)
+    for warning in warnings:
+        LOGGER.warning("Config migration: %s", warning)
+
+    if errors:
+        details = "\n".join(f"- {item}" for item in errors)
+        raise SystemExit(
+            f"Config validation failed for {CONFIG_PATH}:\n{details}\n"
+            "Fix the listed keys or remove the file to regenerate defaults."
+        )
+
+    if changed or created_default:
+        try:
+            CONFIG_PATH.write_text(json.dumps(normalized, indent=2))
+            LOGGER.info("Config normalized and saved to %s", CONFIG_PATH)
+        except Exception as exc:
+            raise SystemExit(f"Failed to persist normalized config {CONFIG_PATH}: {exc}") from exc
+
+    return normalized
 
 
 # ──────────────────────────────────────────────────────────────
@@ -3822,7 +5004,10 @@ class RelayNode:
     def __init__(self, node_cfg: dict, global_cfg: dict, ui: UnifiedUI,
                  assignment_lookup: Optional[Callable[[str], Tuple[Optional[str], Optional[str]]]],
                  address_callback: Optional[Callable[[str, Optional[str]], None]],
-                 rate_limit_callback: Optional[Callable[[str, str], bool]] = None):
+                 rate_limit_callback: Optional[Callable[[str, str], bool]] = None,
+                 router_event_handler: Optional[Callable[[str, str, dict, "RelayNode"], bool]] = None,
+                 nkn_traffic_callback: Optional[Callable[[str, str, dict, str], None]] = None,
+                 endpoint_usage_callback: Optional[Callable[[str, List[str]], None]] = None):
         self.cfg = node_cfg
         self.global_cfg = global_cfg
         self.ui = ui
@@ -3856,6 +5041,9 @@ class RelayNode:
         self.assignment_lookup = assignment_lookup or self._default_assignment_lookup
         self.address_callback = address_callback or (lambda _node, _addr: None)
         self.rate_limit_callback = rate_limit_callback
+        self.router_event_handler = router_event_handler
+        self.nkn_traffic_callback = nkn_traffic_callback
+        self.endpoint_usage_callback = endpoint_usage_callback
         self.primary_service = node_cfg.get("primary_service") or self.node_id
         aliases = node_cfg.get("aliases") or []
         alias_map = {alias.lower(): self.primary_service for alias in aliases}
@@ -3926,6 +5114,31 @@ class RelayNode:
         self.current_address = addr
         self.address_callback(self.node_id, addr)
 
+    def _notify_nkn_traffic(self, direction: str, peer: str, payload: dict, event_name: str = "") -> None:
+        cb = self.nkn_traffic_callback
+        if not callable(cb):
+            return
+        try:
+            cb(direction, peer, payload if isinstance(payload, dict) else {}, event_name or "")
+        except Exception:
+            pass
+
+    def _notify_endpoint_usage(self, peer: str, labels: List[str]) -> None:
+        cb = self.endpoint_usage_callback
+        if not callable(cb) or not labels:
+            return
+        try:
+            cb(peer, labels)
+        except Exception:
+            pass
+
+    def _dm(self, target: str, payload: dict, opts: Optional[dict] = None) -> None:
+        self._notify_nkn_traffic("out", target, payload if isinstance(payload, dict) else {}, str((payload or {}).get("event") or ""))
+        if opts is None:
+            self.bridge.dm(target, payload)
+            return
+        self.bridge.dm(target, payload, opts)
+
     def _handle_dm(self, src: str, body: dict):
         if not isinstance(body, dict):
             return
@@ -3939,10 +5152,29 @@ class RelayNode:
                 coarse_service = "web_scrape"
             elif event.startswith("relay.") or event.startswith("http."):
                 coarse_service = self._canonical_service(body.get("service") or body.get("target"))
+        router_events = {
+            "resolve_tunnels",
+            "resolve_tunnels_result",
+            "service_rpc_request",
+            "service_rpc_result",
+        }
+        if event not in router_events:
+            self._notify_nkn_traffic("in", src, body, event)
         self.ui.bump(self.node_id, "IN", f"{event or '<unknown>'} {rid}")
         self._record_flow(src, self.node_id, f"{event or '<unknown>'} {rid}", service=coarse_service, channel=src)
+        if self.router_event_handler and event in (
+            "resolve_tunnels",
+            "resolve_tunnels_result",
+            "service_rpc_request",
+            "service_rpc_result",
+        ):
+            try:
+                if self.router_event_handler(event, src, body, self):
+                    return
+            except Exception as exc:
+                self.ui.bump(self.node_id, "ERR", f"router_event_handler: {exc}")
         if event in ("relay.ping", "ping"):
-            self.bridge.dm(src, {"event": "relay.pong", "ts": int(time.time() * 1000), "addr": self.bridge.addr})
+            self._dm(src, {"event": "relay.pong", "ts": int(time.time() * 1000), "addr": self.bridge.addr})
             return
         if event in ("relay.info", "info"):
             assign_map = self.assignment_lookup("__map__") if self.assignment_lookup else {}
@@ -3956,7 +5188,7 @@ class RelayNode:
                 "verify_default": self.verify_default,
                 "assignments": assign_map,
             }
-            self.bridge.dm(src, info)
+            self._dm(src, info)
             return
         if event in ("relay.health", "health"):
             assign_map = self.assignment_lookup("__map__") if self.assignment_lookup else {}
@@ -4015,7 +5247,7 @@ class RelayNode:
                 "port_isolation": self.ui.port_isolation_enabled,
                 "services": services_payload,
             }
-            self.bridge.dm(src, health, DM_OPTS_SINGLE)
+            self._dm(src, health, DM_OPTS_SINGLE)
             return
         try:
             if event == "asr.start":
@@ -4086,7 +5318,7 @@ class RelayNode:
                     self._enqueue_request(src, rid, req)
                 return
         except Exception as e:
-            self.bridge.dm(src, {
+            self._dm(src, {
                 "event": "relay.response",
                 "id": rid,
                 "ok": False,
@@ -4189,7 +5421,7 @@ class RelayNode:
             }
             if not addr:
                 payload["error"] = "service currently offline"
-            self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+            self._dm(src, payload, DM_OPTS_SINGLE)
             self.ui.bump(self.node_id, "OUT", f"redirect {service_name} -> {node_id}")
             self._record_flow(src, node_id, f"redirect {service_name} {rid}", service=service_name, channel=src)
             return False
@@ -4531,7 +5763,7 @@ class RelayNode:
                     blocked=blocked,
                 )
 
-                self.bridge.dm(src, {
+                self._dm(src, {
                     "event": "relay.response",
                     "id": rid,
                     "ok": False,
@@ -4566,6 +5798,13 @@ class RelayNode:
             verify = False
 
         service_name = self._canonical_service(req.get("service") or req.get("target")) or self.primary_service
+        endpoint_label = ""
+        with contextlib.suppress(Exception):
+            parsed_endpoint = urllib.parse.urlparse(url)
+            endpoint_base = f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}" if parsed_endpoint.netloc else url
+            endpoint_label = f"{service_name}:{endpoint_base}"
+        if endpoint_label:
+            self._notify_endpoint_usage(src or "unknown", [endpoint_label])
 
         # Look up service definition from the watchdog, not from RelayNode
         svc_def = None
@@ -4775,7 +6014,7 @@ class RelayNode:
             "truncated": False,
             "error": message,
         }
-        self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+        self._dm(src, payload, DM_OPTS_SINGLE)
         self.ui.bump(self.node_id, "ERR", f"upload {rid}: {message}")
 
     def _log_upload(self, rid: str, text: str) -> None:
@@ -4794,7 +6033,7 @@ class RelayNode:
             "total": entry.get("total") or len(entry.get("chunks") or []),
             "got": entry.get("got") or 0,
         }
-        self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+        self._dm(src, payload, DM_OPTS_SINGLE)
         self._log_upload(rid, f"request missing {len(missing)}")
 
     def _handle_upload_begin(self, src: str, rid: str, body: dict) -> None:
@@ -4960,7 +6199,7 @@ class RelayNode:
                 "seq": seq,
                 "b64": b64,
             }
-            self.bridge.dm(src, payload, DM_OPTS_STREAM)
+            self._dm(src, payload, DM_OPTS_STREAM)
 
     def _upload_cleanup_loop(self) -> None:
         """Sweep unfinished uploads so they don't stall forever."""
@@ -5063,7 +6302,7 @@ class RelayNode:
             payload["body_b64"] = base64.b64encode(raw).decode("ascii")
         else:
             payload["body_b64"] = base64.b64encode(raw).decode("ascii")
-        self.bridge.dm(src, payload, DM_OPTS_SINGLE)
+        self._dm(src, payload, DM_OPTS_SINGLE)
         # Track stats with bytes sent and NKN address
         bytes_sent = len(raw)
         self.ui.bump(self.node_id, "OUT", f"{payload['status']} {rid}", nkn_addr=src, bytes_sent=bytes_sent)
@@ -5162,7 +6401,7 @@ class RelayNode:
             "filename": filename,
             "ts": int(time.time() * 1000),
         }
-        self.bridge.dm(src, begin_payload, DM_OPTS_STREAM)
+        self._dm(src, begin_payload, DM_OPTS_STREAM)
         self.ui.bump(self.node_id, "OUT", f"stream begin {rid}")
 
         if mode == "lines":
@@ -5194,7 +6433,7 @@ class RelayNode:
                 "id": rid,
                 "lines": batch,
             }
-            self.bridge.dm(src, payload, DM_OPTS_STREAM)
+            self._dm(src, payload, DM_OPTS_STREAM)
             batch = []
             last_flush = time.time()
 
@@ -5230,7 +6469,7 @@ class RelayNode:
                         ):
                             flush_batch()
                 if time.time() >= hb_deadline:
-                    self.bridge.dm(
+                    self._dm(
                         src,
                         {
                             "event": "relay.response.keepalive",
@@ -5272,7 +6511,7 @@ class RelayNode:
         }
         if error_msg:
             end_payload["error"] = error_msg
-        self.bridge.dm(src, end_payload, DM_OPTS_STREAM)
+        self._dm(src, end_payload, DM_OPTS_STREAM)
         if ok:
             self.ui.bump(self.node_id, "OUT", f"stream end {rid}")
         else:
@@ -5290,7 +6529,7 @@ class RelayNode:
             for chunk in resp.iter_content(chunk_size=self.chunk_raw_b):
                 if not chunk:
                     if time.time() - last_send >= self.heartbeat_s:
-                        self.bridge.dm(src, {"event": "relay.response.keepalive", "id": rid, "ts": int(time.time() * 1000)}, DM_OPTS_STREAM)
+                        self._dm(src, {"event": "relay.response.keepalive", "id": rid, "ts": int(time.time() * 1000)}, DM_OPTS_STREAM)
                         last_send = time.time()
                     continue
                 total += len(chunk)
@@ -5303,10 +6542,10 @@ class RelayNode:
                     "b64": b64,
                 }
                 cache_entry["chunks"][seq] = b64
-                self.bridge.dm(src, payload, DM_OPTS_STREAM)
+                self._dm(src, payload, DM_OPTS_STREAM)
                 last_send = time.time()
         except Exception as e:
-            self.bridge.dm(src, {
+            self._dm(src, {
                 "event": "relay.response.end",
                 "id": rid,
                 "ok": False,
@@ -5318,7 +6557,7 @@ class RelayNode:
             self.ui.bump(self.node_id, "ERR", f"stream chunks {e}")
             self.response_cache.pop(rid, None)
             return
-        self.bridge.dm(src, {
+        self._dm(src, {
             "event": "relay.response.end",
             "id": rid,
             "ok": True,
@@ -5352,29 +6591,73 @@ class Router:
         return f"{slug}-relay-{ident}" if ident else f"{slug}-relay"
 
     def __init__(self, cfg: dict, use_ui: bool):
-        self.cfg = cfg
+        self.cfg: Dict[str, Any] = {}
+        self.targets: Dict[str, str] = {}
+        self.feature_flags: Dict[str, bool] = {
+            "router_control_plane_api": True,
+            "resolver_auto_apply": True,
+            "cloudflared_manager": False,
+        }
+        self.api_enabled = True
+        self.api_host = "127.0.0.1"
+        self.api_port = 9071
+        self.nkn_settings: Dict[str, Any] = {}
+        self.cloudflared_enabled = False
+        self.cloudflared_cfg: Dict[str, Any] = {}
+        self.config_dirty = False
+
         self.use_ui = use_ui
+        self.startup_time = time.time()
         self.ui = EnhancedUI(use_ui, STATE_CONFIG_PATH)
         self.ui.set_action_handler(self.handle_ui_action)
         ensure_bridge()
-        http_cfg = self.cfg.get("http", {})
-        if http_cfg:
-            kb = int(http_cfg.get("chunk_upload_b", 600 * 1024) // 1024)
-            self.ui.set_chunk_upload_kb(kb)
+        self._apply_runtime_config(cfg)
 
-        # Shared target endpoints (defaults merged with config; kept shared so detections propagate)
-        self.targets: Dict[str, str] = self.cfg.setdefault("targets", {})
-        for k, v in DEFAULT_TARGETS.items():
-            self.targets.setdefault(k, v)
-
-        self.watchdog = ServiceWatchdog(BASE_DIR)
+        self.watchdog = ServiceWatchdog(BASE_DIR, watchdog_config=self.cfg.get("watchdog", {}))
         self.watchdog.ensure_sources(service_config=self.ui.service_config)
+        for svc, enabled in self.watchdog.desired_state().items():
+            self.ui.service_config[svc] = bool(enabled)
         self.latest_service_status: Dict[str, dict] = {
             snap["name"]: snap for snap in self.watchdog.get_snapshot()
         }
+        self.request_counter = {"value": 0}
+        self.snapshot_lock = threading.Lock()
+        self.snapshot_cache: Dict[str, Any] = {"ts_ms": 0, "services": {}, "resolved": {}, "stale": False}
+        self.last_good_service_payloads: Dict[str, dict] = {}
+        self.snapshot_failures: Dict[str, int] = {}
+        self.pending_resolves: Dict[str, dict] = {}
+        self.pending_resolves_lock = threading.Lock()
+        self.resolve_sweeper_stop = threading.Event()
+        self.resolve_sweeper_thread: Optional[threading.Thread] = None
+        self.telemetry_lock = threading.Lock()
+        self.telemetry_state: Dict[str, Any] = {
+            "inbound_messages": 0,
+            "outbound_messages": 0,
+            "inbound_bytes": 0,
+            "outbound_bytes": 0,
+            "resolve_requests_in": 0,
+            "resolve_requests_out": 0,
+            "resolve_success_out": 0,
+            "resolve_fail_out": 0,
+            "rpc_requests_in": 0,
+            "rpc_requests_out": 0,
+            "rpc_success_out": 0,
+            "rpc_fail_out": 0,
+            "peer_usage": {},
+            "endpoint_hits": {},
+            "history": deque(maxlen=240),
+        }
+        self.activity_log: Deque[dict] = deque(maxlen=240)
+        self.api_server = None
+        self.api_thread: Optional[threading.Thread] = None
+        self.cloudflared_manager = (
+            CloudflaredManager(WATCHDOG_RUNTIME_ROOT / "cloudflared", self.cloudflared_cfg, logger=LOGGER.info)
+            if self.cloudflared_enabled
+            else None
+        )
 
         self.assignment_lock = threading.Lock()
-        self.config_dirty = False
+        self.config_dirty = bool(self.config_dirty)
         self.rate_limit_state: Dict[str, dict] = {}
         self.service_relays = self._ensure_service_relays()
         self.service_assignments = self._init_assignments()
@@ -5399,6 +6682,1313 @@ class Router:
             self.node_addresses[node.node_id] = None
 
         self._refresh_node_assignments()
+
+    # Control plane + snapshot -------------------------------------------------
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        return default
+
+    @staticmethod
+    def _as_int(value: Any, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+        try:
+            out = int(value)
+        except Exception:
+            out = int(default)
+        if minimum is not None:
+            out = max(minimum, out)
+        if maximum is not None:
+            out = min(maximum, out)
+        return out
+
+    @staticmethod
+    def _as_float(value: Any, default: float, minimum: Optional[float] = None, maximum: Optional[float] = None) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            out = float(default)
+        if minimum is not None:
+            out = max(float(minimum), out)
+        if maximum is not None:
+            out = min(float(maximum), out)
+        return out
+
+    def _apply_runtime_config(self, cfg: dict) -> None:
+        normalized, changed, warnings, errors = _normalize_router_config(cfg)
+        for warning in warnings:
+            LOGGER.warning("Runtime config apply: %s", warning)
+        if errors:
+            details = "; ".join(errors)
+            raise ValueError(f"Runtime config apply failed: {details}")
+
+        next_cfg = normalized
+        next_targets = dict(next_cfg.get("targets", {}))
+        for key, value in DEFAULT_TARGETS.items():
+            next_targets.setdefault(key, value)
+        next_cfg["targets"] = next_targets
+
+        api_cfg = dict(next_cfg.get("api", {}))
+        next_api_enabled = self._as_bool(api_cfg.get("enable"), True)
+        next_api_host = str(api_cfg.get("host") or "127.0.0.1").strip() or "127.0.0.1"
+        next_api_port = self._as_int(api_cfg.get("port"), 9071, minimum=1, maximum=65535)
+
+        nkn_cfg = dict(next_cfg.get("nkn", {}))
+        next_nkn_settings = {
+            "enable": self._as_bool(nkn_cfg.get("enable"), True),
+            "dm_retries": self._as_int(nkn_cfg.get("dm_retries"), 2, minimum=1, maximum=20),
+            "resolve_timeout_seconds": self._as_int(nkn_cfg.get("resolve_timeout_seconds"), 20, minimum=2, maximum=120),
+            "rpc_max_request_b": self._as_int(nkn_cfg.get("rpc_max_request_b"), 512 * 1024, minimum=1024),
+            "rpc_max_response_b": self._as_int(nkn_cfg.get("rpc_max_response_b"), 2 * 1024 * 1024, minimum=1024),
+        }
+
+        cloudflared_cfg = dict(next_cfg.get("cloudflared", {}))
+        next_cloudflared_enabled = self._as_bool(cloudflared_cfg.get("enable"), False)
+        feature_flags_cfg = dict(next_cfg.get("feature_flags", {}))
+        next_feature_flags = {
+            "router_control_plane_api": self._as_bool(feature_flags_cfg.get("router_control_plane_api"), True),
+            "resolver_auto_apply": self._as_bool(feature_flags_cfg.get("resolver_auto_apply"), True),
+            "cloudflared_manager": self._as_bool(feature_flags_cfg.get("cloudflared_manager"), False),
+        }
+        next_cfg["feature_flags"] = next_feature_flags
+        next_api_enabled = bool(next_api_enabled and next_feature_flags["router_control_plane_api"])
+        next_cloudflared_enabled = bool(next_cloudflared_enabled and next_feature_flags["cloudflared_manager"])
+
+        http_cfg = dict(next_cfg.get("http", {}))
+        chunk_upload_b = self._as_int(http_cfg.get("chunk_upload_b"), 600 * 1024, minimum=4 * 1024)
+        next_chunk_upload_kb = max(4, chunk_upload_b // 1024)
+
+        # Atomic assignment of runtime settings after full validation.
+        self.cfg = next_cfg
+        self.targets = next_targets
+        self.api_enabled = next_api_enabled
+        self.api_host = next_api_host
+        self.api_port = next_api_port
+        self.feature_flags = next_feature_flags
+        self.nkn_settings = next_nkn_settings
+        self.cloudflared_enabled = next_cloudflared_enabled
+        self.cloudflared_cfg = cloudflared_cfg
+
+        if getattr(self, "ui", None):
+            self.ui.set_chunk_upload_kb(next_chunk_upload_kb)
+
+        if changed:
+            self.config_dirty = True
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        host = (host or "").strip().lower()
+        return host in ("127.0.0.1", "localhost", "::1")
+
+    @staticmethod
+    def _canonical_router_service(hint: Any) -> str:
+        text = str(hint or "").strip().lower()
+        if not text:
+            return ""
+        if text in SERVICE_TARGETS:
+            return text
+        for svc_name, info in SERVICE_TARGETS.items():
+            aliases = info.get("aliases", []) if isinstance(info, dict) else []
+            for alias in aliases:
+                if str(alias or "").strip().lower() == text:
+                    return svc_name
+        return text
+
+    def _router_network_urls(self) -> Dict[str, str]:
+        host = self.api_host
+        port = self.api_port
+        local_base = f"http://127.0.0.1:{port}"
+        urls = {"local": local_base}
+        if host and host not in ("127.0.0.1", "localhost", "::1"):
+            urls["bind"] = f"http://{host}:{port}"
+        if host in ("0.0.0.0", "::", ""):
+            lan_ip = self._detect_lan_ip()
+            if lan_ip:
+                urls["lan"] = f"http://{lan_ip}:{port}"
+        return urls
+
+    def _detect_lan_ip(self) -> str:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            sock.close()
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        return ""
+
+    def _deepcopy_json(self, payload: Any) -> Any:
+        try:
+            return json.loads(json.dumps(payload))
+        except Exception:
+            return payload
+
+    def _redact_public_payload(self, payload: Any) -> Any:
+        copied = self._deepcopy_json(payload)
+        return _redact_sensitive_fields(copied)
+
+    def _probe_json(self, base_url: str, path: str, timeout_s: float = 2.5) -> Dict[str, Any]:
+        started = time.time()
+        full = base_url.rstrip("/") + path
+        out: Dict[str, Any] = {
+            "url": full,
+            "path": path,
+            "ok": False,
+            "status": 0,
+            "latency_ms": 0,
+            "json": None,
+            "error": "",
+        }
+        try:
+            resp = requests.get(full, timeout=timeout_s)
+            out["status"] = int(resp.status_code)
+            out["latency_ms"] = round((time.time() - started) * 1000, 2)
+            if resp.status_code < 400 or resp.status_code in (401, 403):
+                try:
+                    out["json"] = resp.json()
+                    out["ok"] = True
+                except Exception as exc:
+                    if resp.status_code in (401, 403):
+                        out["json"] = {"status": "unauthorized", "code": int(resp.status_code)}
+                        out["ok"] = True
+                    else:
+                        out["error"] = f"json_parse: {exc}"
+            else:
+                out["error"] = f"http_{resp.status_code}"
+        except Exception as exc:
+            out["latency_ms"] = round((time.time() - started) * 1000, 2)
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    def _service_target_base(self, service_name: str, info: Optional[Dict[str, Any]] = None) -> str:
+        svc_info = info if isinstance(info, dict) else (SERVICE_TARGETS.get(service_name) or {})
+        target_key = str(svc_info.get("target") or service_name)
+        return (
+            self.targets.get(target_key)
+            or self.cfg.get("targets", {}).get(target_key)
+            or svc_info.get("endpoint")
+            or DEFAULT_TARGETS.get(target_key, "")
+        )
+
+    def _sync_cloudflared_tunnels(self) -> None:
+        manager = self.cloudflared_manager
+        if not manager:
+            return
+        for service_name, info in SERVICE_TARGETS.items():
+            base_url = str(self._service_target_base(service_name, info) or "").strip()
+            status = self.latest_service_status.get(service_name, {})
+            running = bool(status.get("running"))
+            if running and base_url:
+                manager.set_service_target(service_name, base_url, enabled=True)
+            else:
+                manager.clear_service(service_name)
+
+    def _cloudflared_tunnel_state(self, service_name: str) -> Dict[str, Any]:
+        manager = self.cloudflared_manager
+        if not manager:
+            return {}
+        return manager.get_state(service_name)
+
+    def _default_fallback_payload(self, base_url: str, tunnel_url: str = "") -> Dict[str, Any]:
+        selected = "cloudflare" if tunnel_url else "local"
+        local_payload = {
+            "state": "active" if base_url else "inactive",
+            "base_url": base_url,
+            "http_endpoint": base_url,
+            "ws_endpoint": "",
+        }
+        cloudflare_payload = {
+            "state": "active" if tunnel_url else "inactive",
+            "public_base_url": tunnel_url or "",
+            "http_endpoint": tunnel_url or "",
+            "ws_endpoint": tunnel_url.replace("https://", "wss://") if tunnel_url else "",
+            "error": "",
+        }
+        return {
+            "selected_transport": selected,
+            "order": ["cloudflare", "upnp", "nats", "nkn", "local"],
+            "cloudflare": cloudflare_payload,
+            "upnp": {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""},
+            "nats": {"state": "inactive", "broker_url": "", "subject": "", "error": ""},
+            "nkn": {"state": "inactive", "nkn_address": "", "topic": "", "error": ""},
+            "local": local_payload,
+        }
+
+    def _normalize_service_payload(
+        self,
+        service_name: str,
+        target_key: str,
+        base_url: str,
+        probes: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        router_info = probes.get("/router_info", {}).get("json")
+        tunnel_info = probes.get("/tunnel_info", {}).get("json")
+        health_payload = None
+        for hp in ("/health", "/healthz", "/_health", "/api/v1/health"):
+            payload = probes.get(hp, {}).get("json")
+            if isinstance(payload, dict):
+                health_payload = payload
+                break
+        out: Dict[str, Any] = {
+            "status": "error",
+            "service": target_key,
+            "watchdog_service": service_name,
+            "transport": "local",
+            "base_url": base_url,
+            "http_endpoint": base_url,
+            "ws_endpoint": "",
+            "local": {
+                "base_url": base_url,
+                "health_url": f"{base_url.rstrip('/')}/health" if base_url else "",
+                "listen_host": "127.0.0.1",
+            },
+            "tunnel": {
+                "state": "inactive",
+                "tunnel_url": "",
+                "stale_tunnel_url": "",
+                "error": "",
+            },
+            "fallback": self._default_fallback_payload(base_url),
+            "security": {},
+            "routes": {},
+            "probe": probes,
+        }
+
+        cloudflared_state = self._cloudflared_tunnel_state(service_name)
+        if isinstance(cloudflared_state, dict) and cloudflared_state:
+            tunnel_url = str(cloudflared_state.get("active_url") or "")
+            stale_tunnel_url = str(cloudflared_state.get("stale_url") or "")
+            tunnel_err = str(cloudflared_state.get("last_error") or "")
+            tunnel_state = str(cloudflared_state.get("state") or "inactive")
+            tunnel_running = bool(cloudflared_state.get("running", False))
+            out["tunnel"] = {
+                "state": tunnel_state,
+                "running": tunnel_running,
+                "tunnel_url": tunnel_url,
+                "stale_tunnel_url": stale_tunnel_url,
+                "error": tunnel_err,
+                "restarts": int(cloudflared_state.get("restarts") or 0),
+                "rate_limited": bool(cloudflared_state.get("rate_limited", False)),
+            }
+            fallback = out.get("fallback") if isinstance(out.get("fallback"), dict) else self._default_fallback_payload(base_url)
+            cloudflare_fallback = fallback.get("cloudflare") if isinstance(fallback.get("cloudflare"), dict) else {}
+            cloudflare_fallback.update(
+                {
+                    "state": tunnel_state,
+                    "public_base_url": tunnel_url,
+                    "http_endpoint": tunnel_url,
+                    "ws_endpoint": tunnel_url.replace("https://", "wss://") if tunnel_url else "",
+                    "stale_tunnel_url": stale_tunnel_url,
+                    "error": tunnel_err,
+                    "restarts": int(cloudflared_state.get("restarts") or 0),
+                    "rate_limited": bool(cloudflared_state.get("rate_limited", False)),
+                }
+            )
+            fallback["cloudflare"] = cloudflare_fallback
+            if tunnel_url:
+                fallback["selected_transport"] = "cloudflare"
+            out["fallback"] = fallback
+            if tunnel_url:
+                out["transport"] = "cloudflare"
+                out["base_url"] = tunnel_url
+                out["http_endpoint"] = tunnel_url
+                out["ws_endpoint"] = tunnel_url.replace("https://", "wss://")
+
+        if isinstance(router_info, dict):
+            out["status"] = str(router_info.get("status") or "success")
+            out["service"] = str(router_info.get("service") or target_key)
+            out["transport"] = str(router_info.get("transport") or out["transport"])
+            out["base_url"] = str(router_info.get("base_url") or out["base_url"])
+            out["http_endpoint"] = str(router_info.get("http_endpoint") or out["http_endpoint"])
+            out["ws_endpoint"] = str(router_info.get("ws_endpoint") or out["ws_endpoint"])
+            if isinstance(router_info.get("local"), dict):
+                out["local"] = router_info.get("local")
+            if isinstance(router_info.get("tunnel"), dict):
+                out["tunnel"] = router_info.get("tunnel")
+            if isinstance(router_info.get("fallback"), dict):
+                out["fallback"] = router_info.get("fallback")
+            if isinstance(router_info.get("security"), dict):
+                out["security"] = router_info.get("security")
+            if isinstance(router_info.get("routes"), dict):
+                out["routes"] = router_info.get("routes")
+
+        if isinstance(tunnel_info, dict):
+            tun = out.get("tunnel", {})
+            if not isinstance(tun, dict):
+                tun = {}
+            tunnel_url = str(tunnel_info.get("tunnel_url") or tun.get("tunnel_url") or "")
+            stale_tunnel_url = str(tunnel_info.get("stale_tunnel_url") or tun.get("stale_tunnel_url") or "")
+            tunnel_err = str(tunnel_info.get("error") or tun.get("error") or "")
+            running = bool(tunnel_info.get("running", False))
+            state = "active" if (running and tunnel_url) else ("stale" if stale_tunnel_url else ("error" if tunnel_err else "inactive"))
+            tun.update({
+                "state": state,
+                "tunnel_url": tunnel_url,
+                "stale_tunnel_url": stale_tunnel_url,
+                "error": tunnel_err,
+            })
+            out["tunnel"] = tun
+            if isinstance(tunnel_info.get("fallback"), dict):
+                out["fallback"] = tunnel_info.get("fallback")
+            if tunnel_url and out.get("transport") in ("local", "", None):
+                out["transport"] = "cloudflare"
+                out["base_url"] = tunnel_url
+                out["http_endpoint"] = tunnel_url
+
+        if isinstance(health_payload, dict):
+            status = health_payload.get("status")
+            ok = health_payload.get("ok")
+            if status:
+                out["status"] = str(status)
+            elif ok is True:
+                out["status"] = "ok"
+            out["health"] = health_payload
+        elif any(p.get("ok") for p in probes.values()):
+            out["status"] = "ok"
+
+        fallback = out.get("fallback") if isinstance(out.get("fallback"), dict) else self._default_fallback_payload(base_url)
+        fallback.setdefault("order", ["cloudflare", "upnp", "nats", "nkn", "local"])
+        fallback.setdefault("cloudflare", {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""})
+        fallback.setdefault("upnp", {"state": "inactive", "public_base_url": "", "http_endpoint": "", "ws_endpoint": "", "error": ""})
+        fallback.setdefault("nats", {"state": "inactive", "broker_url": "", "subject": "", "error": ""})
+        fallback.setdefault("nkn", {"state": "inactive", "nkn_address": "", "topic": "", "error": ""})
+        fallback.setdefault(
+            "local",
+            {
+                "state": "active" if base_url else "inactive",
+                "base_url": base_url,
+                "http_endpoint": base_url,
+                "ws_endpoint": "",
+            },
+        )
+
+        selected = str(fallback.get("selected_transport") or "").strip().lower()
+        if selected not in {"cloudflare", "upnp", "nats", "nkn", "local"}:
+            selected = ""
+        if not selected:
+            cloudflare_url = str((fallback.get("cloudflare") or {}).get("public_base_url") or "")
+            upnp_url = str((fallback.get("upnp") or {}).get("public_base_url") or "")
+            nats_url = str((fallback.get("nats") or {}).get("public_base_url") or "")
+            nkn_url = str((fallback.get("nkn") or {}).get("public_base_url") or "")
+            if cloudflare_url:
+                selected = "cloudflare"
+            elif upnp_url:
+                selected = "upnp"
+            elif nats_url:
+                selected = "nats"
+            elif nkn_url:
+                selected = "nkn"
+            else:
+                selected = "local"
+            fallback["selected_transport"] = selected
+        out["fallback"] = fallback
+        if selected:
+            out["transport"] = selected
+
+        if not out.get("base_url"):
+            tunnel_url = str((out.get("tunnel") or {}).get("tunnel_url") or "")
+            if tunnel_url:
+                out["base_url"] = tunnel_url
+            else:
+                local_base = str((out.get("local") or {}).get("base_url") or "")
+                out["base_url"] = local_base or base_url
+        if not out.get("http_endpoint"):
+            out["http_endpoint"] = out.get("base_url") or base_url
+        return out
+
+    def _build_resolved_endpoints(self, services: Dict[str, dict]) -> Dict[str, dict]:
+        resolved: Dict[str, dict] = {}
+        for service in sorted(services.keys()):
+            payload = services.get(service) or {}
+            fallback = payload.get("fallback") if isinstance(payload.get("fallback"), dict) else {}
+            local = payload.get("local") if isinstance(payload.get("local"), dict) else {}
+            tunnel = payload.get("tunnel") if isinstance(payload.get("tunnel"), dict) else {}
+
+            tunnel_url = str(tunnel.get("tunnel_url") or "")
+            stale_tunnel = str(tunnel.get("stale_tunnel_url") or "")
+            fallback_cloudflare = fallback.get("cloudflare") if isinstance(fallback.get("cloudflare"), dict) else {}
+            fallback_upnp = fallback.get("upnp") if isinstance(fallback.get("upnp"), dict) else {}
+            fallback_nats = fallback.get("nats") if isinstance(fallback.get("nats"), dict) else {}
+            fallback_nkn = fallback.get("nkn") if isinstance(fallback.get("nkn"), dict) else {}
+            fallback_local = fallback.get("local") if isinstance(fallback.get("local"), dict) else {}
+            upnp_base = str((fallback.get("upnp") or {}).get("public_base_url") or "")
+            nats_base = str((fallback_nats or {}).get("public_base_url") or "")
+            nkn_base = str((fallback_nkn or {}).get("public_base_url") or "")
+            local_base = str(local.get("base_url") or payload.get("base_url") or "")
+            selected_transport = str(fallback.get("selected_transport") or payload.get("transport") or "").strip().lower()
+            if selected_transport not in ("cloudflare", "upnp", "nats", "nkn", "local"):
+                selected_transport = "local"
+
+            selected_base = ""
+            selected_reason = ""
+            if selected_transport == "cloudflare" and tunnel_url:
+                selected_base = tunnel_url
+                selected_reason = "fallback.selected_transport=cloudflare with active tunnel"
+            elif selected_transport == "upnp" and upnp_base:
+                selected_base = upnp_base
+                selected_reason = "fallback.selected_transport=upnp with active public_base_url"
+            elif selected_transport == "nats" and nats_base:
+                selected_base = nats_base
+                selected_reason = "fallback.selected_transport=nats with active public_base_url"
+            elif selected_transport == "nkn" and nkn_base:
+                selected_base = nkn_base
+                selected_reason = "fallback.selected_transport=nkn with active public_base_url"
+            elif selected_transport == "local" and local_base:
+                selected_base = local_base
+                selected_reason = "fallback.selected_transport=local"
+
+            if not selected_base:
+                if tunnel_url:
+                    selected_transport = "cloudflare"
+                    selected_base = tunnel_url
+                    selected_reason = "auto-selected cloudflare from tunnel_url"
+                elif upnp_base:
+                    selected_transport = "upnp"
+                    selected_base = upnp_base
+                    selected_reason = "auto-selected upnp from fallback"
+                elif nats_base:
+                    selected_transport = "nats"
+                    selected_base = nats_base
+                    selected_reason = "auto-selected nats from fallback"
+                elif nkn_base:
+                    selected_transport = "nkn"
+                    selected_base = nkn_base
+                    selected_reason = "auto-selected nkn from fallback"
+                else:
+                    selected_transport = "local"
+                    selected_base = local_base
+                    selected_reason = "defaulted to local base URL"
+
+            local_host = ""
+            try:
+                local_host = urllib.parse.urlparse(selected_base).hostname or ""
+            except Exception:
+                local_host = ""
+            remote_routable = bool(selected_base) and not self._is_loopback_host(local_host)
+            http_endpoint = str(payload.get("http_endpoint") or "")
+            ws_endpoint = str(payload.get("ws_endpoint") or "")
+            if selected_transport == "cloudflare" and selected_base:
+                if not http_endpoint or self._is_loopback_host(urllib.parse.urlparse(http_endpoint).hostname or ""):
+                    http_endpoint = selected_base
+                if not ws_endpoint and str(selected_base).startswith("https://"):
+                    ws_endpoint = selected_base.replace("https://", "wss://")
+            if not http_endpoint:
+                http_endpoint = selected_base
+
+            resolved[service] = {
+                "service": service,
+                "transport": selected_transport,
+                "selected_transport": selected_transport,
+                "selection_reason": selected_reason,
+                "base_url": selected_base,
+                "http_endpoint": http_endpoint,
+                "ws_endpoint": ws_endpoint,
+                "tunnel_url": tunnel_url,
+                "stale_tunnel_url": stale_tunnel,
+                "tunnel_error": str(tunnel.get("error") or ""),
+                "fallback": fallback,
+                "local": local,
+                "cloudflare": fallback_cloudflare,
+                "upnp": fallback_upnp,
+                "nats": fallback_nats,
+                "nkn": fallback_nkn,
+                "local_fallback": fallback_local,
+                "security": payload.get("security") if isinstance(payload.get("security"), dict) else {},
+                "routes": payload.get("routes") if isinstance(payload.get("routes"), dict) else {},
+                "remote_routable": remote_routable,
+                "loopback_only": bool(selected_base) and not remote_routable,
+                "is_loopback": bool(selected_base) and self._is_loopback_host(local_host),
+                "is_public": remote_routable,
+            }
+        return resolved
+
+    def _collect_service_snapshot(self) -> Dict[str, Any]:
+        services: Dict[str, dict] = {}
+        ts_ms = int(time.time() * 1000)
+        self._sync_cloudflared_tunnels()
+        probe_paths = ["/router_info", "/tunnel_info", "/health", "/healthz", "/_health", "/api/v1/health"]
+        for service_name, info in SERVICE_TARGETS.items():
+            target_key = str(info.get("target") or service_name)
+            base_url = (
+                self.targets.get(target_key)
+                or self.cfg.get("targets", {}).get(target_key)
+                or info.get("endpoint")
+                or DEFAULT_TARGETS.get(target_key, "")
+            )
+            probes: Dict[str, Dict[str, Any]] = {}
+            if base_url:
+                for path in probe_paths:
+                    probes[path] = self._probe_json(base_url, path)
+            normalized = self._normalize_service_payload(service_name, target_key, base_url, probes)
+            healthy = any(p.get("ok") for p in probes.values())
+            if healthy:
+                self.last_good_service_payloads[target_key] = self._deepcopy_json(normalized)
+                self.snapshot_failures[target_key] = 0
+            else:
+                self.snapshot_failures[target_key] = int(self.snapshot_failures.get(target_key, 0)) + 1
+                if target_key in self.last_good_service_payloads:
+                    stale_copy = self._deepcopy_json(self.last_good_service_payloads[target_key])
+                    stale_copy["stale"] = True
+                    stale_copy["stale_reason"] = "probe_failure"
+                    stale_copy["probe"] = probes
+                    stale_copy["status"] = stale_copy.get("status") or "degraded"
+                    normalized = stale_copy
+            services[target_key] = normalized
+        resolved = self._build_resolved_endpoints(services)
+        return {"ts_ms": ts_ms, "services": services, "resolved": resolved, "stale": False}
+
+    def get_service_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.time()
+        with self.snapshot_lock:
+            ts_ms = int(self.snapshot_cache.get("ts_ms") or 0)
+            age_s = (now - (ts_ms / 1000.0)) if ts_ms else 9999.0
+            if not force_refresh and ts_ms and age_s < 4.0:
+                return self._deepcopy_json(self.snapshot_cache)
+        snapshot = self._collect_service_snapshot()
+        with self.snapshot_lock:
+            self.snapshot_cache = snapshot
+        return self._deepcopy_json(snapshot)
+
+    def _append_activity_log(self, message: str, **meta: Any) -> None:
+        entry = {
+            "ts_ms": int(time.time() * 1000),
+            "message": message,
+        }
+        safe_meta = _redact_sensitive_fields(meta or {})
+        if isinstance(safe_meta, dict):
+            entry.update(safe_meta)
+        self.activity_log.append(entry)
+
+    def _sample_telemetry(self) -> None:
+        with self.telemetry_lock:
+            history = self.telemetry_state.get("history")
+            if isinstance(history, deque):
+                history.append(
+                    {
+                        "ts_ms": int(time.time() * 1000),
+                        "inbound_messages": int(self.telemetry_state.get("inbound_messages", 0)),
+                        "outbound_messages": int(self.telemetry_state.get("outbound_messages", 0)),
+                        "resolve_success_out": int(self.telemetry_state.get("resolve_success_out", 0)),
+                        "resolve_fail_out": int(self.telemetry_state.get("resolve_fail_out", 0)),
+                    }
+                )
+
+    @staticmethod
+    def _payload_size_bytes(payload: Any) -> int:
+        if payload is None:
+            return 0
+        if isinstance(payload, bytes):
+            return len(payload)
+        if isinstance(payload, str):
+            return len(payload.encode("utf-8", errors="replace"))
+        try:
+            encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+            return len(encoded.encode("utf-8", errors="replace"))
+        except Exception:
+            return len(str(payload).encode("utf-8", errors="replace"))
+
+    def _ensure_peer_entry(self, peer_usage: Dict[str, Any], peer: str) -> Dict[str, Any]:
+        key = str(peer or "(unknown)")
+        entry = peer_usage.setdefault(
+            key,
+            {
+                "peer": key,
+                "inbound": 0,
+                "outbound": 0,
+                "inbound_messages": 0,
+                "outbound_messages": 0,
+                "inbound_bytes": 0,
+                "outbound_bytes": 0,
+                "events_in": {},
+                "events_out": {},
+                "endpoint_hits": {},
+                "last_endpoints": {},
+                "last_event": "",
+                "last_ts_ms": 0,
+            },
+        )
+        entry.setdefault("peer", key)
+        entry.setdefault("events_in", {})
+        entry.setdefault("events_out", {})
+        entry.setdefault("endpoint_hits", {})
+        entry.setdefault("last_endpoints", {})
+        return entry
+
+    def _record_nkn_traffic(
+        self,
+        direction: str,
+        peer: str,
+        payload: Any,
+        event_name: str = "",
+        endpoint_labels: Optional[List[str]] = None,
+        count_message: bool = True,
+    ) -> None:
+        dir_norm = "in" if str(direction).strip().lower() in ("in", "inbound", "rx", "recv") else "out"
+        size_b = self._payload_size_bytes(payload)
+        now_ms = int(time.time() * 1000)
+        event_norm = str(event_name or "").strip().lower()
+        labels = [str(label) for label in (endpoint_labels or []) if str(label or "").strip()]
+
+        with self.telemetry_lock:
+            if count_message:
+                if dir_norm == "in":
+                    self.telemetry_state["inbound_messages"] = int(self.telemetry_state.get("inbound_messages", 0)) + 1
+                    self.telemetry_state["inbound_bytes"] = int(self.telemetry_state.get("inbound_bytes", 0)) + size_b
+                else:
+                    self.telemetry_state["outbound_messages"] = int(self.telemetry_state.get("outbound_messages", 0)) + 1
+                    self.telemetry_state["outbound_bytes"] = int(self.telemetry_state.get("outbound_bytes", 0)) + size_b
+
+            peer_usage = self.telemetry_state.setdefault("peer_usage", {})
+            entry = self._ensure_peer_entry(peer_usage, peer)
+            entry["last_ts_ms"] = now_ms
+            if event_norm:
+                entry["last_event"] = event_norm
+            if count_message:
+                if dir_norm == "in":
+                    entry["inbound"] = int(entry.get("inbound", 0)) + 1
+                    entry["inbound_messages"] = int(entry.get("inbound_messages", 0)) + 1
+                    entry["inbound_bytes"] = int(entry.get("inbound_bytes", 0)) + size_b
+                    if event_norm:
+                        events_in = entry.setdefault("events_in", {})
+                        events_in[event_norm] = int(events_in.get(event_norm, 0)) + 1
+                else:
+                    entry["outbound"] = int(entry.get("outbound", 0)) + 1
+                    entry["outbound_messages"] = int(entry.get("outbound_messages", 0)) + 1
+                    entry["outbound_bytes"] = int(entry.get("outbound_bytes", 0)) + size_b
+                    if event_norm:
+                        events_out = entry.setdefault("events_out", {})
+                        events_out[event_norm] = int(events_out.get(event_norm, 0)) + 1
+
+            if labels:
+                endpoint_hits = self.telemetry_state.setdefault("endpoint_hits", {})
+                per_peer_hits = entry.setdefault("endpoint_hits", {})
+                last_eps = entry.setdefault("last_endpoints", {})
+                for label in labels:
+                    endpoint_hits[label] = int(endpoint_hits.get(label, 0)) + 1
+                    per_peer_hits[label] = int(per_peer_hits.get(label, 0)) + 1
+                    last_eps[label] = label
+
+            # Bound peer map growth in long-running routers.
+            if len(peer_usage) > 1000:
+                ranked = sorted(
+                    peer_usage.items(),
+                    key=lambda kv: int((kv[1] or {}).get("last_ts_ms", 0)),
+                    reverse=True,
+                )
+                keep = dict(ranked[:800])
+                peer_usage.clear()
+                peer_usage.update(keep)
+
+    def _record_inbound_nkn(self, source: str, payload: dict) -> None:
+        event_name = ""
+        if isinstance(payload, dict):
+            event_name = str(payload.get("event") or "")
+        self._record_nkn_traffic("in", source, payload, event_name=event_name)
+
+    def _record_outbound_nkn(self, target: str, payload: dict) -> None:
+        event_name = ""
+        if isinstance(payload, dict):
+            event_name = str(payload.get("event") or "")
+        self._record_nkn_traffic("out", target, payload, event_name=event_name)
+
+    def _on_node_nkn_traffic(self, direction: str, peer: str, payload: dict, event_name: str = "") -> None:
+        self._record_nkn_traffic(direction, peer, payload, event_name=event_name)
+
+    def _collect_endpoint_labels(self, resolved: Dict[str, dict]) -> List[str]:
+        labels: List[str] = []
+        for svc in sorted((resolved or {}).keys()):
+            item = resolved.get(svc) or {}
+            endpoint = str(item.get("base_url") or item.get("http_endpoint") or "")
+            labels.append(f"{svc}:{endpoint}")
+        return labels
+
+    def _record_endpoint_usage(self, peer: str, labels: List[str]) -> None:
+        clean_labels = [str(label) for label in (labels or []) if str(label or "").strip()]
+        if not clean_labels:
+            return
+        self._record_nkn_traffic("out", peer, {}, event_name="", endpoint_labels=clean_labels, count_message=False)
+
+    def _record_resolve_outcome(self, ok: bool) -> None:
+        with self.telemetry_lock:
+            if ok:
+                self.telemetry_state["resolve_success_out"] = int(self.telemetry_state.get("resolve_success_out", 0)) + 1
+            else:
+                self.telemetry_state["resolve_fail_out"] = int(self.telemetry_state.get("resolve_fail_out", 0)) + 1
+
+    def _pick_send_node(self) -> Optional[RelayNode]:
+        for node in self.nodes:
+            if node.current_address:
+                return node
+        return self.nodes[0] if self.nodes else None
+
+    def send_nkn_dm(self, target: str, payload: dict, tries: int = 1) -> Tuple[bool, str]:
+        target = (target or "").strip()
+        if not target:
+            return False, "missing target"
+        attempts = max(1, int(tries or 1))
+        last_err = ""
+        for _ in range(attempts):
+            node = self._pick_send_node()
+            if not node:
+                last_err = "no active relay nodes"
+                time.sleep(0.1)
+                continue
+            try:
+                node.bridge.dm(target, payload, DM_OPTS_SINGLE)
+                self._record_outbound_nkn(target, payload)
+                return True, ""
+            except Exception as exc:
+                last_err = str(exc)
+                time.sleep(0.1)
+        return False, last_err or "send failed"
+
+    def _create_pending_resolve(self, target_address: str) -> dict:
+        request_id = f"resolve-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        pending = {
+            "request_id": request_id,
+            "target_address": target_address,
+            "created_at": time.time(),
+            "event": threading.Event(),
+            "response": None,
+        }
+        with self.pending_resolves_lock:
+            self.pending_resolves[request_id] = pending
+        return pending
+
+    def _pop_pending_resolve(self, request_id: str) -> Optional[dict]:
+        with self.pending_resolves_lock:
+            return self.pending_resolves.pop(request_id, None)
+
+    def _sweep_pending_resolves_loop(self) -> None:
+        while not self.resolve_sweeper_stop.is_set():
+            now = time.time()
+            stale: List[str] = []
+            with self.pending_resolves_lock:
+                for req_id, pending in self.pending_resolves.items():
+                    created = float(pending.get("created_at") or now)
+                    if now - created > 120.0:
+                        stale.append(req_id)
+                for req_id in stale:
+                    self.pending_resolves.pop(req_id, None)
+            self.resolve_sweeper_stop.wait(2.0)
+
+    def _handle_resolve_tunnels_request(self, source: str, body: dict, node: RelayNode) -> None:
+        self._record_inbound_nkn(source, body)
+        request_id = str(body.get("request_id") or "")
+        with self.telemetry_lock:
+            self.telemetry_state["resolve_requests_in"] = int(self.telemetry_state.get("resolve_requests_in", 0)) + 1
+        snapshot = self.get_service_snapshot(force_refresh=True)
+        public_snapshot = self._redact_public_payload(snapshot)
+        reply = {
+            "event": "resolve_tunnels_result",
+            "request_id": request_id,
+            "source_address": node.current_address or "",
+            "timestamp_ms": int(time.time() * 1000),
+            "snapshot": public_snapshot,
+            "resolved": public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {},
+        }
+        node.bridge.dm(source, reply, DM_OPTS_SINGLE)
+        self._record_outbound_nkn(source, reply)
+        endpoint_labels = self._collect_endpoint_labels(
+            public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {}
+        )
+        self._record_endpoint_usage(source, endpoint_labels)
+
+    def _handle_resolve_tunnels_result(self, source: str, body: dict) -> None:
+        self._record_inbound_nkn(source, body)
+        request_id = str(body.get("request_id") or "")
+        if not request_id:
+            return
+        with self.pending_resolves_lock:
+            pending = self.pending_resolves.get(request_id)
+            if not pending:
+                return
+            pending["response"] = {"source": source, "payload": body}
+            pending["event"].set()
+
+    def _build_service_rpc_request(self, body: dict) -> dict:
+        service = self._canonical_router_service(body.get("service"))
+        if not service:
+            raise ValueError("missing service")
+        if service not in SERVICE_TARGETS:
+            raise ValueError(f"unknown service '{service}'")
+
+        path = str(body.get("path") or "/").strip() or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+        if len(path) > 1024:
+            raise ValueError("path too long")
+        if "\x00" in path:
+            raise ValueError("path contains invalid bytes")
+        norm_parts = [segment for segment in path.split("/") if segment]
+        if any(segment == ".." for segment in norm_parts):
+            raise ValueError("path traversal is not allowed")
+
+        method = str(body.get("method") or "GET").strip().upper()
+        allowed_methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+        if method not in allowed_methods:
+            raise ValueError(f"unsupported method '{method}'")
+
+        headers_in = body.get("headers") if isinstance(body.get("headers"), dict) else {}
+        headers: Dict[str, str] = {}
+        for key, value in headers_in.items():
+            k = str(key or "").strip()
+            if not k or len(k) > 128:
+                continue
+            if "\r" in k or "\n" in k:
+                continue
+            v = str(value or "")
+            if len(v) > 4096:
+                v = v[:4096]
+            if "\r" in v or "\n" in v:
+                continue
+            headers[k] = v
+            if len(headers) >= 64:
+                break
+
+        timeout_ms = self._as_int(body.get("timeout_ms"), 30000, minimum=1000, maximum=300000)
+        max_request_b = int(self.nkn_settings.get("rpc_max_request_b") or (512 * 1024))
+
+        req: Dict[str, Any] = {
+            "service": service,
+            "path": path,
+            "method": method,
+            "headers": headers,
+            "timeout_ms": timeout_ms,
+        }
+        if body.get("json") is not None:
+            try:
+                json_bytes = len(json.dumps(body.get("json"), ensure_ascii=False).encode("utf-8"))
+            except Exception:
+                raise ValueError("invalid json payload")
+            if json_bytes > max_request_b:
+                raise ValueError(f"rpc json payload too large ({json_bytes} > {max_request_b})")
+            req["json"] = body.get("json")
+        if body.get("body_b64") is not None:
+            try:
+                raw = base64.b64decode(str(body.get("body_b64")), validate=False)
+            except Exception:
+                raise ValueError("invalid body_b64 payload")
+            if len(raw) > max_request_b:
+                raise ValueError(f"rpc body payload too large ({len(raw)} > {max_request_b})")
+            req["body_b64"] = body.get("body_b64")
+        return req
+
+    def _execute_service_rpc(self, req: dict) -> dict:
+        relay_node = self._pick_send_node()
+        if not relay_node:
+            return {"ok": False, "status": 503, "error": "no relay nodes available", "headers": {}, "json": None, "body_b64": None}
+        url = relay_node._resolve_url(req)
+        method = str(req.get("method") or "GET").upper()
+        headers = req.get("headers") if isinstance(req.get("headers"), dict) else {}
+        timeout_s = float(self._as_int(req.get("timeout_ms"), 30000, minimum=1000, maximum=300000)) / 1000.0
+        params: Dict[str, Any] = {"headers": headers, "timeout": timeout_s, "stream": True}
+        if req.get("json") is not None:
+            params["json"] = req.get("json")
+        elif req.get("body_b64") is not None:
+            try:
+                params["data"] = base64.b64decode(str(req.get("body_b64")), validate=False)
+            except Exception:
+                params["data"] = b""
+        max_response_b = int(self.nkn_settings.get("rpc_max_response_b") or (2 * 1024 * 1024))
+        try:
+            with requests.request(method, url, **params) as resp:
+                body = bytearray()
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    body.extend(chunk)
+                    if len(body) > max_response_b:
+                        return {
+                            "ok": False,
+                            "status": 413,
+                            "headers": {k.lower(): v for k, v in resp.headers.items()},
+                            "json": None,
+                            "body_b64": None,
+                            "error": f"rpc response too large ({len(body)} > {max_response_b})",
+                        }
+                payload: Dict[str, Any] = {
+                    "ok": resp.status_code < 400,
+                    "status": int(resp.status_code),
+                    "headers": {k.lower(): v for k, v in resp.headers.items()},
+                    "json": None,
+                    "body_b64": None,
+                    "error": None,
+                }
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if "application/json" in ctype:
+                    try:
+                        payload["json"] = json.loads(bytes(body).decode("utf-8", errors="replace"))
+                    except Exception:
+                        payload["body_b64"] = base64.b64encode(bytes(body)).decode("ascii")
+                else:
+                    payload["body_b64"] = base64.b64encode(bytes(body)).decode("ascii")
+                return payload
+        except Exception as exc:
+            return {"ok": False, "status": 0, "headers": {}, "json": None, "body_b64": None, "error": f"{type(exc).__name__}: {exc}"}
+
+    def _handle_service_rpc_request(self, source: str, body: dict, node: RelayNode) -> None:
+        self._record_inbound_nkn(source, body)
+        with self.telemetry_lock:
+            self.telemetry_state["rpc_requests_in"] = int(self.telemetry_state.get("rpc_requests_in", 0)) + 1
+        request_id = str(body.get("request_id") or "")
+        try:
+            req = self._build_service_rpc_request(body)
+            result = self._execute_service_rpc(req)
+        except Exception as exc:
+            req = {
+                "service": self._canonical_router_service(body.get("service")),
+                "path": str(body.get("path") or "/"),
+            }
+            result = {
+                "ok": False,
+                "status": 400,
+                "headers": {},
+                "json": None,
+                "body_b64": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        reply = {
+            "event": "service_rpc_result",
+            "request_id": request_id,
+            "source_address": node.current_address or "",
+            "timestamp_ms": int(time.time() * 1000),
+            "service": req.get("service"),
+            "path": req.get("path"),
+        }
+        reply.update(result)
+        node.bridge.dm(source, reply, DM_OPTS_SINGLE)
+        self._record_outbound_nkn(source, reply)
+        with self.telemetry_lock:
+            self.telemetry_state["rpc_requests_out"] = int(self.telemetry_state.get("rpc_requests_out", 0)) + 1
+            if result.get("ok"):
+                self.telemetry_state["rpc_success_out"] = int(self.telemetry_state.get("rpc_success_out", 0)) + 1
+            else:
+                self.telemetry_state["rpc_fail_out"] = int(self.telemetry_state.get("rpc_fail_out", 0)) + 1
+
+    def _handle_service_rpc_result(self, source: str, body: dict) -> None:
+        self._record_inbound_nkn(source, body)
+
+    def _handle_router_nkn_event(self, event: str, source: str, body: dict, node: RelayNode) -> bool:
+        ev = (event or "").strip().lower()
+        if ev == "resolve_tunnels":
+            self._handle_resolve_tunnels_request(source, body, node)
+            return True
+        if ev == "resolve_tunnels_result":
+            self._handle_resolve_tunnels_result(source, body)
+            return True
+        if ev == "service_rpc_request":
+            self._handle_service_rpc_request(source, body, node)
+            return True
+        if ev == "service_rpc_result":
+            self._handle_service_rpc_result(source, body)
+            return True
+        return False
+
+    def _index_payload(self) -> Dict[str, Any]:
+        network_urls = self._router_network_urls()
+        return {
+            "status": "ok",
+            "service": "hydra_router",
+            "network": network_urls,
+            "feature_flags": dict(getattr(self, "feature_flags", {}) or {}),
+            "routes": {
+                "api": "/api",
+                "health": "/health",
+                "services": "/services/snapshot",
+                "nkn_info": "/nkn/info",
+                "nkn_resolve": "/nkn/resolve",
+                "dashboard_data": "/dashboard/data",
+            },
+        }
+
+    def _current_node_addresses(self) -> List[str]:
+        return sorted({node.current_address for node in self.nodes if node.current_address})
+
+    def _health_telemetry_totals(self) -> Dict[str, int]:
+        with self.telemetry_lock:
+            return {
+                "inbound_messages": int(self.telemetry_state.get("inbound_messages", 0)),
+                "outbound_messages": int(self.telemetry_state.get("outbound_messages", 0)),
+                "inbound_bytes": int(self.telemetry_state.get("inbound_bytes", 0)),
+                "outbound_bytes": int(self.telemetry_state.get("outbound_bytes", 0)),
+                "resolve_requests_in": int(self.telemetry_state.get("resolve_requests_in", 0)),
+                "resolve_requests_out": int(self.telemetry_state.get("resolve_requests_out", 0)),
+                "resolve_success_out": int(self.telemetry_state.get("resolve_success_out", 0)),
+                "resolve_fail_out": int(self.telemetry_state.get("resolve_fail_out", 0)),
+                "active_peers": len(self.telemetry_state.get("peer_usage", {})),
+            }
+
+    def _health_payload(self, snapshot: Dict[str, Any], pending_count: int) -> Dict[str, Any]:
+        addresses = self._current_node_addresses()
+        return {
+            "status": "ok",
+            "service": "hydra_router",
+            "uptime_seconds": round(time.time() - self.startup_time, 2),
+            "requests_served": int(self.request_counter.get("value", 0)),
+            "pending_resolves": int(max(0, pending_count)),
+            "network": self._router_network_urls(),
+            "nkn": {
+                "enabled": bool(self.nkn_settings.get("enable", True)),
+                "ready": bool(addresses),
+                "addresses": addresses,
+            },
+            "telemetry": self._health_telemetry_totals(),
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+        }
+
+    @staticmethod
+    def _services_snapshot_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "status": "success",
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+        }
+
+    def _nkn_info_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        addresses = self._current_node_addresses()
+        return {
+            "status": "success",
+            "network": self._router_network_urls(),
+            "nkn": {
+                "enabled": bool(self.nkn_settings.get("enable", True)),
+                "ready": bool(addresses),
+                "addresses": addresses,
+                "service_relays": {svc: entry.get("name") for svc, entry in self.service_relays.items()},
+                "seed_persisted": any(bool((entry or {}).get("seed_hex")) for entry in self.service_relays.values()),
+            },
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+        }
+
+    def _nkn_resolve_local_payload(self, snapshot: Dict[str, Any], target_address: str = "") -> Dict[str, Any]:
+        addresses = self._current_node_addresses()
+        resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+        return {
+            "status": "success",
+            "mode": "local",
+            "target_address": str(target_address or (addresses[0] if addresses else "")),
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+            "resolved": resolved if isinstance(resolved, dict) else {},
+        }
+
+    @staticmethod
+    def _nkn_resolve_remote_payload(
+        request_id: str,
+        target_address: str,
+        source_address: str,
+        response_payload: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        resolved: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "status": "success",
+            "mode": "remote",
+            "request_id": str(request_id or ""),
+            "target_address": str(target_address or ""),
+            "source_address": str(source_address or ""),
+            "reply": response_payload if isinstance(response_payload, dict) else {},
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+            "resolved": resolved if isinstance(resolved, dict) else {},
+        }
+
+    def _snapshot_dashboard_data(self, history_limit: Any = 240, log_limit: Any = 120, peer_limit: Any = 50) -> Dict[str, Any]:
+        with self.telemetry_lock:
+            history = list(self.telemetry_state.get("history", []))
+            peer_usage = dict(self.telemetry_state.get("peer_usage", {}))
+            endpoint_hits = dict(self.telemetry_state.get("endpoint_hits", {}))
+            telemetry = {
+                "inbound_messages": int(self.telemetry_state.get("inbound_messages", 0)),
+                "outbound_messages": int(self.telemetry_state.get("outbound_messages", 0)),
+                "inbound_bytes": int(self.telemetry_state.get("inbound_bytes", 0)),
+                "outbound_bytes": int(self.telemetry_state.get("outbound_bytes", 0)),
+                "resolve_requests_in": int(self.telemetry_state.get("resolve_requests_in", 0)),
+                "resolve_requests_out": int(self.telemetry_state.get("resolve_requests_out", 0)),
+                "resolve_success_out": int(self.telemetry_state.get("resolve_success_out", 0)),
+                "resolve_fail_out": int(self.telemetry_state.get("resolve_fail_out", 0)),
+                "rpc_requests_in": int(self.telemetry_state.get("rpc_requests_in", 0)),
+                "rpc_requests_out": int(self.telemetry_state.get("rpc_requests_out", 0)),
+                "rpc_success_out": int(self.telemetry_state.get("rpc_success_out", 0)),
+                "rpc_fail_out": int(self.telemetry_state.get("rpc_fail_out", 0)),
+            }
+        logs = list(self.activity_log)
+        hist_limit = self._as_int(history_limit, 240, minimum=20, maximum=2000)
+        logs_limit = self._as_int(log_limit, 120, minimum=20, maximum=1000)
+        peers_limit = self._as_int(peer_limit, 50, minimum=10, maximum=500)
+        peers_sorted = sorted(peer_usage.items(), key=lambda kv: int((kv[1] or {}).get("last_ts_ms", 0)), reverse=True)
+        return {
+            "status": "success",
+            "uptime_seconds": round(time.time() - self.startup_time, 2),
+            "requests_served": int(self.request_counter.get("value", 0)),
+            "telemetry": telemetry,
+            "history": history[-hist_limit:],
+            "activity": logs[-logs_limit:],
+            "peers": [{**(entry or {}), "peer": peer} for peer, entry in peers_sorted[:peers_limit]],
+            "endpoint_hits": endpoint_hits,
+        }
+
+    def _build_control_plane_app(self):
+        try:
+            from flask import Flask, jsonify, request
+        except Exception as exc:
+            raise RuntimeError(f"Control-plane dependencies unavailable: {exc}") from exc
+
+        app = Flask(__name__)
+
+        def _public_json(payload: Any, status_code: int = 200):
+            safe_payload = self._redact_public_payload(payload)
+            if status_code == 200:
+                return jsonify(safe_payload)
+            return jsonify(safe_payload), status_code
+
+        @app.before_request
+        def _count_requests():
+            self.request_counter["value"] = int(self.request_counter.get("value", 0)) + 1
+
+        @app.route("/", methods=["GET"])
+        def _index():
+            return _public_json(self._index_payload())
+
+        @app.route("/api", methods=["GET"])
+        def _api_index():
+            return _public_json(self._index_payload())
+
+        @app.route("/health", methods=["GET"])
+        def _health():
+            snapshot = self.get_service_snapshot(force_refresh=False)
+            with self.pending_resolves_lock:
+                pending_count = len(self.pending_resolves)
+            payload = self._health_payload(snapshot, pending_count)
+            return _public_json(payload)
+
+        @app.route("/services/snapshot", methods=["GET"])
+        def _services_snapshot():
+            force = self._as_bool(request.args.get("refresh"), default=False)
+            snapshot = self.get_service_snapshot(force_refresh=force)
+            return _public_json(self._services_snapshot_payload(snapshot))
+
+        @app.route("/nkn/info", methods=["GET"])
+        def _nkn_info():
+            snapshot = self.get_service_snapshot(force_refresh=False)
+            return _public_json(self._nkn_info_payload(snapshot))
+
+        @app.route("/nkn/resolve", methods=["POST"])
+        def _nkn_resolve():
+            data = request.get_json(silent=True) or {}
+            target_address = str(data.get("router_address") or data.get("target_address") or "").strip()
+            timeout_seconds = self._as_int(
+                data.get("timeout_seconds", self.nkn_settings["resolve_timeout_seconds"]),
+                self.nkn_settings["resolve_timeout_seconds"],
+                minimum=2,
+                maximum=60,
+            )
+            force_refresh = self._as_bool(data.get("refresh_local", True), default=True)
+            local_addresses = set(self._current_node_addresses())
+
+            if not target_address or target_address in local_addresses:
+                snapshot = self.get_service_snapshot(force_refresh=force_refresh)
+                return _public_json(self._nkn_resolve_local_payload(snapshot, target_address=target_address))
+
+            pending = self._create_pending_resolve(target_address)
+            payload = {
+                "event": "resolve_tunnels",
+                "request_id": pending["request_id"],
+                "from": (next(iter(sorted(local_addresses))) if local_addresses else ""),
+                "timestamp_ms": int(time.time() * 1000),
+            }
+            with self.telemetry_lock:
+                self.telemetry_state["resolve_requests_out"] = int(self.telemetry_state.get("resolve_requests_out", 0)) + 1
+            ok, err = self.send_nkn_dm(target_address, payload, tries=self.nkn_settings["dm_retries"])
+            if not ok:
+                self._pop_pending_resolve(pending["request_id"])
+                self._record_resolve_outcome(False)
+                return _public_json({"status": "error", "message": f"Failed to send DM: {err}"}, status_code=503)
+
+            if not pending["event"].wait(timeout_seconds):
+                self._pop_pending_resolve(pending["request_id"])
+                self._record_resolve_outcome(False)
+                return _public_json(
+                    {
+                        "status": "error",
+                        "message": f"Timed out waiting for resolve reply from {target_address}",
+                        "request_id": pending["request_id"],
+                    },
+                    status_code=504,
+                )
+
+            complete = self._pop_pending_resolve(pending["request_id"])
+            if not complete or not complete.get("response"):
+                self._record_resolve_outcome(False)
+                return _public_json(
+                    {"status": "error", "message": "Resolve response missing", "request_id": pending["request_id"]},
+                    status_code=502,
+                )
+
+            response_payload = complete["response"]["payload"]
+            source_address = complete["response"]["source"]
+            snapshot = response_payload.get("snapshot") if isinstance(response_payload, dict) else {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            resolved = snapshot.get("resolved", {})
+            endpoint_labels = self._collect_endpoint_labels(resolved if isinstance(resolved, dict) else {})
+            self._record_endpoint_usage(source_address, endpoint_labels)
+            self._record_resolve_outcome(True)
+            return _public_json(
+                self._nkn_resolve_remote_payload(
+                    pending["request_id"],
+                    target_address,
+                    source_address,
+                    response_payload if isinstance(response_payload, dict) else {},
+                    snapshot,
+                    resolved if isinstance(resolved, dict) else {},
+                )
+            )
+
+        @app.route("/dashboard/data", methods=["GET"])
+        def _dashboard_data():
+            data = self._snapshot_dashboard_data(
+                history_limit=request.args.get("history", 240),
+                log_limit=request.args.get("logs", 120),
+                peer_limit=request.args.get("peers", 50),
+            )
+            return _public_json(data)
+
+        return app
+
+    def _start_control_plane(self) -> None:
+        if not self.api_enabled:
+            LOGGER.info("Router control-plane API disabled by config")
+            return
+        if self.api_server is not None:
+            return
+        try:
+            from werkzeug.serving import make_server
+        except Exception as exc:
+            LOGGER.warning("Control-plane dependencies unavailable: %s", exc)
+            return
+
+        try:
+            app = self._build_control_plane_app()
+        except Exception as exc:
+            LOGGER.warning("Failed to initialize control-plane Flask app: %s", exc)
+            return
+
+        try:
+            self.api_server = make_server(self.api_host, self.api_port, app, threaded=True)
+        except Exception as exc:
+            LOGGER.warning("Failed to bind control-plane API on %s:%s (%s)", self.api_host, self.api_port, exc)
+            self.api_server = None
+            return
+        self.api_thread = threading.Thread(target=self.api_server.serve_forever, daemon=True, name="router-api")
+        self.api_thread.start()
+        LOGGER.info("Control-plane API listening on http://%s:%s", self.api_host, self.api_port)
 
     # Port Detection -------------------------------------------
     def _detect_service_port(self, service_name: str) -> Optional[int]:
@@ -5499,6 +8089,7 @@ class Router:
                     LOGGER.info("Aligned target for %s -> %s", target_key, new_base)
             except Exception as exc:
                 LOGGER.debug("Failed to align target for %s: %s", target_key, exc)
+        self._sync_cloudflared_tunnels()
 
     def start(self):
         LOGGER.info("Starting services via watchdog")
@@ -5507,9 +8098,20 @@ class Router:
         # Detect actual ports services are running on (after startup)
         time.sleep(2)  # Give services time to write to logs
         self._update_service_ports()
+        for entry in self.watchdog.get_snapshot():
+            self.latest_service_status[entry["name"]] = entry
+        self._sync_cloudflared_tunnels()
 
         for node in self.nodes:
             node.start()
+        self._start_control_plane()
+        if not self.resolve_sweeper_thread or not self.resolve_sweeper_thread.is_alive():
+            self.resolve_sweeper_thread = threading.Thread(
+                target=self._sweep_pending_resolves_loop,
+                daemon=True,
+                name="resolve-sweeper",
+            )
+            self.resolve_sweeper_thread.start()
         self.status_thread = threading.Thread(target=self._status_monitor, daemon=True)
         self.status_thread.start()
         if self.config_dirty:
@@ -5533,8 +8135,21 @@ class Router:
         self.stop.set()
         LOGGER.info("Shutting down router")
         self.ui.shutdown()
+        self.resolve_sweeper_stop.set()
+        if self.resolve_sweeper_thread and self.resolve_sweeper_thread.is_alive():
+            self.resolve_sweeper_thread.join(timeout=2)
+        if self.api_server is not None:
+            with contextlib.suppress(Exception):
+                self.api_server.shutdown()
+            with contextlib.suppress(Exception):
+                self.api_server.server_close()
+            self.api_server = None
+        if self.api_thread and self.api_thread.is_alive():
+            self.api_thread.join(timeout=3)
         for node in self.nodes:
             node.stop()
+        if self.cloudflared_manager:
+            self.cloudflared_manager.shutdown(timeout=3.0)
         self.watchdog.shutdown()
         if self.status_thread and self.status_thread.is_alive():
             self.status_thread.join(timeout=5)
@@ -5624,7 +8239,15 @@ class Router:
                 }
                 for svc, entry in self.service_relays.items()
             ]
-            CONFIG_PATH.write_text(json.dumps(self.cfg, indent=2))
+            normalized, changed, warnings, errors = _normalize_router_config(self.cfg)
+            for warning in warnings:
+                LOGGER.warning("Config save migration: %s", warning)
+            if errors:
+                details = "; ".join(errors)
+                raise ValueError(f"config validation failed before save: {details}")
+            if changed:
+                self.cfg = normalized
+            CONFIG_PATH.write_text(json.dumps(normalized, indent=2))
             self.config_dirty = False
             LOGGER.info("Config saved to %s", CONFIG_PATH)
         except Exception as exc:
@@ -5675,7 +8298,17 @@ class Router:
         node_cfg["primary_service"] = service
         node_cfg["targets"] = self._build_targets_for_service(service, relay_cfg)
         node_cfg["aliases"] = self._build_aliases_for_service(service, relay_cfg)
-        return RelayNode(node_cfg, self.cfg, self.ui, self.lookup_assignment, self._update_node_address, rate_limit_callback=self._on_rate_limit)
+        return RelayNode(
+            node_cfg,
+            self.cfg,
+            self.ui,
+            self.lookup_assignment,
+            self._update_node_address,
+            rate_limit_callback=self._on_rate_limit,
+            router_event_handler=self._handle_router_nkn_event,
+            nkn_traffic_callback=self._on_node_nkn_traffic,
+            endpoint_usage_callback=self._record_endpoint_usage,
+        )
 
     def _on_rate_limit(self, service: str, node_id: str) -> bool:
         state = self.rate_limit_state.setdefault(service, {"pending": False})
@@ -5747,6 +8380,8 @@ class Router:
                 if port_detection_counter >= 6:
                     self._update_service_ports()
                     port_detection_counter = 0
+                self._sync_cloudflared_tunnels()
+                self._sample_telemetry()
             except Exception as exc:
                 LOGGER.debug("Status monitor error: %s", exc)
             time.sleep(5)
@@ -5783,7 +8418,7 @@ class Router:
                 LOGGER.info("Diagnostics requested for %s", service)
                 # Placeholder: extend with real health checks or request simulations.
                 status = self.latest_service_status.get(service, {})
-                LOGGER.info("Current status: %s", json.dumps(status, default=str))
+                LOGGER.info("Current status: %s", json.dumps(self._redact_public_payload(status), default=str))
         elif typ == "service_toggle":
             service = action.get("service")
             enabled = bool(action.get("enabled", True))

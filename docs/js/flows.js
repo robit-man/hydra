@@ -3,6 +3,24 @@ import { NodeStore } from './nodeStore.js';
 
 function createFlowsLibrary({ Graph, log = () => {} }) {
   const STORAGE_KEY = 'graph.flows';
+  const FLOW_SENSITIVE_KEY_EXACT = new Set([
+    'api',
+    'apikey',
+    'api_key',
+    'seed',
+    'seed_hex',
+    'password',
+    'passphrase',
+    'token',
+    'access_token',
+    'refresh_token',
+    'secret',
+    'client_secret',
+    'private_key',
+    'authorization',
+    'bearer'
+  ]);
+  const FLOW_SENSITIVE_KEY_REGEX = /(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|bearer)/;
 
   const elements = {
     modal: null,
@@ -19,6 +37,78 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
     editorText: '',
     pendingName: ''
   };
+
+  function normalizeKey(key) {
+    return String(key || '').trim().toLowerCase().replace(/-/g, '_');
+  }
+
+  function isSensitiveFlowKey(key) {
+    const normalized = normalizeKey(key);
+    if (!normalized) return false;
+    if (FLOW_SENSITIVE_KEY_EXACT.has(normalized)) return true;
+    return FLOW_SENSITIVE_KEY_REGEX.test(normalized);
+  }
+
+  function sanitizeFlowValue(value, includeSensitive = false) {
+    if (Array.isArray(value)) return value.map((entry) => sanitizeFlowValue(entry, includeSensitive));
+    if (!value || typeof value !== 'object') return cloneValue(value);
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (!includeSensitive && isSensitiveFlowKey(key)) continue;
+      out[key] = sanitizeFlowValue(entry, includeSensitive);
+    }
+    return out;
+  }
+
+  function sanitizeNodeConfig(entry, inferredType = '', includeSensitive = false) {
+    const record = entry && typeof entry === 'object' ? entry : {};
+    const id = typeof record.id === 'string' && record.id ? record.id : '';
+    const type = typeof record.type === 'string' && record.type ? record.type : (inferredType || '');
+    const config = record.config && typeof record.config === 'object' ? record.config : {};
+    const defaults = (type && NodeStore?.defaultsByType?.[type] && typeof NodeStore.defaultsByType[type] === 'object')
+      ? NodeStore.defaultsByType[type]
+      : null;
+    const allowedKeys = defaults ? Object.keys(defaults) : Object.keys(config);
+    const sanitizedConfig = {};
+    for (const key of allowedKeys) {
+      if (!(key in config)) continue;
+      if (!includeSensitive && isSensitiveFlowKey(key)) continue;
+      sanitizedConfig[key] = sanitizeFlowValue(config[key], includeSensitive);
+    }
+    return {
+      id,
+      type,
+      config: sanitizedConfig
+    };
+  }
+
+  function sanitizeSnapshot(snapshot, { includeSensitive = false } = {}) {
+    if (!snapshot || typeof snapshot !== 'object') return { nodes: [], links: [], nodeConfigs: {} };
+    const srcNodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+    const srcLinks = Array.isArray(snapshot.links) ? snapshot.links : [];
+    const srcNodeConfigs = snapshot.nodeConfigs && typeof snapshot.nodeConfigs === 'object' ? snapshot.nodeConfigs : {};
+
+    const nodes = srcNodes.map((node) => sanitizeFlowValue(node, includeSensitive));
+    const links = srcLinks.map((link) => sanitizeFlowValue(link, includeSensitive));
+    const nodeTypeById = {};
+    nodes.forEach((node) => {
+      if (!node || typeof node !== 'object') return;
+      const id = typeof node.id === 'string' ? node.id : '';
+      const type = typeof node.type === 'string' ? node.type : '';
+      if (id && type) nodeTypeById[id] = type;
+    });
+
+    const nodeConfigs = {};
+    for (const [nodeId, rawEntry] of Object.entries(srcNodeConfigs)) {
+      const inferredType = nodeTypeById[nodeId] || '';
+      const sanitized = sanitizeNodeConfig(rawEntry, inferredType, includeSensitive);
+      if (!sanitized.type && inferredType) sanitized.type = inferredType;
+      if (!sanitized.id) sanitized.id = String(nodeId || '');
+      nodeConfigs[String(nodeId || sanitized.id)] = sanitized;
+    }
+
+    return { nodes, links, nodeConfigs };
+  }
 
   let flows = [];
   const importInput = document.createElement('input');
@@ -45,10 +135,10 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
         let proposedName = file.name.replace(/\.[^.]+$/, '');
         if (parsed && typeof parsed === 'object') {
           if (parsed.data && typeof parsed.data === 'object' && parsed.data.nodes) {
-            snapshot = cloneSnapshot(parsed.data);
+            snapshot = sanitizeSnapshot(cloneSnapshot(parsed.data), { includeSensitive: false });
             proposedName = parsed.name || proposedName || 'Imported Flow';
           } else if (parsed.nodes && Array.isArray(parsed.nodes)) {
-            snapshot = cloneSnapshot(parsed);
+            snapshot = sanitizeSnapshot(cloneSnapshot(parsed), { includeSensitive: false });
             if (parsed.name) proposedName = parsed.name;
           }
         }
@@ -100,7 +190,9 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
     const name = typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : 'Untitled Flow';
     const createdAt = Number(entry.createdAt) || Date.now();
     const updatedAt = Number(entry.updatedAt) || createdAt;
-    const data = entry.data && typeof entry.data === 'object' ? cloneSnapshot(entry.data) : null;
+    const data = entry.data && typeof entry.data === 'object'
+      ? sanitizeSnapshot(cloneSnapshot(entry.data), { includeSensitive: false })
+      : null;
     if (!data) return null;
     return { id, name, createdAt, updatedAt, data };
   }
@@ -120,7 +212,7 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
       name: name.trim() || `Flow ${new Date(now).toLocaleString()}`,
       createdAt: now,
       updatedAt: now,
-      data: cloneSnapshot(snapshot)
+      data: sanitizeSnapshot(cloneSnapshot(snapshot), { includeSensitive: false })
     };
     flows.unshift(flow);
     persist();
@@ -499,7 +591,10 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
       renderEditor(flow.id);
       return;
     }
-    const updated = updateFlow(flow.id, { data: cloneSnapshot(parsed), updatedAt: Date.now() });
+    const updated = updateFlow(flow.id, {
+      data: sanitizeSnapshot(cloneSnapshot(parsed), { includeSensitive: false }),
+      updatedAt: Date.now()
+    });
     if (updated) {
       setBadge(`Saved edits to “${updated.name}”`);
       renderDetail(flow.id);
@@ -509,8 +604,25 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
   function handleExport() {
     const flow = flows.find((f) => f.id === state.selectedFlowId);
     if (!flow) return;
+    let sourceSnapshot = flow.data;
+    if (state.view === 'editor') {
+      const editorText = String(qs('#flowEditor')?.value || '').trim();
+      if (editorText) {
+        try {
+          sourceSnapshot = JSON.parse(editorText);
+        } catch (err) {
+          setBadge(`Export failed: editor JSON is invalid (${err?.message || err})`, false);
+          return;
+        }
+      }
+    }
+    const includeSensitive = !!window.confirm(
+      'Include sensitive fields (API keys, passwords, seeds) in this export?\n' +
+      'Choose Cancel for default redacted export.'
+    );
+    const exportSnapshot = sanitizeSnapshot(sourceSnapshot, { includeSensitive });
     const filename = `${slugify(flow.name || 'flow')}.json`;
-    const data = state.view === 'editor' ? (qs('#flowEditor')?.value || JSON.stringify(flow.data, null, 2)) : JSON.stringify(flow.data, null, 2);
+    const data = JSON.stringify(exportSnapshot, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -518,6 +630,11 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+    if (!includeSensitive) {
+      setBadge(`Exported “${flow.name}” (sensitive fields omitted)`);
+    } else {
+      setBadge(`Exported “${flow.name}” with sensitive fields`);
+    }
   }
 
   function formatDetailMeta(flow) {

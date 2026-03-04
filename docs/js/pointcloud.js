@@ -8,10 +8,12 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from 'three/addons/controls/FlyControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { Net } from './net.js';
+import { resolveServiceEndpoint } from './endpointResolver.js';
 
-function createPointcloud({ Router, NodeStore, setBadge, log }) {
+function createPointcloud({ Router, NodeStore, setBadge, log, CFG = {} }) {
   const STATE = new Map();
   const VIEWER_STATE = new Map();
+  const RESOLVE_META = new Map();
   const MAX_CHUNK_SIZE = 800 * 1024; // 800KB chunks for base64 data
 
   const CAMERA_MODES = ['orbit', 'fly', 'fps'];
@@ -88,20 +90,72 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     if (st) st.uploadProgress = text || '';
   }
 
+  function normalizeEndpointSource(value) {
+    return String(value || '').trim().toLowerCase() === 'manual' ? 'manual' : 'router';
+  }
+
+  function persistResolveMeta(nodeId, cfg, endpoint) {
+    if (!nodeId || !endpoint || !cfg || typeof cfg !== 'object') return;
+    const service = String(cfg.service || endpoint.service || 'depth_any').trim() || 'depth_any';
+    const endpointSource = normalizeEndpointSource(cfg.endpointSource);
+    const endpointMode = String(cfg.endpointMode || endpoint.mode || 'auto').trim().toLowerCase() || 'auto';
+    const diagnostics = endpoint.resolveDiagnostics || null;
+    const signature = JSON.stringify({
+      service,
+      endpointSource,
+      endpointMode,
+      selectedTransport: endpoint.selectedTransport || '',
+      activeSource: endpoint.endpointSource || '',
+      base: endpoint.base || '',
+      relay: endpoint.relay || '',
+      reason: diagnostics?.reason || '',
+      diagnostics
+    });
+    const previousSignature = RESOLVE_META.get(nodeId);
+    const sameSignature = previousSignature === signature;
+    const nextLastResolvedAt = endpoint.endpointSource === 'router'
+      ? (sameSignature ? Number(cfg.lastResolvedAt || 0) : Number(endpoint.resolvedAt || Date.now()))
+      : Number(cfg.lastResolvedAt || 0);
+    const sameDiagnostics = JSON.stringify(cfg.resolveDiagnostics || null) === JSON.stringify(diagnostics || null);
+    const sameFields =
+      cfg.service === service &&
+      normalizeEndpointSource(cfg.endpointSource) === endpointSource &&
+      String(cfg.endpointMode || 'auto').trim().toLowerCase() === endpointMode &&
+      Number(cfg.lastResolvedAt || 0) === nextLastResolvedAt &&
+      sameDiagnostics;
+    if (sameSignature && sameFields) return;
+
+    NodeStore.update(nodeId, {
+      type: 'Pointcloud',
+      service,
+      endpointSource,
+      endpointMode,
+      lastResolvedAt: nextLastResolvedAt,
+      resolveDiagnostics: diagnostics
+    });
+    RESOLVE_META.set(nodeId, signature);
+  }
+
   function resolveEndpointConfig(nodeId, override = {}) {
-    const cfg = Object.assign({}, getConfig(nodeId) || {}, override || {});
-    const baseRaw = String(cfg.base || 'http://127.0.0.1:5000').trim();
-    const relayRaw = String(cfg.relay || '').trim();
-    const api = String(cfg.api || '').trim();
-    const modeRaw = String(cfg.endpointMode || 'auto').toLowerCase();
-    const viaNkn = !!relayRaw && (modeRaw === 'auto' || modeRaw === 'remote' || modeRaw === 'nkn');
-    return {
-      base: (baseRaw || 'http://127.0.0.1:5000').replace(/\/+$/, ''),
-      api,
-      relay: viaNkn ? relayRaw : '',
-      viaNkn,
-      mode: modeRaw
+    const baseCfg = getConfig(nodeId) || {};
+    const cfg = Object.assign({}, baseCfg, override || {});
+    const resolved = resolveServiceEndpoint({
+      cfg,
+      service: cfg.service || 'depth_any',
+      routerResolvedEndpoints: CFG?.routerResolvedEndpoints,
+      routerTargetNknAddress: CFG?.routerTargetNknAddress,
+      defaultBase: 'http://127.0.0.1:5000',
+      allowNknMode: true
+    });
+    const endpoint = {
+      ...resolved,
+      base: (resolved.base || 'http://127.0.0.1:5000').replace(/\/+$/, '')
     };
+    const hasOverride = !!(override && Object.keys(override).length);
+    if (!hasOverride) {
+      persistResolveMeta(nodeId, baseCfg, endpoint);
+    }
+    return endpoint;
   }
 
   const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
@@ -156,7 +210,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.getJSON(baseUrl, '/api/models/list', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
+      const data = await Net.getJSON(baseUrl, '/api/models/list', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
       state.availableModels = data.models || [];
 
       const current = state.availableModels.find(m => m.current);
@@ -196,11 +250,11 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
       state.modelReady = false;
       try {
         updateStatus(nodeId, `Selecting ${modelId}…`, 'pending');
-        await Net.postJSON(baseUrl, '/api/models/select', { model_id: modelId }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
+        await Net.postJSON(baseUrl, '/api/models/select', { model_id: modelId }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
         state.currentModel = modelId;
         updateStatus(nodeId, `Loading ${modelId}…`, 'pending');
         try {
-          await Net.postJSON(baseUrl, '/api/load_model', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
+          await Net.postJSON(baseUrl, '/api/load_model', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
         } catch (err) {
           const message = err?.message || '';
           if (/already loading/i.test(message)) {
@@ -244,7 +298,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     return new Promise((resolve) => {
       const checkStatus = async () => {
         try {
-          const data = await Net.getJSON(baseUrl, '/api/model_status', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
+          const data = await Net.getJSON(baseUrl, '/api/model_status', endpoint.api, endpoint.viaNkn, endpoint.relay, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
           const status = data.status;
           const progress = data.progress || 0;
           if (status === 'ready') {
@@ -418,10 +472,10 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
         };
         if (useChunked && Net.postJSONChunked) {
           // Use conservative chunk size to stay under relay DM limits
-          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 16000, progressCb, { service: 'depth_any', useServiceTarget: true });
+          result = await Net.postJSONChunked(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, 16000, progressCb, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
         } else {
           updateUploadProgress(nodeId, 'Sending request…');
-          result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, { service: 'depth_any', useServiceTarget: true });
+          result = await Net.postJSON(baseUrl, '/api/process_base64', body, apiKey, true, endpoint.relay, 180000, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
         }
       } else {
         const formData = new FormData();
@@ -500,7 +554,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     return new Promise((resolve) => {
       const checkJob = async () => {
         try {
-          const data = await Net.getJSON(baseUrl, `/api/job/${jobId}`, endpoint.api, endpoint.viaNkn, endpoint.relay, { service: 'depth_any', useServiceTarget: true });
+          const data = await Net.getJSON(baseUrl, `/api/job/${jobId}`, endpoint.api, endpoint.viaNkn, endpoint.relay, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
 
           const pointcloud = data.pointcloud || data.result?.pointcloud;
           if (data.status === 'completed' && pointcloud) {
@@ -537,7 +591,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
 
     try {
       const fullUrl = `${baseUrl}/api/export/glb`;
-      const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api, { service: 'depth_any', useServiceTarget: true });
+      const blob = await Net.fetchBlob(fullUrl, endpoint.viaNkn, endpoint.relay, endpoint.api, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
@@ -561,7 +615,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.postJSON(baseUrl, '/api/floor_align', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
+      const data = await Net.postJSON(baseUrl, '/api/floor_align', {}, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);
@@ -583,7 +637,7 @@ function createPointcloud({ Router, NodeStore, setBadge, log }) {
     const baseUrl = endpoint.base;
 
     try {
-      const data = await Net.postJSON(baseUrl, '/api/floor_align/manual', { points }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: 'depth_any', useServiceTarget: true });
+      const data = await Net.postJSON(baseUrl, '/api/floor_align/manual', { points }, endpoint.api, endpoint.viaNkn, endpoint.relay, 45000, { service: endpoint.service || 'depth_any', useServiceTarget: true, forceRelay: !!endpoint.relayOnly });
       if (data.vertices) {
         state.currentPointcloud.vertices = data.vertices;
         updatePointcloudViewer(nodeId, state.currentPointcloud);

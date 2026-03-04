@@ -6,7 +6,15 @@ let updateTransportButton = () => {};
 const NKN_SEED_KEY = 'graph.nkn.seed';
 
 const Net = {
-  nkn: { client: null, ready: false, addr: '', pend: new Map(), streams: new Map() },
+  nkn: {
+    client: null,
+    ready: false,
+    addr: '',
+    pend: new Map(),
+    streams: new Map(),
+    resolvePend: new Map(),
+    rpcPend: new Map()
+  },
   uploadChunkBytes: 80 * 1024, // default; per-call chunkSize can override
   uploadCache: new Map(), // uploadId -> { chunks, total, url, headers, timeout },
 
@@ -31,8 +39,93 @@ const Net = {
     return out;
   },
 
+  _rejectPending(reason = 'NKN connection closed') {
+    const err = reason instanceof Error ? reason : new Error(String(reason || 'NKN connection closed'));
+    try {
+      for (const [id, pending] of this.nkn.pend.entries()) {
+        try { clearTimeout(pending.t); } catch (_) {}
+        try { pending.rej && pending.rej(err); } catch (_) {}
+        this.nkn.pend.delete(id);
+      }
+      for (const [id, pending] of this.nkn.resolvePend.entries()) {
+        try { clearTimeout(pending.t); } catch (_) {}
+        try { pending.rej && pending.rej(err); } catch (_) {}
+        this.nkn.resolvePend.delete(id);
+      }
+      for (const [id, pending] of this.nkn.rpcPend.entries()) {
+        try { clearTimeout(pending.t); } catch (_) {}
+        try { pending.rej && pending.rej(err); } catch (_) {}
+        this.nkn.rpcPend.delete(id);
+      }
+      for (const [id, stream] of this.nkn.streams.entries()) {
+        try { stream.onError && stream.onError(err); } catch (_) {}
+        this.nkn.streams.delete(id);
+      }
+    } catch (_) {
+      // best effort
+    }
+  },
+
   _sleep(ms = 0) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  _normalizeTimeoutMs(value, fallback = 15000, minimum = 1000, maximum = 300000) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(minimum, Math.min(maximum, Math.round(n)));
+  },
+
+  isCloudflareTunnelUrl(value) {
+    const text = String(value || '').trim();
+    if (!text) return false;
+    try {
+      const parsed = new URL(text);
+      const host = String(parsed.hostname || '').toLowerCase();
+      return host.endsWith('.trycloudflare.com') || host.endsWith('.cfargotunnel.com');
+    } catch (_) {
+      return false;
+    }
+  },
+
+  classifyTunnelFailure(input, context = {}) {
+    const ctx = context && typeof context === 'object' ? context : {};
+    let status = Number(ctx.status || 0) || 0;
+    let url = String(ctx.url || '').trim();
+    let message = '';
+
+    if (input && typeof input === 'object') {
+      if (!status) status = Number(input.status || input.statusCode || 0) || 0;
+      if (!url) url = String(input.url || '').trim();
+      if (!message) {
+        if (typeof input.message === 'string') message = input.message;
+        else if (typeof input.error === 'string') message = input.error;
+      }
+    }
+    if (!message) message = String(input || '');
+
+    const lowerMsg = message.toLowerCase();
+    const cloudflare = this.isCloudflareTunnelUrl(url) || /trycloudflare|cfargotunnel|cloudflare/.test(lowerMsg);
+    const expiredHint = /stale|expired|offline|tunnel process is not running|url is stale|tunnel.*(dead|down)/.test(lowerMsg);
+    const unavailableHint = /failed to fetch|networkerror|network error|connection reset|temporar|gateway|unreachable|timeout/.test(lowerMsg);
+
+    const stale = status === 530 || (cloudflare && (expiredHint || unavailableHint));
+    const reason = stale
+      ? (status === 530 ? 'cloudflare_530' : 'cloudflare_tunnel_stale')
+      : (status ? `http_${status}` : '');
+
+    return {
+      stale,
+      cloudflare,
+      status,
+      url,
+      reason,
+      message
+    };
+  },
+
+  isStaleTunnelFailure(input, context = {}) {
+    return !!this.classifyTunnelFailure(input, context).stale;
   },
 
   async waitForReady(timeout = 15000) {
@@ -57,20 +150,25 @@ const Net = {
     if (!relay) throw new Error('No relay');
     await this.waitForReady(timeout);
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const sendOpts = { ...(opts || {}) };
+    const attempts = Math.max(1, Math.min(5, Number(sendOpts._attempts ?? 3) || 3));
+    delete sendOpts._attempts;
     let lastErr = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       try {
-        await this.nkn.client.send(relay, data, { noReply: true, maxHoldingSeconds: 240, ...opts });
+        await this.nkn.client.send(relay, data, { noReply: true, maxHoldingSeconds: 240, ...sendOpts });
         return;
       } catch (err) {
         lastErr = err;
         const msg = String(err || '');
         if (msg.includes('readyState') || msg.includes('not open') || msg.toLowerCase().includes('connection')) {
-          await this._sleep(200 * (attempt + 1));
-          await this.waitForReady(timeout);
+          if (attempt < (attempts - 1)) {
+            await this._sleep(200 * (attempt + 1));
+            await this.waitForReady(timeout);
+          }
           continue;
         }
-        if (attempt < 2) await this._sleep(150 * (attempt + 1));
+        if (attempt < (attempts - 1)) await this._sleep(150 * (attempt + 1));
       }
     }
     throw lastErr || new Error('NKN send failed');
@@ -398,6 +496,32 @@ const Net = {
     return this.nknFetchBlob(fullUrl, relay, api, { service, useServiceTarget });
   },
 
+  async reconnectNkn(options = {}) {
+    const timeoutMs = this._normalizeTimeoutMs(options.timeout ?? options.timeoutMs, 20000, 2000, 120000);
+    const waitReady = options.waitReady !== false;
+    const prev = this.nkn.client;
+
+    this._rejectPending(new Error('NKN reconnect requested'));
+    this.nkn.ready = false;
+
+    if (prev) {
+      try {
+        if (typeof prev.close === 'function') prev.close();
+      } catch (_) {
+        // ignore close failures
+      }
+    }
+
+    this.nkn.client = null;
+    this.nkn.addr = '';
+    updateTransportButton();
+
+    this.ensureNkn();
+    if (!waitReady) return '';
+    await this.waitForReady(timeoutMs);
+    return this.nkn.addr || '';
+  },
+
   ensureNkn() {
     if (this.nkn.client) return;
     if (!window.nkn || !window.nkn.MultiClient) {
@@ -457,6 +581,7 @@ const Net = {
     client.on('close', () => {
       this.nkn.ready = false;
       updateTransportButton();
+      this._rejectPending(new Error('NKN transport closed'));
     });
     client.on('message', (a, b) => {
       let payload = (a && typeof a === 'object' && a.payload !== undefined) ? a.payload : b;
@@ -477,6 +602,30 @@ const Net = {
             pending.res(msg);
           }
           return;
+        }
+        if (ev === 'resolve_tunnels_result') {
+          const rid = msg.request_id || id;
+          if (rid) {
+            const pending = this.nkn.resolvePend.get(rid);
+            if (pending) {
+              clearTimeout(pending.t);
+              this.nkn.resolvePend.delete(rid);
+              pending.res(msg);
+              return;
+            }
+          }
+        }
+        if (ev === 'service_rpc_result') {
+          const rid = msg.request_id || id;
+          if (rid) {
+            const pending = this.nkn.rpcPend.get(rid);
+            if (pending) {
+              clearTimeout(pending.t);
+              this.nkn.rpcPend.delete(rid);
+              pending.res(msg);
+              return;
+            }
+          }
         }
         if (ev === 'relay.response' && id) {
           const pending = this.nkn.pend.get(id);
@@ -694,20 +843,140 @@ const Net = {
   async relayHealth(relay, timeout = 15000) {
     const addr = (relay || '').trim();
     if (!addr) throw new Error('No relay provided');
+    const timeoutMs = this._normalizeTimeoutMs(timeout, 15000);
     if (!this.nkn.client) this.ensureNkn();
     const id = 'h-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.nkn.pend.delete(id);
         reject(new Error('NKN health timeout'));
-      }, timeout);
+      }, timeoutMs);
       this.nkn.pend.set(id, { res: resolve, rej: reject, t: timer });
-      this._sendNkn(addr, { event: 'relay.health', id }, { noReply: true, maxHoldingSeconds: 30 }, timeout)
+      this._sendNkn(addr, { event: 'relay.health', id }, { noReply: true, maxHoldingSeconds: 30 }, timeoutMs)
         .catch((err) => {
           clearTimeout(timer);
           this.nkn.pend.delete(id);
           reject(err);
         });
+    });
+  },
+
+  async nknResolveTunnels(targetAddress, timeout = 20000) {
+    const target = (targetAddress || '').trim();
+    if (!target) throw new Error('No target router address');
+    const timeoutMs = this._normalizeTimeoutMs(timeout, 20000);
+    if (!this.nkn.client) this.ensureNkn();
+    await this.waitForReady(timeoutMs);
+    const requestId = 'rt-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.nkn.resolvePend.delete(requestId);
+        reject(new Error('NKN resolve timeout'));
+      }, timeoutMs);
+      this.nkn.resolvePend.set(requestId, { res: resolve, rej: reject, t: timer });
+      const payload = {
+        event: 'resolve_tunnels',
+        request_id: requestId,
+        from: this.nkn.addr || '',
+        timestamp_ms: Date.now()
+      };
+      this._sendNkn(target, payload, { noReply: true, maxHoldingSeconds: 45 }, timeoutMs)
+        .catch((err) => {
+          clearTimeout(timer);
+          this.nkn.resolvePend.delete(requestId);
+          reject(err);
+        });
+    });
+  },
+
+  async nknServiceRpc(arg1, arg2, arg3, arg4 = undefined) {
+    // Supports both signatures:
+    // 1) nknServiceRpc(service, path, options)
+    // 2) nknServiceRpc(relay, service, path, options) (legacy compatibility)
+    const legacySignature = (typeof arg3 === 'string') || (arg4 !== undefined);
+    const options = (legacySignature ? arg4 : arg3) && typeof (legacySignature ? arg4 : arg3) === 'object'
+      ? { ...(legacySignature ? arg4 : arg3) }
+      : {};
+    const target = String(
+      legacySignature
+        ? (arg1 || '')
+        : (options.relay || CFG.routerTargetNknAddress || '')
+    ).trim();
+    if (!target) throw new Error('No relay/router address');
+
+    const svc = String(legacySignature ? arg2 : arg1 || '').trim();
+    if (!svc) throw new Error('Missing service');
+    const rpcPath = String(legacySignature ? arg3 : arg2 || '').trim();
+    if (!rpcPath) throw new Error('Missing path');
+    const method = String(options.method || 'GET').toUpperCase();
+    const timeout = this._normalizeTimeoutMs(options.timeout_ms ?? options.timeout, 45000);
+    const maxPayloadB = Math.max(1024, Number(options.maxPayloadB || (512 * 1024)) || (512 * 1024));
+    const sendAttempts = Math.max(1, Math.min(3, Number(options.sendAttempts || 1) || 1));
+    if (!this.nkn.client) this.ensureNkn();
+    await this.waitForReady(timeout);
+    const requestId = 'rpc-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    const rpcPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.nkn.rpcPend.delete(requestId);
+        reject(new Error('NKN service RPC timeout'));
+      }, timeout);
+      this.nkn.rpcPend.set(requestId, { res: resolve, rej: reject, t: timer });
+      const payload = {
+        event: 'service_rpc_request',
+        request_id: requestId,
+        from: this.nkn.addr || '',
+        service: svc,
+        path: rpcPath.startsWith('/') ? rpcPath : ('/' + rpcPath),
+        method,
+        timeout_ms: timeout,
+        headers: options.headers || {}
+      };
+      if (options.json !== undefined) payload.json = options.json;
+      if (options.body_b64 !== undefined) payload.body_b64 = options.body_b64;
+      try {
+        const payloadBytes = new TextEncoder().encode(JSON.stringify(payload)).length;
+        if (Number.isFinite(maxPayloadB) && maxPayloadB > 0 && payloadBytes > maxPayloadB) {
+          clearTimeout(timer);
+          this.nkn.rpcPend.delete(requestId);
+          reject(new Error(`RPC payload too large (${payloadBytes} > ${maxPayloadB})`));
+          return;
+        }
+      } catch (_) {}
+      this._sendNkn(target, payload, { noReply: true, maxHoldingSeconds: 120, _attempts: sendAttempts }, timeout)
+        .catch((err) => {
+          clearTimeout(timer);
+          this.nkn.rpcPend.delete(requestId);
+          reject(err);
+        });
+    });
+    return rpcPromise.then((result) => {
+      const out = result && typeof result === 'object' ? { ...result } : result;
+      if (out && typeof out === 'object' && out.result && typeof out.result === 'object' && out.ok === undefined) {
+        // Compatibility with nested teleoperation-style result payloads.
+        Object.assign(out, out.result);
+      }
+      if (options.decodeBody && out && out.body_b64 && out.json == null) {
+        try {
+          const bodyBytes = b64ToBytes(out.body_b64);
+          const text = td.decode(bodyBytes);
+          out.body_text = text;
+          const ctype = String((out.headers && (out.headers['content-type'] || out.headers['Content-Type'])) || '').toLowerCase();
+          if (ctype.includes('application/json')) {
+            try { out.body_json = JSON.parse(text); } catch (_) {}
+          }
+        } catch (_) {
+          // keep raw payload if decode fails
+        }
+      }
+      if (options.throwOnError && out && out.ok === false) {
+        const status = Number(out.status || 0);
+        const msg = String(out.error || `RPC failed with status ${status}`);
+        const err = new Error(msg);
+        err.status = status;
+        err.payload = out;
+        throw err;
+      }
+      return out;
     });
   }
 };

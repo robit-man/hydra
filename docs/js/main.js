@@ -29,6 +29,8 @@ import { createWebScraper } from './webScraper.js';
 import { createNoClipBridge } from './noclipBridge.js';
 import { initSmartObjectInvite } from './smartObjectInvite.js';
 import { createNoClipBridgeSync } from './noclipBridgeSync.js';
+import { createRouterDiscovery } from './routerDiscovery.js';
+import { normalizeResolvedMap } from './endpointResolver.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -146,6 +148,7 @@ const WebScraper = createWebScraper({
   NodeStore,
   Router,
   Net,
+  CFG,
   setBadge,
   log
 });
@@ -179,6 +182,7 @@ const Pointcloud = createPointcloud({
   getNode: (id) => graphAccess.getNode(id),
   Router,
   NodeStore,
+  CFG,
   setBadge,
   log
 });
@@ -190,6 +194,37 @@ const NoClipBridge = createNoClipBridge({
   CFG,
   setBadge,
   log
+});
+
+const applyRouterResolvedPayload = (reply) => {
+  const resolved = normalizeResolvedMap(reply);
+  if (!resolved || typeof resolved !== 'object') return;
+  const incomingTs = Number(reply?.timestampMs || reply?.rawReply?.timestamp_ms || 0);
+  const currentTs = Number(CFG.routerLastResolvedAt || 0);
+  if (incomingTs > 0 && currentTs > 0 && incomingTs < currentTs) {
+    log(`[router.resolve] stale endpoint payload ignored ts=${incomingTs} current=${currentTs}`);
+    return;
+  }
+  const autoApplyEnabled = CFG?.featureFlags?.resolverAutoApply !== false;
+  if (autoApplyEnabled) {
+    CFG.routerResolvedEndpoints = resolved;
+  } else {
+    log('[router.resolve] auto-apply disabled by featureFlags.resolverAutoApply');
+  }
+  CFG.routerLastResolveResult = reply?.rawReply || reply;
+  if (Number.isFinite(incomingTs) && incomingTs > 0) {
+    CFG.routerLastResolvedAt = incomingTs;
+  }
+  saveCFG();
+};
+
+const RouterDiscovery = createRouterDiscovery({
+  Net,
+  CFG,
+  saveCFG,
+  setBadge,
+  log,
+  onResolved: applyRouterResolvedPayload
 });
 
 let NoClipBridgeSyncImpl = null;
@@ -339,6 +374,78 @@ async function runHealthCheck() {
   }
 }
 
+const ROUTER_QR_KEYS = [
+  'router',
+  'router_target',
+  'router_nkn',
+  'router_nkn_address',
+  'routerTargetNknAddress',
+  'relay',
+  'target',
+  'address',
+  'nkn'
+];
+
+const tryParseRouterTarget = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const normalized = RouterDiscovery.normalizeRouterAddress(raw);
+  const validation = RouterDiscovery.validateRouterAddress(normalized);
+  return validation.ok ? validation.target : '';
+};
+
+const parseRouterTargetFromQr = (rawText) => {
+  const raw = String(rawText || '').trim();
+  if (!raw) return '';
+
+  const direct = tryParseRouterTarget(raw);
+  if (direct) return direct;
+
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      const obj = parsed && typeof parsed === 'object' ? parsed : null;
+      if (obj) {
+        for (const key of ROUTER_QR_KEYS) {
+          const candidate = tryParseRouterTarget(obj[key]);
+          if (candidate) return candidate;
+        }
+      }
+    } catch (_) {
+      // ignore parse errors
+    }
+  }
+
+  try {
+    const url = new URL(raw);
+    for (const key of ROUTER_QR_KEYS) {
+      const candidate = tryParseRouterTarget(url.searchParams.get(key) || '');
+      if (candidate) return candidate;
+    }
+    if (String(url.protocol || '').toLowerCase() === 'nkn:') {
+      const nknCandidate = [url.host, url.pathname.replace(/^\/+/, '')].filter(Boolean).join('');
+      const candidate = tryParseRouterTarget(nknCandidate);
+      if (candidate) return candidate;
+    }
+  } catch (_) {
+    // ignore URL parse errors
+  }
+
+  if (raw.includes('=')) {
+    try {
+      const params = new URLSearchParams(raw);
+      for (const key of ROUTER_QR_KEYS) {
+        const candidate = tryParseRouterTarget(params.get(key) || '');
+        if (candidate) return candidate;
+      }
+    } catch (_) {
+      // ignore query parse errors
+    }
+  }
+
+  return '';
+};
+
 function bindUI() {
   const toggle = qs('#transportToggle');
   if (toggle) {
@@ -355,6 +462,177 @@ function bindUI() {
       runHealthCheck();
     });
   }
+  const routerInput = qs('#routerTargetInput');
+  const routerResolveBtn = qs('#routerResolveBtn');
+  const routerReconnectBtn = qs('#routerReconnectBtn');
+  const routerScanBtn = qs('#routerScanBtn');
+  const routerAutoBtn = qs('#routerAutoResolveBtn');
+  const routerStatus = qs('#routerResolveStatus');
+  const routerMessage = qs('#routerResolveMessage');
+
+  const formatResolveError = (message) => {
+    const text = String(message || '').trim();
+    if (!text) return 'Router resolve failed';
+    if (/timeout/i.test(text)) return 'Resolve timed out waiting for router response';
+    if (/missing router target/i.test(text)) return 'Enter router NKN address first';
+    if (/not ready/i.test(text)) return 'NKN transport is not ready yet';
+    return text;
+  };
+
+  const summarizeResolvedWarnings = (resolved) => {
+    const map = resolved && typeof resolved === 'object' ? resolved : {};
+    const stale = [];
+    const errors = [];
+    for (const [service, entry] of Object.entries(map)) {
+      const raw = entry?.raw && typeof entry.raw === 'object' ? entry.raw : (entry || {});
+      const tunnelError = String(raw.tunnel_error || raw?.tunnel?.error || raw?.fallback?.cloudflare?.error || '').trim();
+      const staleTunnel = String(raw.stale_tunnel_url || raw?.tunnel?.stale_tunnel_url || raw?.fallback?.cloudflare?.stale_tunnel_url || '').trim();
+      if (tunnelError) {
+        errors.push(`${service}: ${tunnelError}`);
+        continue;
+      }
+      if (staleTunnel) stale.push(service);
+    }
+    if (errors.length) {
+      const first = errors.slice(0, 2).join(' | ');
+      const extra = errors.length > 2 ? ` (+${errors.length - 2} more)` : '';
+      return `Cloudflared warning: ${first}${extra}`;
+    }
+    if (stale.length) {
+      const labels = stale.slice(0, 3).join(', ');
+      const extra = stale.length > 3 ? ` (+${stale.length - 3} more)` : '';
+      return `Stale cloudflared URL: ${labels}${extra}`;
+    }
+    return '';
+  };
+
+  const renderRouterState = (state) => {
+    if (!routerStatus && !routerMessage) return;
+    const status = String(state?.status || RouterDiscovery.getStatus() || 'idle');
+    const resolvedMap = state?.resolved && typeof state.resolved === 'object'
+      ? state.resolved
+      : (CFG.routerResolvedEndpoints && typeof CFG.routerResolvedEndpoints === 'object' ? CFG.routerResolvedEndpoints : {});
+    const serviceCount = Object.keys(resolvedMap).length;
+    const warning = summarizeResolvedWarnings(resolvedMap);
+    let displayStatus = status;
+    let tone = 'muted';
+    let message = 'Router discovery idle';
+
+    if (state?.stale) {
+      displayStatus = 'warn';
+      tone = 'warn';
+      message = 'Ignored stale router resolve response';
+    } else if (status === 'resolving') {
+      tone = 'warn';
+      message = 'Resolving router endpoints...';
+    } else if (status === 'ok') {
+      if (warning) {
+        displayStatus = 'warn';
+        tone = 'warn';
+        message = warning;
+      } else {
+        tone = 'ok';
+        message = serviceCount
+          ? `Resolved ${serviceCount} service endpoint${serviceCount === 1 ? '' : 's'}`
+          : 'Resolve complete (no services reported)';
+      }
+    } else if (status === 'error') {
+      tone = 'error';
+      message = formatResolveError(state?.lastError || CFG.routerLastResolveError || '');
+    } else if (CFG.routerLastResolveError) {
+      tone = 'warn';
+      message = `Last error: ${formatResolveError(CFG.routerLastResolveError)}`;
+    }
+
+    if (routerStatus) {
+      routerStatus.textContent = displayStatus;
+      routerStatus.dataset.status = displayStatus;
+    }
+    if (routerMessage) {
+      routerMessage.textContent = message;
+      routerMessage.dataset.tone = tone;
+      routerMessage.title = message;
+    }
+    if (routerInput && state && typeof state.target === 'string' && routerInput.value !== state.target) {
+      routerInput.value = state.target;
+    }
+    if (routerAutoBtn) {
+      routerAutoBtn.classList.toggle('active', !!CFG.routerAutoResolve);
+      routerAutoBtn.textContent = CFG.routerAutoResolve ? 'Auto:On' : 'Auto';
+    }
+  };
+
+  if (routerInput) {
+    routerInput.value = String(CFG.routerTargetNknAddress || '');
+    routerInput.addEventListener('input', () => {
+      RouterDiscovery.setTarget(routerInput.value || '');
+    });
+  }
+  if (routerResolveBtn) {
+    routerResolveBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const target = RouterDiscovery.setTarget(routerInput?.value || CFG.routerTargetNknAddress || '');
+      if (!target) {
+        setBadge('Enter router NKN address first', false);
+        return;
+      }
+      try {
+        await RouterDiscovery.resolveNow(target, { timeoutMs: 25000 });
+      } catch (_) {
+        // already surfaced in RouterDiscovery
+      }
+    });
+  }
+  if (routerReconnectBtn) {
+    routerReconnectBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (routerReconnectBtn.disabled) return;
+      const target = RouterDiscovery.setTarget(routerInput?.value || CFG.routerTargetNknAddress || '');
+      routerReconnectBtn.disabled = true;
+      setBadge('Reconnecting NKN transport...');
+      try {
+        await Net.reconnectNkn({ timeout: 25000 });
+        setBadge('NKN transport reconnected');
+        if (target) {
+          await RouterDiscovery.resolveNow(target, { timeoutMs: 25000 });
+        } else {
+          renderRouterState({ status: RouterDiscovery.getStatus(), target: '' });
+        }
+      } catch (err) {
+        setBadge(`Reconnect failed: ${err?.message || err}`, false);
+      } finally {
+        routerReconnectBtn.disabled = false;
+      }
+    });
+  }
+  if (routerScanBtn) {
+    routerScanBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await openQrScanner(routerInput, (text) => {
+        const parsed = parseRouterTargetFromQr(text);
+        if (!parsed) {
+          setBadge('QR did not contain a valid router NKN address', false);
+          return;
+        }
+        const target = RouterDiscovery.setTarget(parsed);
+        if (routerInput) routerInput.value = target;
+      }, { populateTarget: false });
+    });
+  }
+  if (routerAutoBtn) {
+    routerAutoBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      CFG.routerAutoResolve = !CFG.routerAutoResolve;
+      saveCFG();
+      if (CFG.routerAutoResolve) RouterDiscovery.startAuto();
+      else RouterDiscovery.stopAuto();
+      renderRouterState({ status: RouterDiscovery.getStatus(), target: CFG.routerTargetNknAddress || '' });
+    });
+  }
+  RouterDiscovery.subscribe(renderRouterState);
+  renderRouterState({ status: CFG.routerLastResolveStatus || 'idle', target: CFG.routerTargetNknAddress || '' });
+  if (CFG.routerAutoResolve) RouterDiscovery.startAuto();
+
   if (CFG.transport !== 'nkn') {
     CFG.transport = 'nkn';
     saveCFG();

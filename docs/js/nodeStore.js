@@ -1,5 +1,29 @@
 import { LS, ASR_DEFAULT_PROMPT } from './utils.js';
 
+function cloneDefaultValue(value) {
+  if (Array.isArray(value)) return value.map((entry) => cloneDefaultValue(entry));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] = cloneDefaultValue(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+function mergeMissingDefaults(config, defaults) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  let changed = false;
+  for (const [key, value] of Object.entries(defaults || {})) {
+    if (cfg[key] === undefined) {
+      cfg[key] = cloneDefaultValue(value);
+      changed = true;
+    }
+  }
+  return { cfg, changed };
+}
+
 const NodeStore = {
   key: (id) => `graph.node.${id}`,
   defaultsByType: {
@@ -9,9 +33,13 @@ const NodeStore = {
       wasmThreads: 1,
       base: 'http://localhost:8126',
       relay: '',
+      service: 'whisper_asr',
+      endpointSource: 'router',
       api: '',
       model: '',
       endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       mode: 'fast',
       rate: 16000,
       chunk: 120,
@@ -33,9 +61,13 @@ const NodeStore = {
     LLM: {
       base: 'http://127.0.0.1:11434',
       relay: '',
+      service: 'ollama_farm',
+      endpointSource: 'router',
       api: '',
       model: '',
       endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       stream: true,
       useSystem: false,
       system: '',
@@ -77,9 +109,13 @@ const NodeStore = {
     TTS: {
       base: 'http://localhost:8123',
       relay: '',
+      service: 'piper_tts',
+      endpointSource: 'router',
       api: '',
       model: '',
       endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       mode: 'stream',
       volume: 1,
       wasm: false,
@@ -99,7 +135,11 @@ const NodeStore = {
       base: 'http://127.0.0.1:8130',
       relay: '',
       service: 'web_scrape',
+      endpointSource: 'router',
       api: '',
+      endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       headless: 'true',
       autoScreenshot: 'false',
       sid: '',
@@ -190,7 +230,12 @@ const NodeStore = {
     MCP: {
       base: 'http://127.0.0.1:9003',
       relay: '',
+      service: 'mcp_server',
+      endpointSource: 'router',
       api: '',
+      endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       autoConnect: true,
       connectOnQuery: true,
       protocolVersion: '2024-05-31',
@@ -238,8 +283,12 @@ const NodeStore = {
     Pointcloud: {
       base: 'http://127.0.0.1:5000',
       relay: '',
+      service: 'depth_any',
+      endpointSource: 'router',
       api: '',
       endpointMode: 'auto',
+      lastResolvedAt: 0,
+      resolveDiagnostics: null,
       defaultModel: '',
       autoLoadModel: true,
       resolution: 504,
@@ -301,9 +350,16 @@ const NodeStore = {
   },
 
   ensure(id, type) {
+    const defaults = this.defaultsByType[type] || {};
     let obj = LS.get(this.key(id), null);
-    if (!obj || obj.type !== type) {
-      obj = { id, type, config: { ...this.defaultsByType[type] } };
+    if (!obj || obj.type !== type || !obj.config || typeof obj.config !== 'object') {
+      obj = { id, type, config: cloneDefaultValue(defaults) };
+      this.saveObj(id, obj);
+      return obj;
+    }
+    const merged = mergeMissingDefaults(obj.config, defaults);
+    if (merged.changed) {
+      obj = { ...obj, config: merged.cfg };
       this.saveObj(id, obj);
     }
     return obj;

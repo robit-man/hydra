@@ -1,4 +1,5 @@
 import { CFG } from './config.js';
+import { resolveMediaServiceEndpoint } from './endpointResolver.js';
 
 const componentIndex = new Map();
 const addressIndex = new Map();
@@ -13,6 +14,11 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 const HEARTBEAT_MAX_MISSED = 3;
 const HANDSHAKE_RETRY_MS = 3_000;
 const MAX_PENDING_ATTEMPTS = 6;
+const MEDIA_FETCH_TIMEOUT_MS = 12_000;
+const MEDIA_ROUTE_RETRY_LIMIT = 2;
+const MEDIA_PULL_INTERVAL_MIN_MS = 120;
+const MEDIA_PULL_INTERVAL_MAX_MS = 4_000;
+const MEDIA_STALE_TRANSPORT_TTL_MS = 90_000;
 
 const HANDSHAKE_DEFAULT = {
   status: 'idle',
@@ -253,6 +259,584 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
     if (!Number.isFinite(value)) return 0.5;
     const clamped = Math.max(0, Math.min(100, value));
     return Math.max(0.05, (100 - clamped) / 100);
+  }
+
+  const asText = (value) => (typeof value === 'string' ? value.trim() : '');
+  const firstText = (...values) => {
+    for (const value of values) {
+      const text = asText(value);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  function stripTrailingSlash(value) {
+    const text = asText(value);
+    if (!text) return '';
+    if (/^nkn:\/\//i.test(text)) return text;
+    return text.replace(/\/+$/, '');
+  }
+
+  function ensureLeadingSlash(value) {
+    const text = asText(value);
+    if (!text) return '';
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text)) return text;
+    return text.startsWith('/') ? text : `/${text}`;
+  }
+
+  function joinBaseAndPath(base, path) {
+    const p = asText(path);
+    if (!p) return stripTrailingSlash(base);
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(p)) return p;
+    const b = stripTrailingSlash(base);
+    if (!b) return ensureLeadingSlash(p);
+    return `${b}${ensureLeadingSlash(p)}`;
+  }
+
+  function pathFromUrl(url, fallbackPath = '/') {
+    const fallback = ensureLeadingSlash(fallbackPath || '/');
+    const raw = asText(url);
+    if (!raw) return fallback;
+    try {
+      const parsed = new URL(raw);
+      const out = `${parsed.pathname || '/'}${parsed.search || ''}`;
+      return out || fallback;
+    } catch (_) {
+      const normalized = ensureLeadingSlash(raw);
+      return normalized || fallback;
+    }
+  }
+
+  function normalizeEndpointSource(value) {
+    return String(value || '').trim().toLowerCase() === 'manual' ? 'manual' : 'router';
+  }
+
+  function normalizeEndpointMode(value) {
+    const mode = String(value || '').trim().toLowerCase();
+    if (mode === 'local' || mode === 'remote' || mode === 'nkn') return mode;
+    return 'auto';
+  }
+
+  function normalizeTransportLabel(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key) return '';
+    if (key === 'cloudflared' || key === 'cf') return 'cloudflare';
+    if (key === 'localhost' || key === 'lan') return 'local';
+    return key;
+  }
+
+  function ensureRouteRuntime(entry) {
+    if (!entry) return null;
+    if (!entry.routeRuntime || typeof entry.routeRuntime !== 'object') {
+      entry.routeRuntime = {
+        activeTransport: '',
+        activeSource: '',
+        staleTransports: new Map(),
+        failStreak: 0,
+        fallbackCount: 0,
+        minPullIntervalMs: MEDIA_PULL_INTERVAL_MIN_MS,
+        nextAllowedAt: 0,
+        pendingFrameFetch: null,
+        pendingAudioFetch: null,
+        lastError: '',
+        lastStatus: '',
+        lastUpdatedAt: 0
+      };
+    }
+    if (!(entry.routeRuntime.staleTransports instanceof Map)) {
+      entry.routeRuntime.staleTransports = new Map();
+    }
+    return entry.routeRuntime;
+  }
+
+  function pruneStaleTransports(runtime) {
+    if (!runtime || !(runtime.staleTransports instanceof Map)) return;
+    const now = Date.now();
+    for (const [transport, expiresAt] of runtime.staleTransports.entries()) {
+      if (!Number.isFinite(Number(expiresAt)) || Number(expiresAt) <= now) {
+        runtime.staleTransports.delete(transport);
+      }
+    }
+  }
+
+  function excludedTransports(runtime) {
+    pruneStaleTransports(runtime);
+    if (!runtime || !(runtime.staleTransports instanceof Map)) return [];
+    return Array.from(runtime.staleTransports.keys());
+  }
+
+  function markTransportStale(runtime, transport, ttlMs = MEDIA_STALE_TRANSPORT_TTL_MS) {
+    if (!runtime || !(runtime.staleTransports instanceof Map)) return;
+    const key = normalizeTransportLabel(transport);
+    if (!key) return;
+    runtime.staleTransports.set(key, Date.now() + Math.max(1000, Number(ttlMs) || MEDIA_STALE_TRANSPORT_TTL_MS));
+  }
+
+  function classifyRouteError(err, context = {}) {
+    if (Net && typeof Net.classifyTunnelFailure === 'function') {
+      const status = Number(err?.status || err?.response?.status || context.status || 0) || 0;
+      const url = asText(err?.url || context.url || '');
+      return Net.classifyTunnelFailure(err, { status, url });
+    }
+    return { stale: false, cloudflare: false, status: 0, url: '', reason: '', message: String(err?.message || err || '') };
+  }
+
+  function remoteInfoText(kind, transport, detail, sourceAddress) {
+    const typeLabel = kind === 'audio' ? 'Audio' : 'Video';
+    const tx = transport ? ` • ${transport}` : '';
+    const detailText = detail ? ` • ${detail}` : '';
+    const peer = sourceAddress ? ` • from ${formatAddress(sourceAddress)}` : '';
+    return `${typeLabel}${tx}${detailText}${peer}`;
+  }
+
+  function updatePeerRouteMeta(id, address, runtime, extras = {}) {
+    const normalized = ensureGraphPrefix(address);
+    if (!normalized || !runtime) return;
+    updatePeerMeta(id, normalized, {
+      mediaTransport: normalizeTransportLabel(runtime.activeTransport || ''),
+      mediaTransportSource: runtime.activeSource || '',
+      mediaFallbackCount: Number(runtime.fallbackCount || 0),
+      mediaFailStreak: Number(runtime.failStreak || 0),
+      mediaLastError: runtime.lastError || '',
+      ...extras
+    });
+  }
+
+  function resolveMediaEndpoint(id, kind, packet, entry) {
+    const cfg = config(id) || {};
+    const runtime = ensureRouteRuntime(entry);
+    const serviceDefault = kind === 'audio' ? 'audio_router' : 'camera_router';
+    const effectiveCfg = {
+      service: firstText(
+        packet?.service,
+        packet?.serviceName,
+        packet?.targetService,
+        kind === 'audio' ? cfg.audioService : cfg.videoService,
+        cfg.service,
+        serviceDefault
+      ) || serviceDefault,
+      base: stripTrailingSlash(firstText(
+        packet?.base,
+        packet?.baseUrl,
+        packet?.base_url,
+        kind === 'audio' ? cfg.audioBase : cfg.videoBase,
+        cfg.base
+      )),
+      relay: firstText(
+        packet?.relay,
+        kind === 'audio' ? cfg.audioRelay : cfg.videoRelay,
+        cfg.relay,
+        CFG.routerTargetNknAddress
+      ),
+      endpointSource: normalizeEndpointSource(firstText(
+        packet?.endpointSource,
+        kind === 'audio' ? cfg.audioEndpointSource : cfg.videoEndpointSource,
+        cfg.endpointSource,
+        'router'
+      )),
+      endpointMode: normalizeEndpointMode(firstText(
+        packet?.endpointMode,
+        kind === 'audio' ? cfg.audioEndpointMode : cfg.videoEndpointMode,
+        cfg.endpointMode,
+        'auto'
+      )),
+      api: firstText(packet?.api, cfg.api)
+    };
+
+    return resolveMediaServiceEndpoint({
+      cfg: effectiveCfg,
+      service: effectiveCfg.service,
+      routerResolvedEndpoints: packet?.routerResolvedEndpoints || CFG.routerResolvedEndpoints,
+      routerTargetNknAddress: firstText(packet?.routerTargetNknAddress, CFG.routerTargetNknAddress),
+      defaultBase: effectiveCfg.base,
+      excludedTransports: excludedTransports(runtime)
+    });
+  }
+
+  function extractVideoDescriptor(packet) {
+    const framePacket = packet?.framePacket && typeof packet.framePacket === 'object'
+      ? packet.framePacket
+      : (packet?.frame_packet && typeof packet.frame_packet === 'object' ? packet.frame_packet : {});
+    const inlineB64 = firstText(packet?.b64, packet?.image, framePacket.b64, framePacket.frame);
+    const inlineMime = firstText(packet?.mime, framePacket.mime, 'image/webp');
+    const cameraId = firstText(packet?.cameraId, packet?.camera_id, framePacket.cameraId, framePacket.camera_id);
+    let framePath = firstText(packet?.framePath, packet?.frame_path, framePacket.path, framePacket.frame_path);
+    const template = firstText(
+      packet?.framePacketTemplate,
+      packet?.frame_packet_template,
+      framePacket.frame_packet_template,
+      framePacket.template
+    );
+    if (!framePath && template) framePath = template;
+    if (framePath && framePath.includes('<camera_id>')) {
+      const replacement = encodeURIComponent(cameraId || 'default');
+      framePath = framePath.replace(/<camera_id>/g, replacement);
+    }
+    const frameUrl = firstText(packet?.frameUrl, packet?.frame_url, framePacket.frame_url, framePacket.url, packet?.url);
+    const width = Number(packet?.width || framePacket.width || 0) || 0;
+    const height = Number(packet?.height || framePacket.height || 0) || 0;
+    return {
+      inlineB64,
+      inlineMime,
+      frameUrl,
+      framePath: framePath || '',
+      cameraId,
+      width,
+      height
+    };
+  }
+
+  function extractAudioDescriptor(packet) {
+    const audioPacket = packet?.audioPacket && typeof packet.audioPacket === 'object'
+      ? packet.audioPacket
+      : (packet?.audio_packet && typeof packet.audio_packet === 'object' ? packet.audio_packet : {});
+    const inlineB64 = firstText(packet?.b64, audioPacket.b64, audioPacket.audio_b64);
+    const mime = firstText(packet?.mime, audioPacket.mime, 'audio/webm');
+    const format = firstText(packet?.format, audioPacket.format, mime);
+    const audioUrl = firstText(packet?.audioUrl, packet?.audio_url, audioPacket.audio_url, audioPacket.url, packet?.url);
+    const audioPath = firstText(
+      packet?.audioPath,
+      packet?.audio_path,
+      packet?.path,
+      audioPacket.audio_path,
+      audioPacket.path
+    );
+    const offerUrl = firstText(packet?.webrtc_offer_url, audioPacket.webrtc_offer_url);
+    return {
+      inlineB64,
+      mime,
+      format,
+      audioUrl,
+      audioPath: audioPath || '',
+      offerUrl
+    };
+  }
+
+  async function fetchJsonDirect(url, api, timeoutMs = MEDIA_FETCH_TIMEOUT_MS) {
+    const headers = Net && typeof Net.auth === 'function' ? Net.auth({}, api) : {};
+    delete headers['Content-Type'];
+    const opts = {
+      method: 'GET',
+      headers
+    };
+    const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    let timer = null;
+    if (controller) {
+      opts.signal = controller.signal;
+      timer = setTimeout(() => {
+        try { controller.abort(); } catch (_) {}
+      }, Math.max(1000, Number(timeoutMs) || MEDIA_FETCH_TIMEOUT_MS));
+    }
+    try {
+      const response = await fetch(url, opts);
+      if (!response.ok) {
+        const err = new Error(`HTTP ${response.status}`);
+        err.status = Number(response.status || 0);
+        err.url = url;
+        err.response = response;
+        throw err;
+      }
+      return await response.json();
+    } catch (err) {
+      if (err && typeof err === 'object' && !err.url) err.url = url;
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function fetchBlobDirect(url, api, timeoutMs = MEDIA_FETCH_TIMEOUT_MS) {
+    const headers = Net && typeof Net.auth === 'function' ? Net.auth({}, api) : {};
+    delete headers['Content-Type'];
+    const opts = {
+      method: 'GET',
+      headers
+    };
+    const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    let timer = null;
+    if (controller) {
+      opts.signal = controller.signal;
+      timer = setTimeout(() => {
+        try { controller.abort(); } catch (_) {}
+      }, Math.max(1000, Number(timeoutMs) || MEDIA_FETCH_TIMEOUT_MS));
+    }
+    try {
+      const response = await fetch(url, opts);
+      if (!response.ok) {
+        const err = new Error(`HTTP ${response.status}`);
+        err.status = Number(response.status || 0);
+        err.url = url;
+        err.response = response;
+        throw err;
+      }
+      return await response.blob();
+    } catch (err) {
+      if (err && typeof err === 'object' && !err.url) err.url = url;
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function fetchJsonViaNkn(service, path, relay, timeoutMs = MEDIA_FETCH_TIMEOUT_MS) {
+    if (!Net || typeof Net.nknServiceRpc !== 'function') {
+      throw new Error('NKN service RPC unavailable');
+    }
+    const targetRelay = firstText(relay, CFG.routerTargetNknAddress);
+    if (!targetRelay) throw new Error('Missing NKN relay target for media RPC');
+    const rpcPath = pathFromUrl(path || '/');
+    const result = await Net.nknServiceRpc(service, rpcPath, {
+      relay: targetRelay,
+      method: 'GET',
+      timeout_ms: Math.max(1500, Number(timeoutMs) || MEDIA_FETCH_TIMEOUT_MS),
+      decodeBody: true,
+      throwOnError: true,
+      sendAttempts: 1
+    });
+    const jsonPayload = (result && typeof result.json === 'object' && result.json) ||
+      (result && typeof result.body_json === 'object' && result.body_json) ||
+      null;
+    if (jsonPayload) return jsonPayload;
+    if (result && typeof result.body_text === 'string' && result.body_text.trim()) {
+      try {
+        return JSON.parse(result.body_text);
+      } catch (_) {
+        // fall through to explicit error
+      }
+    }
+    throw new Error('Missing JSON payload in NKN media RPC response');
+  }
+
+  async function fetchBlobViaNkn(service, path, relay, timeoutMs = MEDIA_FETCH_TIMEOUT_MS) {
+    if (!Net || typeof Net.nknServiceRpc !== 'function') {
+      throw new Error('NKN service RPC unavailable');
+    }
+    const targetRelay = firstText(relay, CFG.routerTargetNknAddress);
+    if (!targetRelay) throw new Error('Missing NKN relay target for media RPC');
+    const rpcPath = pathFromUrl(path || '/');
+    const result = await Net.nknServiceRpc(service, rpcPath, {
+      relay: targetRelay,
+      method: 'GET',
+      timeout_ms: Math.max(1500, Number(timeoutMs) || MEDIA_FETCH_TIMEOUT_MS),
+      decodeBody: true,
+      throwOnError: true,
+      sendAttempts: 1
+    });
+    if (result && typeof result.body_b64 === 'string' && result.body_b64) {
+      const headers = result.headers && typeof result.headers === 'object' ? result.headers : {};
+      const mime = firstText(headers['content-type'], headers['Content-Type'], 'audio/webm');
+      return base64ToBlob(result.body_b64, mime || 'audio/webm');
+    }
+    if (result && result.json && typeof result.json === 'object') {
+      const bodyB64 = firstText(result.json.b64, result.json.audio_b64);
+      if (bodyB64) {
+        const mime = firstText(result.json.mime, result.json.contentType, 'audio/webm');
+        return base64ToBlob(bodyB64, mime || 'audio/webm');
+      }
+    }
+    throw new Error('Missing binary payload in NKN media RPC response');
+  }
+
+  async function fetchWithEndpointFallback(id, address, entry, kind, packet, fetcher) {
+    let lastErr = null;
+    const runtime = ensureRouteRuntime(entry);
+    const maxAttempts = 1 + Math.max(0, Number(MEDIA_ROUTE_RETRY_LIMIT) || 0);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const endpoint = resolveMediaEndpoint(id, kind, packet, entry);
+      const transport = normalizeTransportLabel(endpoint?.selectedTransport || endpoint?.transport || 'manual');
+      try {
+        const result = await fetcher(endpoint, transport);
+        runtime.activeTransport = transport;
+        runtime.activeSource = endpoint?.endpointSource || endpoint?.requestedEndpointSource || '';
+        runtime.failStreak = 0;
+        runtime.lastError = '';
+        runtime.lastStatus = 'ok';
+        runtime.lastUpdatedAt = Date.now();
+        runtime.minPullIntervalMs = Math.max(
+          MEDIA_PULL_INTERVAL_MIN_MS,
+          Math.min(MEDIA_PULL_INTERVAL_MAX_MS, Math.round((runtime.minPullIntervalMs || MEDIA_PULL_INTERVAL_MIN_MS) * 0.85))
+        );
+        updatePeerRouteMeta(id, address, runtime);
+        return { result, endpoint, transport };
+      } catch (err) {
+        lastErr = err instanceof Error ? err : new Error(String(err || `${kind} media fetch failed`));
+        const issue = classifyRouteError(lastErr, {
+          status: Number(lastErr.status || 0) || 0,
+          url: asText(lastErr.url || endpoint?.base || '')
+        });
+        runtime.failStreak = Number(runtime.failStreak || 0) + 1;
+        runtime.lastError = lastErr.message || String(lastErr);
+        runtime.lastStatus = issue.stale ? 'stale' : 'error';
+        runtime.lastUpdatedAt = Date.now();
+        runtime.minPullIntervalMs = Math.max(
+          MEDIA_PULL_INTERVAL_MIN_MS,
+          Math.min(MEDIA_PULL_INTERVAL_MAX_MS, Math.round((runtime.minPullIntervalMs || MEDIA_PULL_INTERVAL_MIN_MS) * 1.5))
+        );
+        if (issue.stale && transport === 'cloudflare') {
+          markTransportStale(runtime, 'cloudflare');
+          runtime.fallbackCount = Number(runtime.fallbackCount || 0) + 1;
+          setBadge(
+            `Media ${kind} tunnel stale for ${formatAddress(address)} (Cloudflare). Retrying fallback transport...`,
+            false
+          );
+          mediaLog('media transport fallback', {
+            nodeId: id,
+            address: ensureGraphPrefix(address),
+            kind,
+            attempt,
+            reason: issue.reason || issue.message
+          });
+          updatePeerRouteMeta(id, address, runtime, { mediaFallbackReason: issue.reason || issue.message });
+          continue;
+        }
+        updatePeerRouteMeta(id, address, runtime);
+        break;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error(`${kind} media fetch failed`);
+  }
+
+  function updateRemoteVideoTile(id, address, peer, payload = {}, extra = {}) {
+    if (!peer || !peer.img) return;
+    const b64 = firstText(payload.b64, payload.image, extra.b64);
+    if (!b64) return;
+    const mime = firstText(payload.mime, extra.mime, 'image/webp');
+    peer.img.src = `data:${mime};base64,${b64}`;
+    peer.img.dataset.empty = 'false';
+    if (peer.stamp) peer.stamp.textContent = new Date().toLocaleTimeString();
+    const transport = normalizeTransportLabel(firstText(extra.transport, payload.transport, payload.selectedTransport));
+    const detail = firstText(extra.detail);
+    if (peer.info) {
+      peer.info.textContent = remoteInfoText(
+        'video',
+        transport,
+        detail || `${mime} • ${payload.width || extra.width || '?'}×${payload.height || extra.height || '?'}`,
+        address
+      );
+    }
+    const runtime = ensureRouteRuntime(peer);
+    if (runtime && transport) {
+      runtime.activeTransport = transport;
+      runtime.lastUpdatedAt = Date.now();
+      updatePeerRouteMeta(id, address, runtime);
+    }
+    try {
+      Router.sendFrom(id, 'media', {
+        type: 'nkndm.media',
+        kind: 'video',
+        b64,
+        mime,
+        width: Number(payload.width || extra.width || 0) || 0,
+        height: Number(payload.height || extra.height || 0) || 0,
+        from: address,
+        route: firstText(payload.route, extra.detail, 'media.video'),
+        transport,
+        source: 'remote'
+      });
+    } catch (_) {
+      // ignore routing errors for passive preview updates
+    }
+  }
+
+  async function fetchRemoteVideoFramePacket(id, address, peer, packet = {}) {
+    const descriptor = extractVideoDescriptor(packet);
+    if (descriptor.inlineB64) {
+      updateRemoteVideoTile(id, address, peer, {
+        b64: descriptor.inlineB64,
+        mime: descriptor.inlineMime,
+        width: descriptor.width,
+        height: descriptor.height
+      }, {
+        transport: packet.transport || packet.selectedTransport || 'nkn',
+        detail: packet.route || packet.mode || 'inline packet'
+      });
+      return { transport: normalizeTransportLabel(packet.transport || packet.selectedTransport || 'nkn') || 'nkn' };
+    }
+
+    const runtime = ensureRouteRuntime(peer);
+    if (runtime) {
+      const now = Date.now();
+      if (runtime.nextAllowedAt && now < runtime.nextAllowedAt) {
+        return { throttled: true, transport: runtime.activeTransport || '' };
+      }
+      runtime.nextAllowedAt = now + Math.max(
+        MEDIA_PULL_INTERVAL_MIN_MS,
+        Math.min(MEDIA_PULL_INTERVAL_MAX_MS, Number(runtime.minPullIntervalMs || MEDIA_PULL_INTERVAL_MIN_MS))
+      );
+    }
+
+    return fetchWithEndpointFallback(id, address, peer, 'video', packet, async (endpoint, transport) => {
+      const service = endpoint?.service || 'camera_router';
+      const relay = firstText(endpoint?.relay, packet?.relay, CFG.routerTargetNknAddress);
+      const pathCandidate = descriptor.frameUrl ||
+        descriptor.framePath ||
+        (descriptor.cameraId ? `/frame_packet/${encodeURIComponent(descriptor.cameraId)}` : '/frame_packet');
+      const path = pathFromUrl(pathCandidate, descriptor.cameraId ? `/frame_packet/${encodeURIComponent(descriptor.cameraId)}` : '/frame_packet');
+      const url = joinBaseAndPath(endpoint?.base, pathCandidate);
+      const timeoutMs = Math.max(2000, Number(packet?.timeoutMs || packet?.timeout_ms || MEDIA_FETCH_TIMEOUT_MS));
+
+      const payload = (transport === 'nkn')
+        ? await fetchJsonViaNkn(service, path, relay, timeoutMs)
+        : await fetchJsonDirect(url, endpoint?.api, timeoutMs);
+
+      const framePacket = (payload && payload.frame_packet && typeof payload.frame_packet === 'object')
+        ? payload.frame_packet
+        : payload;
+      const frameB64 = firstText(framePacket?.frame, framePacket?.b64, payload?.b64, payload?.frame);
+      if (!frameB64) {
+        const err = new Error('Missing frame data in media response');
+        err.url = url;
+        throw err;
+      }
+      updateRemoteVideoTile(id, address, peer, {
+        b64: frameB64,
+        mime: firstText(framePacket?.mime, payload?.mime, descriptor.inlineMime, 'image/jpeg'),
+        width: Number(framePacket?.width || descriptor.width || 0) || 0,
+        height: Number(framePacket?.height || descriptor.height || 0) || 0,
+        route: firstText(framePacket?.route, payload?.route, path)
+      }, {
+        transport,
+        detail: firstText(framePacket?.route, payload?.route, path)
+      });
+      return {
+        payload,
+        transport
+      };
+    });
+  }
+
+  async function fetchRemoteAudioPacket(id, address, peer, packet = {}) {
+    const descriptor = extractAudioDescriptor(packet);
+    if (descriptor.inlineB64) {
+      return {
+        transport: normalizeTransportLabel(packet.transport || packet.selectedTransport || 'nkn') || 'nkn',
+        b64: descriptor.inlineB64,
+        mime: descriptor.mime,
+        format: descriptor.format
+      };
+    }
+
+    return fetchWithEndpointFallback(id, address, peer, 'audio', packet, async (endpoint, transport) => {
+      const service = endpoint?.service || 'audio_router';
+      const relay = firstText(endpoint?.relay, packet?.relay, CFG.routerTargetNknAddress);
+      const pathCandidate = descriptor.audioUrl || descriptor.audioPath;
+      if (!pathCandidate) throw new Error('Missing audio route path');
+      const path = pathFromUrl(pathCandidate, '/audio');
+      const url = joinBaseAndPath(endpoint?.base, pathCandidate);
+      const timeoutMs = Math.max(2000, Number(packet?.timeoutMs || packet?.timeout_ms || MEDIA_FETCH_TIMEOUT_MS));
+      let blob;
+      if (transport === 'nkn') {
+        blob = await fetchBlobViaNkn(service, path, relay, timeoutMs);
+      } else {
+        blob = await fetchBlobDirect(url, endpoint?.api, timeoutMs);
+      }
+      return {
+        blob,
+        transport,
+        mime: descriptor.mime || blob?.type || 'audio/webm'
+      };
+    });
   }
 
   function emitStatus(id, payload) {
@@ -1243,7 +1827,30 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
         await declineHandshake(id, normalized);
       });
 
-      entry = { tile, label, stamp, img, audio, info, controls, audioUrl: null };
+      entry = {
+        tile,
+        label,
+        stamp,
+        img,
+        audio,
+        info,
+        controls,
+        audioUrl: null,
+        routeRuntime: {
+          activeTransport: '',
+          activeSource: '',
+          staleTransports: new Map(),
+          failStreak: 0,
+          fallbackCount: 0,
+          minPullIntervalMs: MEDIA_PULL_INTERVAL_MIN_MS,
+          nextAllowedAt: 0,
+          pendingFrameFetch: null,
+          pendingAudioFetch: null,
+          lastError: '',
+          lastStatus: '',
+          lastUpdatedAt: 0
+        }
+      };
       st.remotePeers.set(normalized, entry);
     }
     return entry;
@@ -1259,6 +1866,13 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
     if (entry.audioUrl) {
       try { URL.revokeObjectURL(entry.audioUrl); } catch (_) {}
       entry.audioUrl = null;
+    }
+    if (entry.routeRuntime) {
+      entry.routeRuntime.pendingFrameFetch = null;
+      entry.routeRuntime.pendingAudioFetch = null;
+      if (entry.routeRuntime.staleTransports instanceof Map) {
+        entry.routeRuntime.staleTransports.clear();
+      }
     }
     if (entry.tile && entry.tile.parentElement) entry.tile.parentElement.removeChild(entry.tile);
     st.remotePeers.delete(normalized);
@@ -1680,6 +2294,38 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
     st.recorderHandler = () => recorder.removeEventListener('dataavailable', handleData);
   }
 
+  function markRemoteActivity(id, sourceAddress, extras = {}) {
+    updatePeerMeta(id, sourceAddress, { remoteActive: true, viewing: true, ...extras });
+    NodeStore.update(id, { type: 'MediaStream', lastRemoteFrom: sourceAddress });
+    refreshAddressIndex(id);
+  }
+
+  function playEncodedAudio(peer, blob, sourceAddress, transport = '', detail = '', mimeHint = '') {
+    if (!peer || !peer.audio || !blob) return;
+    try {
+      if (peer.audioUrl) {
+        try { URL.revokeObjectURL(peer.audioUrl); } catch (_) {}
+      }
+      const mime = firstText(mimeHint, blob.type, 'audio/webm');
+      const url = URL.createObjectURL(blob);
+      peer.audio.src = url;
+      peer.audioUrl = url;
+      const play = peer.audio.play();
+      if (play && typeof play.catch === 'function') play.catch(() => {});
+      peer.audio.onended = () => {
+        if (peer.audioUrl) {
+          try { URL.revokeObjectURL(peer.audioUrl); } catch (_) {}
+          peer.audioUrl = null;
+        }
+      };
+      if (peer.info) {
+        peer.info.textContent = remoteInfoText('audio', normalizeTransportLabel(transport), detail || mime, sourceAddress);
+      }
+    } catch (err) {
+      log(`[media] audio playback error: ${err?.message || err}`);
+    }
+  }
+
   function handleIncoming(id, payload) {
     if (payload == null) return;
     const els = nodeElements(id);
@@ -1733,57 +2379,155 @@ function createMediaNode({ getNode, Router, NodeStore, Net, setBadge, log, setRe
     const sourceAddress = data.from || payload.from || payload.peer || '';
     if (sourceAddress) ensureTargetPresence(id, sourceAddress, { auto: true });
 
-    if (kind === 'video' && data.b64) {
-      const peer = ensureRemotePeer(id, sourceAddress || (data.nodeId || payload.nodeId || 'remote'), { force: true });
-      const mime = data.mime || 'image/webp';
-      if (peer && peer.img) {
-        peer.img.src = `data:${mime};base64,${data.b64}`;
-        peer.img.dataset.empty = 'false';
-        if (peer.stamp) peer.stamp.textContent = new Date().toLocaleTimeString();
-        if (peer.info) peer.info.textContent = `Video • ${mime} • ${data.width || '?'}×${data.height || '?'} • from ${formatAddress(sourceAddress)}`;
+    if (kind === 'video') {
+      const peerAddress = sourceAddress || (data.nodeId || payload.nodeId || 'remote');
+      const peer = ensureRemotePeer(id, peerAddress, { force: true });
+      if (!peer) return;
+      const descriptor = extractVideoDescriptor(data);
+      if (descriptor.inlineB64) {
+        updateRemoteVideoTile(id, peerAddress, peer, {
+          b64: descriptor.inlineB64,
+          mime: descriptor.inlineMime,
+          width: descriptor.width || data.width,
+          height: descriptor.height || data.height,
+          route: data.route
+        }, {
+          transport: data.transport || data.selectedTransport || 'nkn',
+          detail: data.route || data.mode || 'inline packet'
+        });
+        markRemoteActivity(id, peerAddress, { mediaRoute: data.route || '' });
+        return;
       }
-      updatePeerMeta(id, sourceAddress, { remoteActive: true, viewing: true });
-      NodeStore.update(id, { type: 'MediaStream', lastRemoteFrom: sourceAddress });
-      refreshAddressIndex(id);
+
+      const runtime = ensureRouteRuntime(peer);
+      if (runtime?.pendingFrameFetch) return;
+      if (peer.info) {
+        const activeTransport = normalizeTransportLabel(runtime?.activeTransport || data.transport || data.selectedTransport || '');
+        peer.info.textContent = remoteInfoText('video', activeTransport, 'fetching frame packet', peerAddress);
+      }
+      const task = fetchRemoteVideoFramePacket(id, peerAddress, peer, data)
+        .then((result) => {
+          const transport = normalizeTransportLabel(result?.transport || runtime?.activeTransport || data.transport || '');
+          if (peer.info && transport) {
+            peer.info.textContent = remoteInfoText('video', transport, data.route || 'frame packet', peerAddress);
+          }
+          markRemoteActivity(id, peerAddress, { mediaRoute: data.route || '', mediaTransport: transport });
+        })
+        .catch((err) => {
+          const runtimeNow = ensureRouteRuntime(peer);
+          const currentTransport = normalizeTransportLabel(runtimeNow?.activeTransport || data.transport || data.selectedTransport || '');
+          const issue = classifyRouteError(err, { url: err?.url || '', status: err?.status || 0 });
+          const detail = issue.stale ? 'stale tunnel fallback in progress' : (err?.message || 'frame fetch failed');
+          if (peer.info) peer.info.textContent = remoteInfoText('video', currentTransport, detail, peerAddress);
+          if (!issue.stale) setBadge(`Media frame fetch error (${formatAddress(peerAddress)}): ${err?.message || err}`, false);
+          mediaLog('remote video fetch error', {
+            nodeId: id,
+            address: peerAddress,
+            stale: issue.stale,
+            transport: currentTransport,
+            error: err?.message || String(err)
+          });
+        })
+        .finally(() => {
+          const runtimeNow = ensureRouteRuntime(peer);
+          if (runtimeNow) runtimeNow.pendingFrameFetch = null;
+        });
+      if (runtime) runtime.pendingFrameFetch = task;
       return;
     }
 
-    if (kind === 'audio' && data.b64) {
-      const peer = ensureRemotePeer(id, sourceAddress || (data.nodeId || payload.nodeId || 'remote'), { force: true });
-      const format = String(data.format || data.mime || '').toLowerCase();
-      if (format.includes('pcm')) {
-        const sr = Number(data.sr || payload.sr || 48000);
-        const channels = Number(data.channels || payload.channels || 1);
-        playPcmAudio(id, data.b64, sr, channels);
-        if (peer && peer.info) peer.info.textContent = `Audio • PCM • ${sr} Hz • ch ${channels} • from ${formatAddress(sourceAddress)}`;
-      } else if (peer && peer.audio) {
-        try {
-          if (peer.audioUrl) {
-            try { URL.revokeObjectURL(peer.audioUrl); } catch (_) {}
-          }
-          const blob = base64ToBlob(data.b64, data.mime || 'audio/webm');
-          const url = URL.createObjectURL(blob);
-          peer.audio.src = url;
-          peer.audioUrl = url;
-          const play = peer.audio.play();
-          if (play && typeof play.catch === 'function') play.catch(() => {});
-          peer.audio.onended = () => {
-            if (peer.audioUrl) {
-              try { URL.revokeObjectURL(peer.audioUrl); } catch (_) {}
-              peer.audioUrl = null;
-            }
-          };
-          if (peer.info) {
-            const note = data.route ? ` • ${data.route}` : '';
-            peer.info.textContent = `Audio • ${data.mime || 'audio/webm'}${note} • from ${formatAddress(sourceAddress)}`;
-          }
-        } catch (err) {
-          log(`[media] audio playback error: ${err?.message || err}`);
+    if (kind === 'audio') {
+      const peerAddress = sourceAddress || (data.nodeId || payload.nodeId || 'remote');
+      const peer = ensureRemotePeer(id, peerAddress, { force: true });
+      if (!peer) return;
+      const descriptor = extractAudioDescriptor(data);
+      const inlineB64 = descriptor.inlineB64;
+      if (inlineB64) {
+        const format = String(descriptor.format || descriptor.mime || '').toLowerCase();
+        const transport = normalizeTransportLabel(data.transport || data.selectedTransport || 'nkn');
+        if (format.includes('pcm')) {
+          const sr = Number(data.sr || payload.sr || 48000);
+          const channels = Number(data.channels || payload.channels || 1);
+          playPcmAudio(id, inlineB64, sr, channels);
+          if (peer.info) peer.info.textContent = remoteInfoText('audio', transport, `PCM • ${sr} Hz • ch ${channels}`, peerAddress);
+        } else {
+          const blob = base64ToBlob(inlineB64, descriptor.mime || 'audio/webm');
+          playEncodedAudio(peer, blob, peerAddress, transport, descriptor.mime || blob.type);
         }
+        const runtime = ensureRouteRuntime(peer);
+        if (runtime) {
+          runtime.activeTransport = transport;
+          runtime.lastUpdatedAt = Date.now();
+          updatePeerRouteMeta(id, peerAddress, runtime);
+        }
+        markRemoteActivity(id, peerAddress, { mediaRoute: data.route || '', mediaTransport: transport });
+        return;
       }
-      updatePeerMeta(id, sourceAddress, { remoteActive: true, viewing: true });
-      NodeStore.update(id, { type: 'MediaStream', lastRemoteFrom: sourceAddress });
-      refreshAddressIndex(id);
+
+      if (!descriptor.audioUrl && !descriptor.audioPath && descriptor.offerUrl) {
+        const runtime = ensureRouteRuntime(peer);
+        const transport = normalizeTransportLabel(data.transport || data.selectedTransport || runtime?.activeTransport || '');
+        if (peer.info) {
+          peer.info.textContent = remoteInfoText('audio', transport, 'offer route available', peerAddress);
+        }
+        if (runtime) {
+          runtime.activeTransport = transport;
+          runtime.lastUpdatedAt = Date.now();
+          updatePeerRouteMeta(id, peerAddress, runtime, { mediaRoute: descriptor.offerUrl });
+        }
+        markRemoteActivity(id, peerAddress, { mediaRoute: descriptor.offerUrl, mediaTransport: transport });
+        return;
+      }
+
+      const runtime = ensureRouteRuntime(peer);
+      if (runtime?.pendingAudioFetch) return;
+      if (peer.info) {
+        const activeTransport = normalizeTransportLabel(runtime?.activeTransport || data.transport || data.selectedTransport || '');
+        peer.info.textContent = remoteInfoText('audio', activeTransport, 'fetching audio route', peerAddress);
+      }
+      const task = fetchRemoteAudioPacket(id, peerAddress, peer, data)
+        .then((result) => {
+          const wrapped = result && typeof result === 'object' ? result : {};
+          const resolved = wrapped.result && typeof wrapped.result === 'object' ? wrapped.result : wrapped;
+          const transport = normalizeTransportLabel(
+            firstText(resolved?.transport, wrapped?.transport, runtime?.activeTransport, data.transport, data.selectedTransport)
+          );
+          if (resolved && resolved.b64) {
+            const format = String(resolved.format || descriptor.format || '').toLowerCase();
+            if (format.includes('pcm')) {
+              const sr = Number(data.sr || payload.sr || 48000);
+              const channels = Number(data.channels || payload.channels || 1);
+              playPcmAudio(id, resolved.b64, sr, channels);
+              if (peer.info) peer.info.textContent = remoteInfoText('audio', transport, `PCM • ${sr} Hz • ch ${channels}`, peerAddress);
+            } else {
+              const inlineBlob = base64ToBlob(resolved.b64, resolved.mime || descriptor.mime || 'audio/webm');
+              playEncodedAudio(peer, inlineBlob, peerAddress, transport, resolved.mime || inlineBlob.type);
+            }
+          } else if (resolved && resolved.blob) {
+            playEncodedAudio(peer, resolved.blob, peerAddress, transport, resolved.mime || resolved.blob.type);
+          }
+          markRemoteActivity(id, peerAddress, { mediaRoute: data.route || '', mediaTransport: transport });
+        })
+        .catch((err) => {
+          const runtimeNow = ensureRouteRuntime(peer);
+          const currentTransport = normalizeTransportLabel(runtimeNow?.activeTransport || data.transport || data.selectedTransport || '');
+          const issue = classifyRouteError(err, { url: err?.url || '', status: err?.status || 0 });
+          const detail = issue.stale ? 'stale tunnel fallback in progress' : (err?.message || 'audio fetch failed');
+          if (peer.info) peer.info.textContent = remoteInfoText('audio', currentTransport, detail, peerAddress);
+          if (!issue.stale) setBadge(`Media audio fetch error (${formatAddress(peerAddress)}): ${err?.message || err}`, false);
+          mediaLog('remote audio fetch error', {
+            nodeId: id,
+            address: peerAddress,
+            stale: issue.stale,
+            transport: currentTransport,
+            error: err?.message || String(err)
+          });
+        })
+        .finally(() => {
+          const runtimeNow = ensureRouteRuntime(peer);
+          if (runtimeNow) runtimeNow.pendingAudioFetch = null;
+        });
+      if (runtime) runtime.pendingAudioFetch = task;
     }
   }
 

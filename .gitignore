@@ -10,6 +10,7 @@ docs/router_config.json
 docs/__*
 docs/test*
 service_router/.*
+service_router/__pycache__/
 service_router/.*
 service_router/bridge-node
 service_router/router_config.json

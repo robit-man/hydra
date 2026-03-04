@@ -208,8 +208,10 @@ header {
 
 .header-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   pointer-events: all !important;
 }
 
@@ -680,6 +682,95 @@ header {
   border: 1px solid white;
 }
 
+.router-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: all;
+  max-width: 100%;
+}
+
+.router-controls-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: min(68vw, 900px);
+  min-width: 260px;
+}
+
+.router-target-input {
+  height: 34px;
+  min-width: 220px;
+  max-width: 420px;
+  width: min(38vw, 420px);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(0, 0, 0, .5);
+  color: var(--text);
+  padding: 0 10px;
+  outline: none;
+}
+
+.router-target-input:focus {
+  border-color: rgba(94, 227, 166, .9);
+  box-shadow: 0 0 0 1px rgba(94, 227, 166, .4);
+}
+
+.router-status {
+  min-width: 52px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+}
+
+.router-status[data-status="ok"] {
+  color: var(--ok);
+  border-color: rgba(125, 255, 176, .5);
+}
+
+.router-status[data-status="error"] {
+  color: var(--err);
+  border-color: rgba(255, 107, 107, .5);
+}
+
+.router-status[data-status="resolving"] {
+  color: var(--warn);
+  border-color: rgba(249, 200, 70, .5);
+}
+
+.router-status[data-status="warn"] {
+  color: var(--warn);
+  border-color: rgba(249, 200, 70, .5);
+}
+
+.router-status-message {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.router-status-message[data-tone="ok"] {
+  color: var(--ok);
+}
+
+.router-status-message[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.router-status-message[data-tone="error"] {
+  color: var(--err);
+}
+
 @media screen and (max-width:740px) {}
 
 @media(max-width: 640px) {
@@ -690,6 +781,27 @@ header {
 
   .router-download {
     display: none;
+  }
+
+  .router-controls {
+    width: 100%;
+    max-width: 100%;
+    gap: 4px;
+  }
+
+  .router-target-input {
+    min-width: 140px;
+    width: auto;
+    flex: 1 1 140px;
+  }
+
+  .router-status {
+    display: none;
+  }
+
+  .router-controls-wrap {
+    width: 100%;
+    min-width: 0;
   }
 
   .logdata {

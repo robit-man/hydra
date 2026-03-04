@@ -1,0 +1,1444 @@
+{
+  "metadata": {
+    "matrix_version": "2026-03-03.1",
+    "generated_on": "2026-03-03",
+    "owner": "Hydra service_router maintainers",
+    "purpose": "Canonical contract inventory for Hydra services and teleoperation discovery parity.",
+    "update_policy": {
+      "trigger_files": [
+        "service_router/router.py",
+        "service_router/router_config.json",
+        "service_router/.services/*",
+        "docs/js/asr.js",
+        "docs/js/tts.js",
+        "docs/js/llm.js",
+        "docs/js/mcp.js",
+        "docs/js/webScraper.js",
+        "docs/js/pointcloud.js",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/router/router.py",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/adapter/adapter.py",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/vision/camera_route.py",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/audio/audio_route.py"
+      ],
+      "required_checks": [
+        "jq . docs/HYDRA_SERVICE_CONTRACT_MATRIX.json",
+        "jq '.services | keys' docs/HYDRA_SERVICE_CONTRACT_MATRIX.json",
+        "rg 'depth_any|web_scrape|mcp' docs/HYDRA_SERVICE_CONTRACT_MATRIX.*",
+        "pytest service_router/tests/test_api_contracts.py -q",
+        "pytest service_router/tests/test_resolver_normalization.py -q",
+        "python3 service_router/tools/e2e_simulation.py --json",
+        "python3 service_router/tools/simulate_stale_tunnel.py --json"
+      ]
+    },
+    "hydra_source_anchors": [
+      {
+        "file": "service_router/router.py",
+        "lines": "97-143, 319-369, 1122-1199, 3961-4019, 4433-4463, 4555-4583, 5339-5566",
+        "description": "Targets, watchdog definitions, config defaults, relay health payload, and URL resolver."
+      },
+      {
+        "file": "service_router/router_config.json",
+        "lines": "3-10, 29-59, 87-94",
+        "description": "Target IDs, service relays, and assignments."
+      }
+    ],
+    "teleoperation_source_anchors": [
+      {
+        "file": "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/router/router.py",
+        "lines": "3395-3502, 3526-3652",
+        "description": "Router control-plane and resolve request/reply contract."
+      },
+      {
+        "file": "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/adapter/adapter.py",
+        "lines": "2470, 2643-2719, 2727-2757",
+        "description": "Adapter health/router_info/tunnel_info and fallback payload strategy."
+      },
+      {
+        "file": "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/vision/camera_route.py",
+        "lines": "4988-5033, 5039-5104",
+        "description": "Camera tunnel_info/router_info shape and transport selection."
+      },
+      {
+        "file": "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/audio/audio_route.py",
+        "lines": "2224-2269, 2275-2339",
+        "description": "Audio tunnel_info/router_info shape and fallback blocks."
+      }
+    ]
+  },
+  "services": {
+    "ollama": {
+      "router_target": "ollama",
+      "watchdog_service": "ollama_farm",
+      "service_assignment_key": "ollama_farm",
+      "router_config_default": "http://127.0.0.1:11434",
+      "router_aliases": [
+        "ollama_farm",
+        "ollama",
+        "llm"
+      ],
+      "router_ref": "service_router/router.py:119-124",
+      "bind_behavior": {
+        "type": "cli_args",
+        "host_arg": "--host (default 0.0.0.0)",
+        "front_port_arg": "--front-port (default 8080)",
+        "back_port_arg": "--back-port (default 11434)",
+        "notes": "Proxy endpoint is front-port; backend ollama listens on back-port. Hydra target defaults to 11434 and port list includes 8080."
+      },
+      "auth": {
+        "required": false,
+        "mode": "none",
+        "ref": "service_router/.services/ollama_farm/ollama_farm.py:254-267"
+      },
+      "contract": {
+        "health": {
+          "path": "/_health",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "required_fields": [
+              "ok",
+              "backend",
+              "version",
+              "concurrency"
+            ]
+          },
+          "ref": "service_router/.services/ollama_farm/ollama_farm.py:254-262"
+        },
+        "model_endpoints": [
+          {
+            "path": "/v1/models",
+            "method": "GET",
+            "implemented_via_proxy_catch_all": true,
+            "frontend_refs": [
+              "docs/js/llm.js:465"
+            ]
+          },
+          {
+            "path": "/models",
+            "method": "GET",
+            "implemented_via_proxy_catch_all": true,
+            "frontend_refs": [
+              "docs/js/llm.js:466"
+            ]
+          },
+          {
+            "path": "/api/tags",
+            "method": "GET",
+            "implemented_via_proxy_catch_all": true,
+            "frontend_refs": [
+              "docs/js/llm.js:467"
+            ]
+          },
+          {
+            "path": "/api/show",
+            "method": "POST",
+            "implemented_via_proxy_catch_all": true,
+            "frontend_refs": [
+              "docs/js/llm.js:405"
+            ]
+          },
+          {
+            "path": "/api/pull",
+            "method": "POST",
+            "implemented_via_proxy_catch_all": true,
+            "frontend_refs": [
+              "docs/js/llm.js:576"
+            ]
+          }
+        ],
+        "stream_endpoints": [
+          {
+            "path": "/api/chat",
+            "method": "POST",
+            "implemented_via_proxy_catch_all": true,
+            "streaming": "ndjson/sse passthrough",
+            "frontend_refs": [
+              "docs/js/llm.js:840",
+              "docs/js/llm.js:880",
+              "docs/js/llm.js:898"
+            ]
+          }
+        ],
+        "command_endpoints": []
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": []
+    },
+    "asr": {
+      "router_target": "asr",
+      "watchdog_service": "whisper_asr",
+      "service_assignment_key": "whisper_asr",
+      "router_config_default": "http://127.0.0.1:8126",
+      "router_aliases": [
+        "whisper_asr",
+        "asr",
+        "whisper"
+      ],
+      "router_ref": "service_router/router.py:107-112",
+      "bind_behavior": {
+        "type": "env",
+        "host_env": "ASR_HOST (default 0.0.0.0)",
+        "port_env": "ASR_PORT (default 8126)",
+        "notes": "Flask server binds directly to ASR_HOST:ASR_PORT."
+      },
+      "auth": {
+        "required": false,
+        "mode": "none",
+        "ref": "service_router/.services/whisper_asr/asr_service.py:498-503"
+      },
+      "contract": {
+        "health": {
+          "path": "/health",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "envelope": {
+              "ok": true
+            },
+            "required_fields": [
+              "status",
+              "whisper",
+              "device",
+              "models",
+              "modes"
+            ]
+          },
+          "ref": "service_router/.services/whisper_asr/asr_service.py:1033-1049"
+        },
+        "model_endpoints": [
+          {
+            "path": "/models",
+            "method": "GET",
+            "request": {
+              "content_type": "none"
+            },
+            "response": {
+              "content_type": "application/json",
+              "envelope": {
+                "ok": true
+              },
+              "required_fields": [
+                "models",
+                "current"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:188"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1066-1074"
+          }
+        ],
+        "stream_endpoints": [
+          {
+            "path": "/recognize/stream/start",
+            "method": "POST",
+            "request": {
+              "content_type": "application/json",
+              "required_fields": [],
+              "optional_fields": [
+                "mode",
+                "prompt",
+                "preview_window_s",
+                "preview_step_s",
+                "preview_model"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "envelope": {
+                "ok": true
+              },
+              "required_fields": [
+                "id",
+                "ts",
+                "mode",
+                "preview_model"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:764"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1127-1169"
+          },
+          {
+            "path": "/recognize/stream/<sid>/audio",
+            "method": "POST",
+            "request": {
+              "content_type": "audio bytes",
+              "required_fields": [
+                "raw request body"
+              ],
+              "query_fields": [
+                "format",
+                "sr"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "envelope": {
+                "ok": true
+              },
+              "required_fields": [
+                "received",
+                "seconds",
+                "total_seconds"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:1426"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1173-1191"
+          },
+          {
+            "path": "/recognize/stream/<sid>/events",
+            "method": "GET",
+            "request": {
+              "content_type": "none"
+            },
+            "response": {
+              "content_type": "text/event-stream",
+              "events": [
+                "keepalive",
+                "asr.partial",
+                "asr.final",
+                "error"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:1392",
+              "docs/js/asr.js:1397"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1211-1240"
+          },
+          {
+            "path": "/recognize/stream/<sid>/end",
+            "method": "POST",
+            "request": {
+              "content_type": "none"
+            },
+            "response": {
+              "content_type": "application/json",
+              "envelope": {
+                "ok": true
+              },
+              "required_fields": [
+                "final"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:820",
+              "docs/js/asr.js:1226",
+              "docs/js/asr.js:1450"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1197-1207"
+          }
+        ],
+        "command_endpoints": [
+          {
+            "path": "/recognize",
+            "method": "POST",
+            "request": {
+              "content_types": [
+                "multipart/form-data",
+                "application/json"
+              ],
+              "required_fields_any_of": [
+                [
+                  "file"
+                ],
+                [
+                  "body_b64"
+                ]
+              ],
+              "optional_fields": [
+                "prompt",
+                "format",
+                "sample_rate"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "envelope": {
+                "ok": true
+              },
+              "required_fields": [
+                "text",
+                "segments",
+                "language",
+                "duration",
+                "model",
+                "device"
+              ],
+              "optional_fields": [
+                "avg_logprob",
+                "no_speech_prob",
+                "compression_ratio",
+                "words",
+                "used_prompt"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/asr.js:1282"
+            ],
+            "ref": "service_router/.services/whisper_asr/asr_service.py:1076-1125"
+          }
+        ]
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": []
+    },
+    "tts": {
+      "router_target": "tts",
+      "watchdog_service": "piper_tts",
+      "service_assignment_key": "piper_tts",
+      "router_config_default": "http://127.0.0.1:8123",
+      "router_aliases": [
+        "piper_tts",
+        "tts",
+        "piper"
+      ],
+      "router_ref": "service_router/router.py:113-118",
+      "bind_behavior": {
+        "type": "env + free-port fallback",
+        "host_env": "TTS_BIND (default 0.0.0.0, localhost coerced unless TTS_FORCE_LOCAL=1)",
+        "port_env": "TTS_PORT (default 8123)",
+        "notes": "Service searches free port from preferred value and may move within +100 range."
+      },
+      "auth": {
+        "required": "conditional",
+        "mode": "X-API-Key or Authorization Bearer session",
+        "gate": "TTS_REQUIRE_AUTH",
+        "session_handshake": "/handshake",
+        "ref": "service_router/.services/piper_tts/tts_service.py:260-270, 470-483"
+      },
+      "contract": {
+        "health": {
+          "path": "/health",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "required_fields": [
+              "status",
+              "piper",
+              "voices"
+            ]
+          },
+          "ref": "service_router/.services/piper_tts/tts_service.py:438-445"
+        },
+        "model_endpoints": [
+          {
+            "path": "/models",
+            "method": "GET",
+            "request": {
+              "auth": "required when TTS_REQUIRE_AUTH=true"
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields": [
+                "models"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/tts.js:430"
+            ],
+            "ref": "service_router/.services/piper_tts/tts_service.py:462-468"
+          },
+          {
+            "path": "/models/pull",
+            "method": "POST",
+            "request": {
+              "auth": "required",
+              "required_fields": [
+                "onnx_model_url",
+                "onnx_json_url"
+              ],
+              "optional_fields": [
+                "name"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields_any_of": [
+                [
+                  "ok",
+                  "name"
+                ],
+                [
+                  "error"
+                ]
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/tts.js:549"
+            ],
+            "ref": "service_router/.services/piper_tts/tts_service.py:485-503"
+          }
+        ],
+        "stream_endpoints": [
+          {
+            "path": "/speak",
+            "method": "POST",
+            "request": {
+              "auth": "required when TTS_REQUIRE_AUTH=true",
+              "content_type": "application/json",
+              "required_fields": [
+                "text"
+              ],
+              "optional_fields": [
+                "model",
+                "mode",
+                "format",
+                "volume"
+              ]
+            },
+            "response": {
+              "content_type": "application/json or audio/*",
+              "modes": {
+                "file": "JSON with generated file URL",
+                "play": "JSON ack",
+                "stream": "audio stream"
+              }
+            },
+            "frontend_refs": [
+              "docs/js/tts.js:1085",
+              "docs/js/tts.js:1120",
+              "docs/js/tts.js:1155"
+            ],
+            "ref": "service_router/.services/piper_tts/tts_service.py:554-581"
+          }
+        ],
+        "command_endpoints": [
+          {
+            "path": "/handshake",
+            "method": "POST",
+            "request": {
+              "content_type": "application/json",
+              "required_fields": [
+                "api_key"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields_any_of": [
+                [
+                  "session_key",
+                  "expires_in"
+                ],
+                [
+                  "error"
+                ]
+              ]
+            },
+            "frontend_refs": [],
+            "ref": "service_router/.services/piper_tts/tts_service.py:470-483"
+          }
+        ]
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": []
+    },
+    "mcp": {
+      "router_target": "mcp",
+      "watchdog_service": "mcp_server",
+      "service_assignment_key": "mcp_server",
+      "router_config_default": "http://127.0.0.1:9003",
+      "router_aliases": [
+        "mcp_server",
+        "mcp",
+        "context"
+      ],
+      "router_ref": "service_router/router.py:125-130",
+      "bind_behavior": {
+        "type": "env",
+        "host_env": "MCP_BIND (default 0.0.0.0)",
+        "port_env": "MCP_PORT (default 9003)",
+        "notes": "FastAPI/Uvicorn service with optional API key gate."
+      },
+      "auth": {
+        "required": "conditional",
+        "mode": "X-API-Key or Authorization token",
+        "gate": "MCP_API_KEY",
+        "applies_to": [
+          "/mcp/status",
+          "/mcp/resources",
+          "/mcp/tools",
+          "/mcp/query",
+          "/mcp/tool",
+          "/mcp/ws"
+        ],
+        "ref": "service_router/.services/mcp_server/mcp_service.py:454-477"
+      },
+      "contract": {
+        "health": {
+          "path": "/healthz",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "required_fields": [
+              "ok",
+              "ts"
+            ]
+          },
+          "ref": "service_router/.services/mcp_server/mcp_service.py:492-494"
+        },
+        "model_endpoints": [],
+        "stream_endpoints": [
+          {
+            "path": "/mcp/ws",
+            "method": "WEBSOCKET",
+            "request": {
+              "auth": "required when MCP_API_KEY is set",
+              "protocol": "JSON-RPC 2.0"
+            },
+            "response": {
+              "content_type": "websocket text",
+              "events": [
+                "initialize",
+                "notifications/resources.list_changed"
+              ]
+            },
+            "frontend_refs": [],
+            "ref": "service_router/.services/mcp_server/mcp_service.py:588-620"
+          }
+        ],
+        "command_endpoints": [
+          {
+            "path": "/mcp/status",
+            "method": "GET",
+            "request": {
+              "auth": "required when MCP_API_KEY is set"
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields": [
+                "server",
+                "protocolVersion",
+                "capabilities",
+                "resources",
+                "tools",
+                "ts"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/mcp.js:171"
+            ],
+            "ref": "service_router/.services/mcp_server/mcp_service.py:497-509"
+          },
+          {
+            "path": "/mcp/query",
+            "method": "POST",
+            "request": {
+              "auth": "required when MCP_API_KEY is set",
+              "content_type": "application/json",
+              "required_fields": [
+                "query"
+              ],
+              "optional_fields": [
+                "resourceFilters",
+                "toolFilters",
+                "emitContext",
+                "emitSystem",
+                "augmentSystem"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields": [
+                "prompt",
+                "resources",
+                "toolResults",
+                "server",
+                "ts"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/mcp.js:291"
+            ],
+            "ref": "service_router/.services/mcp_server/mcp_service.py:523-558"
+          },
+          {
+            "path": "/mcp/tool",
+            "method": "POST",
+            "request": {
+              "auth": "required when MCP_API_KEY is set",
+              "content_type": "application/json",
+              "required_fields": [
+                "name"
+              ],
+              "optional_fields": [
+                "arguments"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields": [
+                "ok",
+                "ts"
+              ],
+              "optional_fields": [
+                "result",
+                "error"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/mcp.js:402"
+            ],
+            "ref": "service_router/.services/mcp_server/mcp_service.py:561-570"
+          }
+        ]
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": [
+        {
+          "type": "health_path",
+          "description": "Service exposes /healthz instead of /health.",
+          "coercion": "Router snapshot should map /healthz payload into canonical health schema."
+        }
+      ]
+    },
+    "web_scrape": {
+      "router_target": "web_scrape",
+      "watchdog_service": "web_scrape",
+      "service_assignment_key": "web_scrape",
+      "router_config_default": "http://127.0.0.1:8130",
+      "router_aliases": [
+        "web_scrape",
+        "browser",
+        "chrome",
+        "scrape"
+      ],
+      "router_ref": "service_router/router.py:131-136",
+      "bind_behavior": {
+        "type": "env",
+        "host_env": "SCRAPE_BIND (default 0.0.0.0)",
+        "port_env": "SCRAPE_PORT (default 8130)",
+        "notes": "Flask threaded mode; optional per-request auth and rate-limiting."
+      },
+      "auth": {
+        "required": "conditional",
+        "mode": "X-API-Key or Authorization Bearer API_KEY",
+        "gate": "SCRAPE_REQUIRE_AUTH",
+        "ref": "service_router/.services/web_scrape/web_scrape.py:726-735"
+      },
+      "contract": {
+        "health": {
+          "path": "/health",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "required_fields": [
+              "status",
+              "browser_open",
+              "sessions"
+            ]
+          },
+          "ref": "service_router/.services/web_scrape/web_scrape.py:797-799"
+        },
+        "model_endpoints": [],
+        "stream_endpoints": [
+          {
+            "path": "/events",
+            "method": "GET",
+            "request": {
+              "auth": "required when SCRAPE_REQUIRE_AUTH=true",
+              "query_fields": [
+                "sid"
+              ]
+            },
+            "response": {
+              "content_type": "text/event-stream",
+              "notes": "Status/event queue for active browser session."
+            },
+            "frontend_refs": [
+              "docs/js/webScraper.js:1612",
+              "docs/js/webScraper.js:1648"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1242-1257"
+          }
+        ],
+        "command_endpoints": [
+          {
+            "path": "/session/start",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:892"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:802-823"
+          },
+          {
+            "path": "/session/close",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:924"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:826-834"
+          },
+          {
+            "path": "/navigate",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:964"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:836-850"
+          },
+          {
+            "path": "/click",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:994"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:852-866"
+          },
+          {
+            "path": "/drag",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1056"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1107-1153"
+          },
+          {
+            "path": "/history/back",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1095"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:972-984"
+          },
+          {
+            "path": "/history/forward",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1134"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:986-998"
+          },
+          {
+            "path": "/scroll/up",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1160"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:901-913"
+          },
+          {
+            "path": "/scroll/down",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1186"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:915-927"
+          },
+          {
+            "path": "/scroll/point",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1217"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:929-970"
+          },
+          {
+            "path": "/type",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1270"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:868-885"
+          },
+          {
+            "path": "/scroll",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1338"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:887-899"
+          },
+          {
+            "path": "/click_xy",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1364"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1000-1084"
+          },
+          {
+            "path": "/input/sync",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/webScraper.js:683"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1086-1105"
+          },
+          {
+            "path": "/dom",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1391"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1155-1174"
+          },
+          {
+            "path": "/screenshot",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/webScraper.js:1421"
+            ],
+            "ref": "service_router/.services/web_scrape/web_scrape.py:1176-1212"
+          }
+        ]
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": []
+    },
+    "depth_any": {
+      "router_target": "depth_any",
+      "watchdog_service": "depth_any",
+      "service_assignment_key": "depth_any",
+      "router_config_default": "http://127.0.0.1:5000",
+      "router_aliases": [
+        "depth_any",
+        "depth",
+        "pointcloud"
+      ],
+      "router_ref": "service_router/router.py:137-142",
+      "bind_behavior": {
+        "type": "dynamic_port_scan",
+        "host": "0.0.0.0",
+        "base_port": 5000,
+        "range": "5000-5009",
+        "notes": "Service auto-selects first free port using find_available_port()."
+      },
+      "auth": {
+        "required": false,
+        "mode": "none",
+        "ref": "service_router/.services/depth_any/app.py:1513-2310"
+      },
+      "contract": {
+        "health": {
+          "path": "/api/v1/health",
+          "method": "GET",
+          "request": {
+            "content_type": "none"
+          },
+          "response": {
+            "content_type": "application/json",
+            "required_fields": [
+              "status",
+              "model",
+              "active_jobs"
+            ]
+          },
+          "ref": "service_router/.services/depth_any/app.py:2200-2212"
+        },
+        "model_endpoints": [
+          {
+            "path": "/api/models/list",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:159"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1419-1433"
+          },
+          {
+            "path": "/api/models/select",
+            "method": "POST",
+            "request": {
+              "content_type": "application/json",
+              "required_fields": [
+                "model_id"
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/pointcloud.js:199"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1448-1458"
+          },
+          {
+            "path": "/api/load_model",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:203"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1460-1501"
+          },
+          {
+            "path": "/api/model_status",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:247"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1503-1511"
+          }
+        ],
+        "stream_endpoints": [],
+        "command_endpoints": [
+          {
+            "path": "/api/process",
+            "method": "POST",
+            "request": {
+              "content_type": "multipart/form-data",
+              "required_fields": [
+                "file"
+              ],
+              "optional_fields": [
+                "resolution",
+                "max_points",
+                "process_res_method",
+                "align_to_input_ext_scale",
+                "infer_gs",
+                "conf_thresh_percentile",
+                "show_cameras",
+                "feat_vis_fps",
+                "include_confidence",
+                "apply_confidence_filter",
+                "export_feat_layers"
+              ]
+            },
+            "response": {
+              "content_type": "application/json",
+              "required_fields_any_of": [
+                [
+                  "status",
+                  "pointcloud"
+                ],
+                [
+                  "status",
+                  "job_id"
+                ],
+                [
+                  "error"
+                ]
+              ]
+            },
+            "frontend_refs": [
+              "docs/js/pointcloud.js:435"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1513-1965"
+          },
+          {
+            "path": "/api/job/<job_id>",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:503"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1967-1974"
+          },
+          {
+            "path": "/api/export/glb",
+            "method": "GET",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:539"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:2166-2195"
+          },
+          {
+            "path": "/api/floor_align",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:564"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:1976-2018"
+          },
+          {
+            "path": "/api/floor_align/manual",
+            "method": "POST",
+            "frontend_refs": [
+              "docs/js/pointcloud.js:586"
+            ],
+            "ref": "service_router/.services/depth_any/app.py:2020-2062"
+          }
+        ]
+      },
+      "discovery_endpoints": {
+        "health": true,
+        "router_info": false,
+        "tunnel_info": false
+      },
+      "known_drift": [
+        {
+          "type": "missing_endpoint",
+          "path": "/api/process_base64",
+          "description": "Frontend currently attempts /api/process_base64 over relay, but backend does not expose this route.",
+          "frontend_refs": [
+            "docs/js/pointcloud.js:421",
+            "docs/js/pointcloud.js:424"
+          ],
+          "coercion": "Use /api/process for multipart upload until a JSON base64 alias is added."
+        }
+      ]
+    }
+  },
+  "canonical_schemas": {
+    "health": {
+      "schema_id": "hydra.health.v1",
+      "type": "object",
+      "required": [
+        "status",
+        "service"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "success",
+            "pending",
+            "degraded",
+            "error"
+          ]
+        },
+        "service": {
+          "type": "string"
+        },
+        "timestamp_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uptime_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "requests_served": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "network": {
+          "type": "object"
+        },
+        "security": {
+          "type": "object"
+        },
+        "tunnel": {
+          "type": "object"
+        },
+        "fallback": {
+          "$ref": "#/canonical_schemas/common/fallback"
+        },
+        "legacy": {
+          "type": "object"
+        }
+      },
+      "compatibility_coercions": [
+        "If payload has {ok:true} and no status, coerce status='ok'.",
+        "If endpoint is /healthz or /api/v1/health, map it into this schema via service metadata.",
+        "If service field is absent, inject from router target key."
+      ]
+    },
+    "router_info": {
+      "schema_id": "hydra.router_info.v1",
+      "type": "object",
+      "required": [
+        "status",
+        "service",
+        "transport",
+        "base_url",
+        "local",
+        "tunnel",
+        "fallback"
+      ],
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "cloudflare",
+            "upnp",
+            "nats",
+            "nkn",
+            "local"
+          ]
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "http_endpoint": {
+          "type": "string"
+        },
+        "ws_endpoint": {
+          "type": "string"
+        },
+        "local": {
+          "type": "object",
+          "required": [
+            "base_url",
+            "health_url"
+          ]
+        },
+        "tunnel": {
+          "type": "object",
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "active",
+                "starting",
+                "inactive",
+                "stale",
+                "error"
+              ]
+            },
+            "tunnel_url": {
+              "type": "string"
+            },
+            "stale_tunnel_url": {
+              "type": "string"
+            },
+            "error": {
+              "type": "string"
+            }
+          }
+        },
+        "fallback": {
+          "$ref": "#/canonical_schemas/common/fallback"
+        },
+        "security": {
+          "type": "object"
+        }
+      },
+      "compatibility_coercions": [
+        "If transport missing, derive from fallback.selected_transport.",
+        "If base_url missing, derive by precedence: tunnel_url -> upnp.public_base_url -> lan_base_url -> local.base_url.",
+        "If tunnel.state missing, infer from running + tunnel_url + stale_tunnel_url + error."
+      ]
+    },
+    "tunnel_info": {
+      "schema_id": "hydra.tunnel_info.v1",
+      "type": "object",
+      "required": [
+        "status",
+        "running",
+        "fallback"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "pending",
+            "error"
+          ]
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "tunnel_url": {
+          "type": "string"
+        },
+        "stale_tunnel_url": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "fallback": {
+          "$ref": "#/canonical_schemas/common/fallback"
+        }
+      },
+      "compatibility_coercions": [
+        "If status=error and stale_tunnel_url exists, classify tunnel.state='stale' in router_info synthesis.",
+        "If tunnel_url exists while running=true, coerce status='success' regardless of textual message."
+      ]
+    },
+    "common": {
+      "fallback": {
+        "type": "object",
+        "required": [
+          "selected_transport",
+          "order",
+          "upnp",
+          "nats",
+          "nkn",
+          "local"
+        ],
+        "properties": {
+          "selected_transport": {
+            "type": "string",
+            "enum": [
+              "cloudflare",
+              "upnp",
+              "nats",
+              "nkn",
+              "local"
+            ]
+          },
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "upnp": {
+            "type": "object"
+          },
+          "nats": {
+            "type": "object"
+          },
+          "nkn": {
+            "type": "object"
+          },
+          "local": {
+            "type": "object"
+          },
+          "cloudflare": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  },
+  "compatibility_table": [
+    {
+      "legacy_surface": "Service health endpoint path differs per service",
+      "legacy_variants": [
+        "ollama: /_health",
+        "mcp: /healthz",
+        "depth_any: /api/v1/health",
+        "asr/tts/web_scrape: /health"
+      ],
+      "canonical_field": "health.status, health.service",
+      "coercion": "Probe known path set and normalize payload into canonical health schema with injected service ID.",
+      "failure_mode_prevented": "False-negative health checks when only /health is probed."
+    },
+    {
+      "legacy_surface": "Health payload envelope drift",
+      "legacy_variants": [
+        "{ok:true,...}",
+        "{status:'ok',...}",
+        "{ok:true, ts:...}"
+      ],
+      "canonical_field": "health.status",
+      "coercion": "Map ok=true to status='ok' when status missing.",
+      "failure_mode_prevented": "Schema rejection for valid legacy payloads."
+    },
+    {
+      "legacy_surface": "Depth inference JSON base64 route",
+      "legacy_variants": [
+        "frontend calls /api/process_base64",
+        "backend exposes /api/process"
+      ],
+      "canonical_field": "command endpoint depth_any.process",
+      "coercion": "Treat /api/process as authoritative until /api/process_base64 alias is implemented.",
+      "failure_mode_prevented": "Relay 404/HTML response for depth node uploads."
+    },
+    {
+      "legacy_surface": "No per-service router_info/tunnel_info in Hydra services",
+      "legacy_variants": [
+        "teleoperation services expose /router_info and /tunnel_info",
+        "Hydra services generally do not"
+      ],
+      "canonical_field": "router_info and tunnel_info",
+      "coercion": "Router synthesizes these objects from local targets + cloudflared/fallback state.",
+      "failure_mode_prevented": "Frontend cannot resolve transport by service."
+    }
+  ],
+  "teleoperation_reference": {
+    "router_control_plane": {
+      "endpoints": [
+        "GET /",
+        "GET /api",
+        "GET /health",
+        "GET /services/snapshot",
+        "GET /nkn/info",
+        "POST /nkn/resolve"
+      ],
+      "payload_characteristics": [
+        "Health returns uptime, request counters, NKN readiness, telemetry totals, and snapshot.",
+        "Resolve supports local short-circuit and remote NKN request/reply with timeout semantics.",
+        "Services snapshot returns both raw service payloads and normalized resolved endpoints."
+      ],
+      "refs": [
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/router/router.py:3417-3502",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/router/router.py:3526-3652"
+      ]
+    },
+    "service_discovery_pattern": {
+      "common_endpoints": [
+        "GET /health",
+        "GET /router_info",
+        "GET /tunnel_info"
+      ],
+      "common_fields": {
+        "router_info": [
+          "status",
+          "service",
+          "transport",
+          "base_url",
+          "local",
+          "tunnel",
+          "fallback",
+          "security"
+        ],
+        "tunnel_info": [
+          "status",
+          "running",
+          "tunnel_url",
+          "stale_tunnel_url",
+          "error",
+          "fallback"
+        ],
+        "fallback": [
+          "selected_transport",
+          "order",
+          "upnp",
+          "nats",
+          "nkn",
+          "local"
+        ]
+      },
+      "refs": [
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/adapter/adapter.py:2643-2757",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/vision/camera_route.py:4988-5104",
+        "/home/robit/Documents/repositories/Dropbear-Neck-Assembly/teleoperation/audio/audio_route.py:2224-2339"
+      ]
+    }
+  }
+}

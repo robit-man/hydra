@@ -98,6 +98,7 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
         instance: null,
         initializing: null,
         lastFrameMs: 0,
+        lastTransport: '',
         processing: false,
         lastError: '',
         lastBadgeTs: 0,
@@ -119,6 +120,7 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
         instance: null,
         initializing: null,
         lastFrameMs: 0,
+        lastTransport: '',
         processing: false,
         lastError: '',
         lastBadgeTs: 0,
@@ -199,6 +201,23 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
     });
   }
 
+  function frameMetaFromPayload(payload) {
+    const src = payload && typeof payload === 'object' ? payload : {};
+    const ts = Number(src.ts);
+    return {
+      transport: String(src.transport || src.selectedTransport || src.transportMode || '').trim().toLowerCase(),
+      route: String(src.route || '').trim(),
+      origin: String(src.source || src.from || src.peer || '').trim(),
+      ts: Number.isFinite(ts) ? ts : undefined
+    };
+  }
+
+  function applyFrameMeta(frame, payload) {
+    if (!frame || typeof frame !== 'object') return frame;
+    const meta = frameMetaFromPayload(payload);
+    return { ...frame, ...meta };
+  }
+
   async function prepareFrame(payload) {
     if (!payload) return null;
     if (payload.video instanceof HTMLVideoElement) {
@@ -207,40 +226,48 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
       const width = video.videoWidth || payload.width || 0;
       const height = video.videoHeight || payload.height || 0;
       if (!width || !height) return null;
-      return { kind: 'video', source: video, width, height };
+      return applyFrameMeta({ kind: 'video', source: video, width, height }, payload);
     }
     if (payload.bitmap instanceof ImageBitmap) {
       const bitmap = payload.bitmap;
-      return {
+      return applyFrameMeta({
         kind: 'bitmap',
         source: bitmap,
         width: bitmap.width || payload.width || 0,
         height: bitmap.height || payload.height || 0,
         cleanup: () => bitmap.close?.()
-      };
+      }, payload);
     }
     if (payload.image instanceof HTMLImageElement) {
       const img = payload.image;
-      return {
+      return applyFrameMeta({
         kind: 'image',
         source: img,
         width: img.naturalWidth || img.width || payload.width || 0,
         height: img.naturalHeight || img.height || payload.height || 0
-      };
+      }, payload);
     }
     if (typeof payload.dataUrl === 'string') {
-      return dataUrlToImageData(payload.dataUrl);
+      const frame = await dataUrlToImageData(payload.dataUrl);
+      return frame ? applyFrameMeta(frame, payload) : null;
     }
     if (typeof payload.b64 === 'string') {
-      return base64ToImageData(payload.b64, payload.mime || payload.contentType || 'image/webp');
+      const frame = await base64ToImageData(payload.b64, payload.mime || payload.contentType || 'image/webp');
+      return frame ? applyFrameMeta(frame, payload) : null;
     }
     if (payload.canvas instanceof HTMLCanvasElement) {
       const canvas = payload.canvas;
       if (imageBitmapSupported) {
         const bitmap = await createImageBitmap(canvas);
-        return { kind: 'bitmap', source: bitmap, width: canvas.width, height: canvas.height, cleanup: () => bitmap.close() };
+        return applyFrameMeta({
+          kind: 'bitmap',
+          source: bitmap,
+          width: canvas.width,
+          height: canvas.height,
+          cleanup: () => bitmap.close()
+        }, payload);
       }
-      return { kind: 'canvas', source: canvas, width: canvas.width, height: canvas.height };
+      return applyFrameMeta({ kind: 'canvas', source: canvas, width: canvas.width, height: canvas.height }, payload);
     }
     return null;
   }
@@ -555,9 +582,13 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
 
   function emitFace(nodeId, state, result, frame) {
     if (!result || !Array.isArray(result.faceLandmarks)) return;
-    const ts = Date.now();
+    const rawTs = Number(frame?.ts);
+    const ts = Number.isFinite(rawTs) ? rawTs : Date.now();
     const width = frame.width || 0;
     const height = frame.height || 0;
+    const transport = String(frame?.transport || '').trim().toLowerCase();
+    const route = String(frame?.route || '').trim();
+    const source = String(frame?.origin || '').trim();
 
     if (result.faceLandmarks.length) {
       const landmarks = mapLandmarks(result.faceLandmarks[0], false);
@@ -568,7 +599,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           ts,
           width,
           height,
-          landmarks
+          landmarks,
+          transport,
+          route,
+          source
         });
       } catch (err) {
         // ignore routing errors
@@ -588,7 +622,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           type: 'blendshapes',
           nodeId,
           ts,
-          categories
+          categories,
+          transport,
+          route,
+          source
         });
       } catch (err) {
         // ignore routing errors
@@ -610,7 +647,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           type: 'face-world',
           nodeId,
           ts,
-          matrices
+          matrices,
+          transport,
+          route,
+          source
         });
       } catch (err) {
         // ignore routing errors
@@ -629,7 +669,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
             degrees: orientation.degrees,
             quaternion: orientation.quaternion,
             position: orientation.position,
-            matrix: orientation.matrix
+            matrix: orientation.matrix,
+            transport,
+            route,
+            source
           });
         } catch (err) {
           // ignore routing errors
@@ -654,9 +697,13 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
 
   function emitPose(nodeId, state, result, frame) {
     if (!result || !Array.isArray(result.landmarks)) return;
-    const ts = Date.now();
+    const rawTs = Number(frame?.ts);
+    const ts = Number.isFinite(rawTs) ? rawTs : Date.now();
     const width = frame.width || 0;
     const height = frame.height || 0;
+    const transport = String(frame?.transport || '').trim().toLowerCase();
+    const route = String(frame?.route || '').trim();
+    const source = String(frame?.origin || '').trim();
 
     if (result.landmarks.length) {
       const landmarks = mapLandmarks(result.landmarks[0], true);
@@ -667,7 +714,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           ts,
           width,
           height,
-          landmarks
+          landmarks,
+          transport,
+          route,
+          source
         });
       } catch (err) {
         // ignore routing errors
@@ -681,7 +731,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
           type: 'pose-world',
           nodeId,
           ts,
-          landmarks: world
+          landmarks: world,
+          transport,
+          route,
+          source
         });
       } catch (err) {
         // ignore routing errors
@@ -709,7 +762,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
             ts,
             mask: maskPayload,
             width,
-            height
+            height,
+            transport,
+            route,
+            source
           });
         } catch (err) {
           // ignore routing errors
@@ -873,19 +929,21 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
         state.synthetic = null;
         const frame = await prepareFrame(payload);
         if (!frame) return;
-        const timestamp = throttle.timestamp ?? nowMs();
+        const rawTs = Number(frame.ts);
+        const timestamp = Number.isFinite(rawTs) ? rawTs : (throttle.timestamp ?? nowMs());
         frame.ts = timestamp;
         state.lastFrameMs = timestamp;
+        state.lastTransport = String(frame.transport || '').trim().toLowerCase();
         const instance = await ensureInstance(nodeId, state);
         if (!instance) return;
         let result = null;
-        const source = frame.source;
-        if (!source) return;
+        const mediaSource = frame.source;
+        if (!mediaSource) return;
         const useVideoMode = state.cfg.runningMode === 'VIDEO';
         if (useVideoMode && typeof instance.detectForVideo === 'function') {
-          result = instance.detectForVideo(source, timestamp);
+          result = instance.detectForVideo(mediaSource, timestamp);
         } else if (typeof instance.detect === 'function') {
-          result = instance.detect(source);
+          result = instance.detect(mediaSource);
         }
         if (frame.cleanup) {
           try { frame.cleanup(); } catch (_) { /* ignore */ }
@@ -896,7 +954,10 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
             width: frame.width || 0,
             height: frame.height || 0,
             ts: frame.ts || throttle.timestamp || nowMs(),
-            synthetic: false
+            synthetic: false,
+            transport: frame.transport || '',
+            route: frame.route || '',
+            source: frame.origin || ''
           };
           emitFace(nodeId, state, result, frame);
           notifyFaceViews(nodeId, state, result, frame);
@@ -929,18 +990,21 @@ function createVision({ getNode, Router, NodeStore, setBadge, log }) {
       .then(async () => {
         const frame = await prepareFrame(payload);
         if (!frame) return;
-        state.lastFrameMs = throttle.timestamp;
+        const rawTs = Number(frame.ts);
+        const timestamp = Number.isFinite(rawTs) ? rawTs : (throttle.timestamp ?? nowMs());
+        frame.ts = timestamp;
+        state.lastFrameMs = timestamp;
+        state.lastTransport = String(frame.transport || '').trim().toLowerCase();
         const instance = await ensureInstance(nodeId, state);
         if (!instance) return;
-        const timestamp = nowMs();
         let result = null;
-        const source = frame.source;
-        if (!source) return;
+        const mediaSource = frame.source;
+        if (!mediaSource) return;
         const useVideoMode = state.cfg.runningMode === 'VIDEO';
         if (useVideoMode && typeof instance.detectForVideo === 'function') {
-          result = instance.detectForVideo(source, timestamp);
+          result = instance.detectForVideo(mediaSource, timestamp);
         } else if (typeof instance.detect === 'function') {
-          result = instance.detect(source);
+          result = instance.detect(mediaSource);
         }
         if (frame.cleanup) {
           try { frame.cleanup(); } catch (_) { /* ignore */ }

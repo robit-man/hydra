@@ -1,4 +1,5 @@
 import { ensureLocalNetworkAccess } from './localNetwork.js';
+import { resolveServiceEndpoint } from './endpointResolver.js';
 
 const TRUE_LIKE = new Set(['1', 'true', 'yes', 'on']);
 const ACTION_ALIASES = {
@@ -132,8 +133,9 @@ function serviceNameFromConfig(cfg) {
   return raw || 'web_scrape';
 }
 
-function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, log = noop }) {
+function createWebScraper({ getNode, NodeStore, Router, Net, CFG = {}, setBadge = noop, log = noop }) {
   const stateMap = new Map();
+  const resolveMetaByNode = new Map();
 
   function config(nodeId) {
     const record = NodeStore.ensure(nodeId, 'WebScraper');
@@ -144,6 +146,59 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const next = { ...config(nodeId), ...patch };
     NodeStore.saveCfg(nodeId, 'WebScraper', next);
     return next;
+  }
+
+  function normalizeEndpointSource(value) {
+    return String(value || '').trim().toLowerCase() === 'manual' ? 'manual' : 'router';
+  }
+
+  function requestOptions(endpoint) {
+    return {
+      service: endpoint.service || 'web_scrape',
+      useServiceTarget: true,
+      forceRelay: !!endpoint.relayOnly
+    };
+  }
+
+  function persistResolveMeta(nodeId, cfg, endpoint) {
+    if (!nodeId || !endpoint || !cfg || typeof cfg !== 'object') return;
+    const service = String(cfg.service || endpoint.service || 'web_scrape').trim() || 'web_scrape';
+    const endpointSource = normalizeEndpointSource(cfg.endpointSource);
+    const endpointMode = String(cfg.endpointMode || endpoint.mode || 'auto').trim().toLowerCase() || 'auto';
+    const diagnostics = endpoint.resolveDiagnostics || null;
+    const signature = JSON.stringify({
+      service,
+      endpointSource,
+      endpointMode,
+      selectedTransport: endpoint.selectedTransport || '',
+      activeSource: endpoint.endpointSource || '',
+      base: endpoint.base || '',
+      relay: endpoint.relay || '',
+      reason: diagnostics?.reason || '',
+      diagnostics
+    });
+    const previousSignature = resolveMetaByNode.get(nodeId);
+    const sameSignature = previousSignature === signature;
+    const nextLastResolvedAt = endpoint.endpointSource === 'router'
+      ? (sameSignature ? Number(cfg.lastResolvedAt || 0) : Number(endpoint.resolvedAt || Date.now()))
+      : Number(cfg.lastResolvedAt || 0);
+    const sameDiagnostics = JSON.stringify(cfg.resolveDiagnostics || null) === JSON.stringify(diagnostics || null);
+    const sameFields =
+      cfg.service === service &&
+      normalizeEndpointSource(cfg.endpointSource) === endpointSource &&
+      String(cfg.endpointMode || 'auto').trim().toLowerCase() === endpointMode &&
+      Number(cfg.lastResolvedAt || 0) === nextLastResolvedAt &&
+      sameDiagnostics;
+    if (sameSignature && sameFields) return;
+
+    updateConfig(nodeId, {
+      service,
+      endpointSource,
+      endpointMode,
+      lastResolvedAt: nextLastResolvedAt,
+      resolveDiagnostics: diagnostics
+    });
+    resolveMetaByNode.set(nodeId, signature);
   }
 
   function ensureState(nodeId) {
@@ -524,6 +579,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     }
     state.cleanup = [];
     stateMap.delete(nodeId);
+    resolveMetaByNode.delete(nodeId);
   }
 
   function setBusy(state, busy) {
@@ -668,7 +724,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (!state) return null;
     const sid = getActiveSid(state);
     if (!sid) return null;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const selector = state.activeInput?.selector || state.inputs.selector || '';
     if (!selector && !state.activeInput) return null;
     const payload = {
@@ -680,7 +736,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       selector
     };
     try {
-      const res = await Net.postJSON(base, '/input/sync', payload, api, viaNkn, relay, 20000);
+      const res = await Net.postJSON(base, '/input/sync', payload, api, viaNkn, relay, 20000, requestOptions({ service, relayOnly }));
       if (state.activeInput) state.activeInput.value = payload.value;
       if (submit || state.autoScreenshot || state.autoCapture) {
         queueFrameRefresh(nodeId, submit ? 40 : 160);
@@ -869,18 +925,36 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
 
   function requestEnv(nodeId) {
     const cfg = config(nodeId);
-    const base = normalizeBase(cfg.base) || 'http://127.0.0.1:8130';
-    const relay = (cfg.relay || '').trim();
-    const api = (cfg.api || '').trim();
     const service = serviceNameFromConfig(cfg);
-    const viaNkn = Boolean(relay);
-    return { cfg, base, relay, api, service, viaNkn };
+    const endpoint = resolveServiceEndpoint({
+      cfg: { ...cfg, service },
+      service,
+      routerResolvedEndpoints: CFG?.routerResolvedEndpoints,
+      routerTargetNknAddress: CFG?.routerTargetNknAddress,
+      defaultBase: 'http://127.0.0.1:8130'
+    });
+    const resolved = {
+      ...endpoint,
+      service: endpoint.service || service || 'web_scrape',
+      base: normalizeBase(endpoint.base || 'http://127.0.0.1:8130')
+    };
+    persistResolveMeta(nodeId, cfg, resolved);
+    return {
+      cfg,
+      base: resolved.base,
+      relay: resolved.relay || '',
+      api: resolved.api || '',
+      service: resolved.service,
+      viaNkn: !!resolved.viaNkn,
+      relayOnly: !!resolved.relayOnly,
+      endpoint: resolved
+    };
   }
 
   async function openSession(nodeId) {
     const state = ensureState(nodeId);
     if (!state) return;
-    const { base, relay, api, viaNkn, service } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const headless = boolConfig(nodeId, 'headless', true);
     if (!viaNkn) {
       try {
@@ -893,7 +967,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     setBusy(state, true);
     setStatus(nodeId, 'Starting browser…', 'pending');
     try {
-      const res = await Net.postJSON(base, path, { headless }, api, viaNkn, relay, 60000);
+      const res = await Net.postJSON(base, path, { headless }, api, viaNkn, relay, 60000, requestOptions({ service, relayOnly }));
       const sid = res?.session_id || res?.sessionId || '';
       if (sid) {
         state.manualSid = '';
@@ -918,10 +992,10 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
   async function closeSession(nodeId) {
     const state = ensureState(nodeId);
     if (!state) return;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     try {
-      await Net.postJSON(base, '/session/close', {}, api, viaNkn, relay, 30000);
+      await Net.postJSON(base, '/session/close', {}, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       stopEvents(state);
       setSessionId(nodeId, '', { persist: true, announce: true });
       setStatus(nodeId, 'Browser closed', 'warn');
@@ -956,12 +1030,12 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     }
     state.pendingInputValue = null;
     state.pendingInputMeta = null;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const body = { url, sid };
     setBusy(state, true);
     setStatus(nodeId, `Navigating to ${url}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/navigate', body, api, viaNkn, relay, 45000);
+      const res = await Net.postJSON(base, '/navigate', body, api, viaNkn, relay, 45000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.msg || `navigate ${url}`);
       setStatus(nodeId, 'Navigation done', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -987,11 +1061,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'Selector required', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Click ${selector}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/click', { selector, sid }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/click', { selector, sid }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.msg || `click ${selector}`);
       setStatus(nodeId, 'Click ok', 'ok');
       state.activeInput = { selector, value: state.inputs.text || '' };
@@ -1026,7 +1100,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'No session id', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const body = {
       sid,
       startX: coords.startX,
@@ -1053,7 +1127,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     setBusy(state, true);
     setStatus(nodeId, 'Drag…', 'pending');
     try {
-      const res = await Net.postJSON(base, '/drag', body, api, viaNkn, relay, 45000);
+      const res = await Net.postJSON(base, '/drag', body, api, viaNkn, relay, 45000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || 'drag completed');
       setStatus(nodeId, res?.message || 'Drag ok', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1074,7 +1148,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'No session id', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     if (!viaNkn) {
       try {
         await ensureLocalNetworkAccess({ requireGesture: false });
@@ -1092,7 +1166,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     setBusy(state, true);
     setStatus(nodeId, 'Going back…', 'pending');
     try {
-      const res = await Net.postJSON(base, '/history/back', { sid }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/history/back', { sid }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || 'navigated back');
       setStatus(nodeId, 'Went back', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1113,7 +1187,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'No session id', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     if (!viaNkn) {
       try {
         await ensureLocalNetworkAccess({ requireGesture: false });
@@ -1131,7 +1205,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     setBusy(state, true);
     setStatus(nodeId, 'Going forward…', 'pending');
     try {
-      const res = await Net.postJSON(base, '/history/forward', { sid }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/history/forward', { sid }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || 'navigated forward');
       setStatus(nodeId, 'Went forward', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1153,11 +1227,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       return;
     }
     const amount = Math.abs(Number.isFinite(amountOverride) ? amountOverride : state.inputs.amount || 600);
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Scroll up ${amount}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/scroll/up', { sid, amount }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/scroll/up', { sid, amount }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || `scroll up ${amount}`);
       setStatus(nodeId, 'Scroll up done', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1179,11 +1253,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       return;
     }
     const amount = Math.abs(Number.isFinite(amountOverride) ? amountOverride : state.inputs.amount || 600);
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Scroll down ${amount}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/scroll/down', { sid, amount }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/scroll/down', { sid, amount }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || `scroll down ${amount}`);
       setStatus(nodeId, 'Scroll down done', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1201,7 +1275,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     if (!state) return;
     const sid = getActiveSid(state);
     if (!sid) return;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const body = {
       sid,
       x: payload.x,
@@ -1214,7 +1288,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       naturalH: payload.naturalH
     };
     try {
-      await Net.postJSON(base, '/scroll/point', body, api, viaNkn, relay, 20000);
+      await Net.postJSON(base, '/scroll/point', body, api, viaNkn, relay, 20000, requestOptions({ service, relayOnly }));
       if (state.autoScreenshot || state.autoCapture) {
         queueFrameRefresh(nodeId);
       }
@@ -1263,11 +1337,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       return;
     }
     state.activeInput = { selector };
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Type into ${selector}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/type', { selector, text, sid }, api, viaNkn, relay, 45000);
+      const res = await Net.postJSON(base, '/type', { selector, text, sid }, api, viaNkn, relay, 45000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.msg || `type ${selector}`);
       setStatus(nodeId, 'Type ok', 'ok');
       if (state.activeInput) state.activeInput.value = normalizedText;
@@ -1331,11 +1405,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       return;
     }
     const amount = Number.isFinite(amountOverride) ? amountOverride : state.inputs.amount;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, `Scroll ${amount}`, 'pending');
     try {
-      const res = await Net.postJSON(base, '/scroll', { amount, sid }, api, viaNkn, relay, 30000);
+      const res = await Net.postJSON(base, '/scroll', { amount, sid }, api, viaNkn, relay, 30000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.msg || `scroll ${amount}`);
       setStatus(nodeId, 'Scroll ok', 'ok');
       if (state.autoScreenshot) await captureScreenshot(nodeId, { silent: true });
@@ -1357,11 +1431,11 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       return;
     }
     const body = { ...payload, sid };
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     setBusy(state, true);
     setStatus(nodeId, 'Click (xy)', 'pending');
     try {
-      const res = await Net.postJSON(base, '/click_xy', body, api, viaNkn, relay, 45000);
+      const res = await Net.postJSON(base, '/click_xy', body, api, viaNkn, relay, 45000, requestOptions({ service, relayOnly }));
       appendLog(nodeId, res?.message || 'click_xy');
       setStatus(nodeId, 'Click ok', 'ok');
       if (res?.detail) {
@@ -1387,12 +1461,12 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'No session id', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const path = `/dom?sid=${encodeURIComponent(sid)}`;
     setBusy(state, true);
     setStatus(nodeId, 'Fetching DOM…', 'pending');
     try {
-      const res = await Net.getJSON(base, path, api, viaNkn, relay);
+      const res = await Net.getJSON(base, path, api, viaNkn, relay, requestOptions({ service, relayOnly }));
       const dom = res?.dom || '';
       Router.sendFrom(nodeId, 'dom', { nodeId, sid, dom, length: dom.length, ts: Date.now() });
       updateConfig(nodeId, { lastDom: dom });
@@ -1417,7 +1491,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       if (!silent) setStatus(nodeId, 'No session id', 'warn');
       return;
     }
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     const path = `/screenshot?sid=${encodeURIComponent(sid)}`;
     if (!viaNkn) {
       try {
@@ -1432,7 +1506,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       setStatus(nodeId, 'Capturing screenshot…', 'pending');
     }
     try {
-      const res = await Net.getJSON(base, path, api, viaNkn, relay);
+      const res = await Net.getJSON(base, path, api, viaNkn, relay, requestOptions({ service, relayOnly }));
       const file = res?.file || '';
       const width = Number(res?.width || 0);
       const height = Number(res?.height || 0);
@@ -1461,7 +1535,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
     const state = ensureState(nodeId);
     if (!state) return;
     const prevMeta = state.lastFrameMeta;
-    const { base, relay, api, viaNkn } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     let imageUrl = '';
     const mime = meta?.mime || 'image/png';
     let rawData = inlineB64;
@@ -1482,7 +1556,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
         }
       }
       try {
-        blob = await Net.fetchBlob(url, viaNkn, relay, api);
+        blob = await Net.fetchBlob(url, viaNkn, relay, api, requestOptions({ service, relayOnly }));
       } catch (err) {
         appendLog(nodeId, `frame fetch failed: ${err?.message || err}`, 'error');
         return;
@@ -1601,7 +1675,7 @@ function createWebScraper({ getNode, NodeStore, Router, Net, setBadge = noop, lo
       stopEvents(state);
       return;
     }
-    const { base, relay, api, viaNkn, service } = requestEnv(nodeId);
+    const { base, relay, api, viaNkn, service, relayOnly } = requestEnv(nodeId);
     stopEvents(state);
     const localGen = ++state.eventGen;
     const parser = createSseParser(nodeId, localGen);

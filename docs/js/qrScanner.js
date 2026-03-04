@@ -9,6 +9,7 @@ const QRScan = {
   raf: null,
   target: null,
   onResult: null,
+  populateTarget: true,
   ready: false
 };
 
@@ -33,7 +34,7 @@ function setupQrScanner() {
   QRScan.ready = true;
 }
 
-async function openQrScanner(targetInput, onResult) {
+async function openQrScanner(targetInput, onResult, options = {}) {
   setupQrScanner();
   if (!QRScan.modal) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -51,6 +52,7 @@ async function openQrScanner(targetInput, onResult) {
   }
   QRScan.target = targetInput || null;
   QRScan.onResult = typeof onResult === 'function' ? onResult : null;
+  QRScan.populateTarget = options && options.populateTarget === false ? false : true;
   QRScan.modal.classList.remove('hidden');
   QRScan.modal.setAttribute('aria-hidden', 'false');
   try {
@@ -94,6 +96,7 @@ function closeQrScanner() {
   }
   QRScan.target = null;
   QRScan.onResult = null;
+  QRScan.populateTarget = true;
 }
 
 function scanQrFrame() {
@@ -120,7 +123,7 @@ function scanQrFrame() {
     if (code && code.data) {
       const text = code.data.trim();
       if (text) {
-        if (QRScan.target) {
+        if (QRScan.target && QRScan.populateTarget) {
           QRScan.target.value = text;
           QRScan.target.dispatchEvent(new Event('input', { bubbles: true }));
         }
