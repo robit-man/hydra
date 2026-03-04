@@ -36,6 +36,17 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-07.1-api-contract-tests.md`
   - `WO-07.2-end-to-end-simulation.md`
   - `WO-07.3-controlled-migration-plan.md`
+- `phase-08`
+  - `WO-08.1-peer-identity-contract-and-prefix-canonicalization.md`
+  - `WO-08.2-nats-discovery-unification-and-bridge.md`
+  - `WO-08.3-manual-peer-addition-and-qr-ingress.md`
+  - `WO-08.4-noclip-backend-endpoint-registry-and-shared-key-scheme.md`
+  - `WO-08.5-common-interop-api-contract-and-envelope-versioning.md`
+  - `WO-08.6-hydra-overlay-data-plane-and-multimodal-payloads.md`
+  - `WO-08.7-noclip-overlay-ingress-and-asset-hydration-runtime.md`
+  - `WO-08.8-endpoint-state-federation-and-discovery-interop.md`
+  - `WO-08.9-cross-frontend-ui-and-style-unification.md`
+  - `WO-08.10-end-to-end-validation-failure-drills-and-rollout-gates.md`
 
 ## Completion Rule
 

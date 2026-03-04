@@ -62,7 +62,7 @@ Each Hydra service is surfaced through a normalized discovery contract:
 ## 4) Phased Workorders
 
 Canonical execution files live under:
-- `workorders/phase-00` through `workorders/phase-07`
+- `workorders/phase-00` through `workorders/phase-08`
 - Each workorder file includes scoped file targets, acceptance metrics, and failure-mode preventions used by implementation agents.
 
 ## Phase 0 - Discovery Baseline
@@ -416,6 +416,108 @@ Tasks:
 Acceptance:
 - Production migration can be done incrementally with fast rollback.
 
+## Phase 8 - Hydra + NoClip Interop
+
+### WO-08.1 Peer Identity Contract And Prefix Canonicalization
+Scope:
+- `workorders/phase-08/WO-08.1-peer-identity-contract-and-prefix-canonicalization.md`
+
+Tasks:
+- Standardize prefixed peer identity (`hydra.<hex64>`, `noclip.<hex64>`), dedupe peer maps, and migrate persisted state safely.
+
+Acceptance:
+- Identity remains stable across discovery, DM, URL ingress, and restart cycles.
+
+### WO-08.2 NATS Discovery Unification And Bridge
+Scope:
+- `workorders/phase-08/WO-08.2-nats-discovery-unification-and-bridge.md`
+
+Tasks:
+- Align subject naming (`discovery.<room>.presence`, `discovery.<room>.dm.<pub>`), enforce one discovery client, and keep NKN DM primary.
+
+Acceptance:
+- Hydra and NoClip peers discover each other in shared rooms without duplicate events.
+
+### WO-08.3 Manual Peer Addition And QR Ingress
+Scope:
+- `workorders/phase-08/WO-08.3-manual-peer-addition-and-qr-ingress.md`
+
+Tasks:
+- Add symmetrical manual-add and QR ingress on both frontends with strict validation and user confirmation.
+
+Acceptance:
+- Users can connect either direction through QR or pasted address without prior friend graph linkage.
+
+### WO-08.4 NoClip Backend Endpoint Registry And Shared Key Scheme
+Scope:
+- `workorders/phase-08/WO-08.4-noclip-backend-endpoint-registry-and-shared-key-scheme.md`
+
+Tasks:
+- Extend endpoint persistence with cloudflare/NKN state + shared-key metadata and replay-safe verification.
+
+Acceptance:
+- Endpoint registry returns verified interop candidates and rejects unauthorized updates.
+
+### WO-08.5 Common Interop API Contract And Envelope Versioning
+Scope:
+- `workorders/phase-08/WO-08.5-common-interop-api-contract-and-envelope-versioning.md`
+
+Tasks:
+- Define one versioned Hydra↔NoClip interop envelope and endpoint-state schema used by router/backend/frontends.
+
+Acceptance:
+- Both stacks parse and emit the same contract with deterministic error handling.
+
+### WO-08.6 Hydra Overlay Data Plane And Multimodal Payloads
+Scope:
+- `workorders/phase-08/WO-08.6-hydra-overlay-data-plane-and-multimodal-payloads.md`
+
+Tasks:
+- Add reliable multimodal payload handling (text/command/audio/video/pointcloud/GLB) with chunking and ACK semantics.
+
+Acceptance:
+- NoClip receives and reconstructs all payload classes through the Hydra bridge path.
+
+### WO-08.7 NoClip Overlay Ingress And Asset Hydration Runtime
+Scope:
+- `workorders/phase-08/WO-08.7-noclip-overlay-ingress-and-asset-hydration-runtime.md`
+
+Tasks:
+- Build NoClip-side ingress runtime that maps Hydra payloads to overlay item mutations and media binding.
+
+Acceptance:
+- Targeted overlays hydrate correctly from Hydra updates with explicit acknowledgments/errors.
+
+### WO-08.8 Endpoint State Federation And Discovery Interop
+Scope:
+- `workorders/phase-08/WO-08.8-endpoint-state-federation-and-discovery-interop.md`
+
+Tasks:
+- Federate transport candidates and discovery metadata across Hydra router, NoClip frontend, and NoClip backend.
+
+Acceptance:
+- Selected transport is consistent and resilient across NKN/NATS/cloudflare/manual paths.
+
+### WO-08.9 Cross-Frontend UI And Style Unification
+Scope:
+- `workorders/phase-08/WO-08.9-cross-frontend-ui-and-style-unification.md`
+
+Tasks:
+- Align peer UX, QR workflows, transport indicators, and visual tokens across Hydra and NoClip interfaces.
+
+Acceptance:
+- Users see consistent connection workflows and status language on both apps.
+
+### WO-08.10 End-To-End Validation, Failure Drills, And Rollout Gates
+Scope:
+- `workorders/phase-08/WO-08.10-end-to-end-validation-failure-drills-and-rollout-gates.md`
+
+Tasks:
+- Add full-stack smoke tests, chaos drills, health gates, and rollback runbooks for interop rollout.
+
+Acceptance:
+- Interop changes ship behind measurable gates with deterministic rollback behavior.
+
 ## 5) Detailed Frontend Change Map (`docs/js`)
 
 ### `docs/js/config.js`
@@ -466,6 +568,7 @@ Acceptance:
 3. Phase 3 and Phase 4 in parallel once control-plane schema is locked.
 4. Phase 5 after `/services/snapshot` + `/nkn/resolve` payloads are stable.
 5. Phase 6 and Phase 7 before full rollout.
+6. Phase 8 after Phase 4/5 contracts stabilize, with backend migration and interop smoke gates enabled.
 
 ## 7) Definition of Done (Program-Level)
 - Hydra router exposes stable control-plane APIs and NKN resolve semantics matching teleoperation behavior.
