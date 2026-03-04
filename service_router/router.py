@@ -195,8 +195,8 @@ ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
         "reclaim_sigkill_wait_seconds": {"type": "float", "default": 1.0, "min": 0.0, "max": 30.0},
     },
     "cloudflared": {
-        "enable": {"type": "bool", "default": False, "legacy": ("enable_tunnel", "cloudflared_enable")},
-        "auto_install_cloudflared": {"type": "bool", "default": False},
+        "enable": {"type": "bool", "default": True, "legacy": ("enable_tunnel", "cloudflared_enable")},
+        "auto_install_cloudflared": {"type": "bool", "default": True},
         "binary_path": {"type": "str", "default": ""},
         "protocol": {"type": "str", "default": "http2"},
         "restart_initial_seconds": {"type": "float", "default": 2.0, "min": 0.5, "max": 300.0},
@@ -205,7 +205,11 @@ ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "feature_flags": {
         "router_control_plane_api": {"type": "bool", "default": True},
         "resolver_auto_apply": {"type": "bool", "default": True},
-        "cloudflared_manager": {"type": "bool", "default": False},
+        "cloudflared_manager": {"type": "bool", "default": True},
+    },
+    "owner_control": {
+        "require_owner_key_for_marketplace": {"type": "bool", "default": True, "legacy": ("require_owner_key",)},
+        "owner_key": {"type": "str", "default": ""},
     },
     "marketplace": {
         "enable_catalog": {"type": "bool", "default": True},
@@ -284,12 +288,16 @@ SENSITIVE_FIELD_EXACT = {
     "authorization",
     "auth_header",
     "bearer",
+    "owner_key",
+    "owner_control_key",
+    "x_hydra_owner_key",
+    "x_owner_key",
 }
 SENSITIVE_FIELD_EXCEPTIONS = {
     "seed_persisted",
 }
 SENSITIVE_FIELD_REGEX = re.compile(
-    r"(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|auth_header|bearer)"
+    r"(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|auth_header|bearer|owner_?key)"
 )
 
 
@@ -605,6 +613,10 @@ DAEMON_SENTINEL = Path.home() / ".unified_router_daemon.json"
 
 def generate_seed_hex() -> str:
     return secrets.token_hex(32)
+
+
+def generate_owner_key() -> str:
+    return f"hydra-owner-{secrets.token_urlsafe(24)}"
 
 
 class DaemonManager:
@@ -2724,8 +2736,8 @@ def _default_config() -> dict:
             "reclaim_sigkill_wait_seconds": 1.0,
         },
         "cloudflared": {
-            "enable": False,
-            "auto_install_cloudflared": False,
+            "enable": True,
+            "auto_install_cloudflared": True,
             "binary_path": "",
             "protocol": "http2",
             "restart_initial_seconds": 2.0,
@@ -2734,7 +2746,11 @@ def _default_config() -> dict:
         "feature_flags": {
             "router_control_plane_api": True,
             "resolver_auto_apply": True,
-            "cloudflared_manager": False,
+            "cloudflared_manager": True,
+        },
+        "owner_control": {
+            "require_owner_key_for_marketplace": True,
+            "owner_key": generate_owner_key(),
         },
         "marketplace": {
             "enable_catalog": True,
@@ -3299,6 +3315,19 @@ class EnhancedUI:
         self.brutalist_mode = True  # Use brutalist UI layout
         self.network_state: str = "online"  # online, offline, hard_offline
         self.offline_since: float = 0.0
+        self.owner_key_display: str = ""
+        self.owner_key_required: bool = True
+        self.marketplace_provider_label: str = "Hydra Router"
+        self.marketplace_summary: Dict[str, Any] = {
+            "service_count": 0,
+            "published_count": 0,
+            "healthy_count": 0,
+            "catalog_ready": False,
+            "selected_transport_top": "",
+            "source": "",
+            "sync_http_state": "",
+            "sync_nats_state": "",
+        }
 
     def _load_service_config(self):
         """Load service enabled/disabled state from config."""
@@ -3434,6 +3463,31 @@ class EnhancedUI:
 
     def set_daemon_info(self, info: Optional[dict]):
         self.daemon_info = info
+
+    def set_owner_control(self, owner_key: str, required: bool = True, marketplace_provider: str = ""):
+        text = str(owner_key or "").strip()
+        if not text:
+            self.owner_key_display = "(unavailable)"
+        elif len(text) <= 14:
+            self.owner_key_display = text
+        else:
+            self.owner_key_display = text
+        self.owner_key_required = bool(required)
+        if marketplace_provider:
+            self.marketplace_provider_label = str(marketplace_provider).strip() or self.marketplace_provider_label
+
+    def set_marketplace_summary(self, summary: Optional[Dict[str, Any]] = None):
+        src = summary if isinstance(summary, dict) else {}
+        self.marketplace_summary = {
+            "service_count": int(src.get("service_count") or 0),
+            "published_count": int(src.get("published_count") or 0),
+            "healthy_count": int(src.get("healthy_count") or 0),
+            "catalog_ready": bool(src.get("catalog_ready")),
+            "selected_transport_top": str(src.get("selected_transport_top") or "").strip(),
+            "source": str(src.get("source") or "").strip(),
+            "sync_http_state": str(src.get("sync_http_state") or "").strip().lower(),
+            "sync_nats_state": str(src.get("sync_nats_state") or "").strip().lower(),
+        }
 
     def bump(self, node_id: str, kind: str, msg: str, nkn_addr: str = "", bytes_sent: int = 0,
              service: Optional[str] = None, bytes_in: int = 0, duration_s: float = 0.0):
@@ -3654,6 +3708,33 @@ class EnhancedUI:
         except Exception:
             pass
 
+        owner_label = "Owner Key"
+        owner_value = self.owner_key_display or "(unavailable)"
+        owner_mode = "required" if self.owner_key_required else "disabled"
+        self._safe_addstr(stdscr, 1, 2, owner_label, curses.color_pair(5) | curses.A_BOLD)
+        self._safe_addstr(stdscr, 2, 2, owner_value, curses.color_pair(7) | curses.A_BOLD)
+        self._safe_addstr(stdscr, 3, 2, f"policy auth: {owner_mode}", curses.A_DIM)
+        provider_label = self.marketplace_provider_label or "Hydra Router"
+        provider_short = provider_label if len(provider_label) <= max(8, w - 4) else provider_label[: max(7, w - 7)] + "..."
+        self._safe_addstr(stdscr, 5, 2, f"market: {provider_short}", curses.color_pair(1) | curses.A_BOLD)
+        market_summary = self.marketplace_summary if isinstance(self.marketplace_summary, dict) else {}
+        service_count = int(market_summary.get("service_count") or 0)
+        published_count = int(market_summary.get("published_count") or 0)
+        healthy_count = int(market_summary.get("healthy_count") or 0)
+        selected_transport = str(market_summary.get("selected_transport_top") or "").strip().lower() or "--"
+        source = str(market_summary.get("source") or "").strip().lower() or "unknown"
+        sync_http_state = str(market_summary.get("sync_http_state") or "").strip().lower() or "idle"
+        sync_nats_state = str(market_summary.get("sync_nats_state") or "").strip().lower() or "idle"
+        self._safe_addstr(
+            stdscr,
+            6,
+            2,
+            f"svc {published_count}/{service_count} pub • healthy {healthy_count}",
+            curses.A_DIM,
+        )
+        self._safe_addstr(stdscr, 7, 2, f"transport: {selected_transport} • src: {source}", curses.A_DIM)
+        self._safe_addstr(stdscr, 8, 2, f"sync http:{sync_http_state} • nats:{sync_nats_state}", curses.A_DIM)
+
         base_x = max(4, w // 2)
         base_y = h - 3
         self.hydra.base_x = base_x
@@ -3739,6 +3820,7 @@ class EnhancedUI:
             line = f"{bullet} [{item.upper():<12}] {pad*max(4, w - 24)}"
             self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
             row += 2
+        top_end_row = row
 
         row = h - (len(bottom_items) * 2 + 2)
         for j, item in enumerate(bottom_items):
@@ -3750,6 +3832,33 @@ class EnhancedUI:
             line = f"{bullet} {item:<14} {pad*4}"
             self._safe_addstr(stdscr, row, w - len(line) - 3, line[: max(0, w - 6)], attr)
             row += 2
+
+        market_summary = self.marketplace_summary if isinstance(self.marketplace_summary, dict) else {}
+        provider = self.marketplace_provider_label or "Hydra Router"
+        provider_short = provider if len(provider) <= max(12, w - 24) else provider[: max(11, w - 27)] + "..."
+        service_count = int(market_summary.get("service_count") or 0)
+        published_count = int(market_summary.get("published_count") or 0)
+        healthy_count = int(market_summary.get("healthy_count") or 0)
+        selected_transport = str(market_summary.get("selected_transport_top") or "").strip().lower() or "--"
+        source = str(market_summary.get("source") or "").strip().lower() or "unknown"
+        sync_http_state = str(market_summary.get("sync_http_state") or "").strip().lower() or "idle"
+        sync_nats_state = str(market_summary.get("sync_nats_state") or "").strip().lower() or "idle"
+        auth_mode = "required" if self.owner_key_required else "disabled"
+
+        info_row = top_end_row + 1
+        if info_row < h - 7:
+            self._safe_addstr(stdscr, info_row, 2, "Marketplace:", curses.color_pair(5) | curses.A_BOLD)
+            self._safe_addstr(stdscr, info_row + 1, 4, f"provider  {provider_short}", curses.A_DIM)
+            self._safe_addstr(
+                stdscr,
+                info_row + 2,
+                4,
+                f"catalog   {published_count}/{service_count} published • healthy {healthy_count}",
+                curses.A_DIM,
+            )
+            self._safe_addstr(stdscr, info_row + 3, 4, f"policy    owner key {auth_mode}", curses.A_DIM)
+            self._safe_addstr(stdscr, info_row + 4, 4, f"sync      http {sync_http_state} • nats {sync_nats_state}", curses.A_DIM)
+            self._safe_addstr(stdscr, info_row + 5, 4, f"resolve   {selected_transport} • {source}", curses.A_DIM)
 
         status = f"{len(self.services)} svc / {len(self.nodes)} nodes"
         self._safe_addstr(stdscr, h - 2, 2, status, curses.A_DIM)
@@ -7046,14 +7155,18 @@ class Router:
         self.feature_flags: Dict[str, bool] = {
             "router_control_plane_api": True,
             "resolver_auto_apply": True,
-            "cloudflared_manager": False,
+            "cloudflared_manager": True,
         }
         self.api_enabled = True
         self.api_host = "127.0.0.1"
         self.api_port = 9071
         self.nkn_settings: Dict[str, Any] = {}
-        self.cloudflared_enabled = False
+        self.cloudflared_enabled = True
         self.cloudflared_cfg: Dict[str, Any] = {}
+        self.cloudflared_manager: Optional[CloudflaredManager] = None
+        self.owner_control_cfg: Dict[str, Any] = {}
+        self.owner_auth_required = True
+        self.owner_key = ""
         self.auth_cfg: Dict[str, Any] = {}
         self.ticket_keys: Dict[str, str] = {}
         self.ticket_accepted_kids: List[str] = []
@@ -7176,12 +7289,6 @@ class Router:
         self.activity_log: Deque[dict] = deque(maxlen=240)
         self.api_server = None
         self.api_thread: Optional[threading.Thread] = None
-        self.cloudflared_manager = (
-            CloudflaredManager(WATCHDOG_RUNTIME_ROOT / "cloudflared", self.cloudflared_cfg, logger=LOGGER.info)
-            if self.cloudflared_enabled
-            else None
-        )
-
         self.assignment_lock = threading.Lock()
         self.config_dirty = bool(self.config_dirty)
         self.rate_limit_state: Dict[str, dict] = {}
@@ -7275,17 +7382,29 @@ class Router:
             "rpc_max_response_b": self._as_int(nkn_cfg.get("rpc_max_response_b"), 2 * 1024 * 1024, minimum=1024),
         }
 
+        previous_cloudflared_enabled = bool(getattr(self, "cloudflared_enabled", False))
+        previous_cloudflared_cfg = dict(getattr(self, "cloudflared_cfg", {}) or {})
+
         cloudflared_cfg = dict(next_cfg.get("cloudflared", {}))
-        next_cloudflared_enabled = self._as_bool(cloudflared_cfg.get("enable"), False)
+        next_cloudflared_enabled = self._as_bool(cloudflared_cfg.get("enable"), True)
         feature_flags_cfg = dict(next_cfg.get("feature_flags", {}))
         next_feature_flags = {
             "router_control_plane_api": self._as_bool(feature_flags_cfg.get("router_control_plane_api"), True),
             "resolver_auto_apply": self._as_bool(feature_flags_cfg.get("resolver_auto_apply"), True),
-            "cloudflared_manager": self._as_bool(feature_flags_cfg.get("cloudflared_manager"), False),
+            "cloudflared_manager": self._as_bool(feature_flags_cfg.get("cloudflared_manager"), True),
         }
         next_cfg["feature_flags"] = next_feature_flags
         next_api_enabled = bool(next_api_enabled and next_feature_flags["router_control_plane_api"])
         next_cloudflared_enabled = bool(next_cloudflared_enabled and next_feature_flags["cloudflared_manager"])
+        owner_control_cfg = dict(next_cfg.get("owner_control", {}))
+        next_owner_auth_required = self._as_bool(owner_control_cfg.get("require_owner_key_for_marketplace"), True)
+        next_owner_key = str(owner_control_cfg.get("owner_key") or "").strip()
+        if not next_owner_key:
+            next_owner_key = generate_owner_key()
+            owner_control_cfg["owner_key"] = next_owner_key
+            changed = True
+        owner_control_cfg["require_owner_key_for_marketplace"] = bool(next_owner_auth_required)
+        next_cfg["owner_control"] = owner_control_cfg
 
         marketplace_cfg = dict(next_cfg.get("marketplace", {}))
         next_marketplace_cfg = {
@@ -7464,6 +7583,15 @@ class Router:
         self.nkn_settings = next_nkn_settings
         self.cloudflared_enabled = next_cloudflared_enabled
         self.cloudflared_cfg = cloudflared_cfg
+        self._reconcile_cloudflared_manager(
+            previous_enabled=previous_cloudflared_enabled,
+            previous_cfg=previous_cloudflared_cfg,
+            next_enabled=next_cloudflared_enabled,
+            next_cfg=cloudflared_cfg,
+        )
+        self.owner_control_cfg = owner_control_cfg
+        self.owner_auth_required = bool(next_owner_auth_required)
+        self.owner_key = str(next_owner_key or "")
         self.auth_cfg = next_auth_cfg
         self.ticket_keys = dict(next_ticket_keys)
         self.ticket_accepted_kids = list(next_ticket_kids)
@@ -7492,9 +7620,77 @@ class Router:
 
         if getattr(self, "ui", None):
             self.ui.set_chunk_upload_kb(next_chunk_upload_kb)
+            self.ui.set_owner_control(
+                self.owner_key,
+                required=self.owner_auth_required,
+                marketplace_provider=str(next_marketplace_cfg.get("provider_label") or "Hydra Router"),
+            )
 
         if changed:
             self.config_dirty = True
+
+    def _cloudflared_runtime_cfg(self, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        source = cfg if isinstance(cfg, dict) else {}
+        restart_initial = self._as_float(source.get("restart_initial_seconds"), 2.0, minimum=0.5, maximum=300.0)
+        restart_cap = self._as_float(source.get("restart_cap_seconds"), 90.0, minimum=1.0, maximum=3600.0)
+        restart_cap = max(restart_initial, restart_cap)
+        return {
+            "enable": self._as_bool(source.get("enable"), True),
+            "auto_install_cloudflared": self._as_bool(source.get("auto_install_cloudflared"), True),
+            "binary_path": str(source.get("binary_path") or "").strip(),
+            "protocol": str(source.get("protocol") or "http2").strip() or "http2",
+            "restart_initial_seconds": restart_initial,
+            "restart_cap_seconds": restart_cap,
+        }
+
+    @staticmethod
+    def _cloudflared_cfg_signature(cfg: Optional[Dict[str, Any]] = None) -> str:
+        source = cfg if isinstance(cfg, dict) else {}
+        try:
+            return hashlib.sha256(
+                json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8", errors="replace")
+            ).hexdigest()
+        except Exception:
+            return ""
+
+    def _reconcile_cloudflared_manager(
+        self,
+        *,
+        previous_enabled: bool,
+        previous_cfg: Optional[Dict[str, Any]],
+        next_enabled: bool,
+        next_cfg: Optional[Dict[str, Any]],
+    ) -> None:
+        prev_sig = self._cloudflared_cfg_signature(previous_cfg)
+        next_sig = self._cloudflared_cfg_signature(next_cfg)
+        previous_manager = getattr(self, "cloudflared_manager", None)
+        should_recreate = (
+            previous_manager is None
+            or (previous_enabled != next_enabled)
+            or (prev_sig != next_sig)
+        )
+
+        if not next_enabled:
+            if previous_manager:
+                with contextlib.suppress(Exception):
+                    previous_manager.shutdown(timeout=3.0)
+            self.cloudflared_manager = None
+            return
+
+        if should_recreate and previous_manager:
+            with contextlib.suppress(Exception):
+                previous_manager.shutdown(timeout=3.0)
+            previous_manager = None
+
+        if previous_manager is None:
+            runtime_cfg = self._cloudflared_runtime_cfg(next_cfg if isinstance(next_cfg, dict) else {})
+            self.cloudflared_manager = CloudflaredManager(
+                WATCHDOG_RUNTIME_ROOT / "cloudflared",
+                runtime_cfg,
+                logger=LOGGER.info,
+            )
+        else:
+            self.cloudflared_manager = previous_manager
 
     @staticmethod
     def _is_loopback_host(host: str) -> bool:
@@ -7672,7 +7868,99 @@ class Router:
         brokers = nats_cfg.get("broker_urls") if isinstance(nats_cfg.get("broker_urls"), list) else []
         if brokers:
             urls["nats"] = str(brokers[0] or "")
+        manager = self.cloudflared_manager
+        if manager:
+            with contextlib.suppress(Exception):
+                states = manager.snapshot()
+                active_urls = []
+                for service_name in sorted(states.keys()):
+                    state = states.get(service_name) if isinstance(states.get(service_name), dict) else {}
+                    active = str(state.get("active_url") or "").strip()
+                    if active:
+                        active_urls.append(active)
+                if active_urls:
+                    urls["cloudflare"] = active_urls[0]
         return urls
+
+    def _cloudflared_state_payload(self) -> Dict[str, Any]:
+        manager = self.cloudflared_manager
+        runtime_cfg = self._cloudflared_runtime_cfg(self.cloudflared_cfg if isinstance(self.cloudflared_cfg, dict) else {})
+        if not manager:
+            return {
+                "status": "disabled",
+                "enabled": False,
+                "feature_flag_enabled": bool((self.feature_flags or {}).get("cloudflared_manager")),
+                "config": runtime_cfg,
+                "services": {},
+                "summary": {
+                    "service_count": 0,
+                    "desired_count": 0,
+                    "running_count": 0,
+                    "active_count": 0,
+                    "stale_count": 0,
+                    "error_count": 0,
+                    "active_urls": [],
+                },
+            }
+
+        raw_states = manager.snapshot()
+        services: Dict[str, Dict[str, Any]] = {}
+        active_urls: List[str] = []
+        desired_count = 0
+        running_count = 0
+        active_count = 0
+        stale_count = 0
+        error_count = 0
+        for service_name in sorted(raw_states.keys()):
+            state = raw_states.get(service_name) if isinstance(raw_states.get(service_name), dict) else {}
+            desired = bool(state.get("desired"))
+            running = bool(state.get("running"))
+            status = str(state.get("state") or "inactive").strip().lower() or "inactive"
+            active_url = str(state.get("active_url") or "").strip()
+            stale_url = str(state.get("stale_url") or "").strip()
+            services[service_name] = {
+                "service": service_name,
+                "target_url": str(state.get("target_url") or "").strip(),
+                "desired": desired,
+                "running": running,
+                "state": status,
+                "tunnel_url": active_url,
+                "stale_tunnel_url": stale_url,
+                "error": str(state.get("last_error") or "").strip(),
+                "restarts": int(state.get("restarts") or 0),
+                "restart_failures": int(state.get("restart_failures") or 0),
+                "rate_limited": bool(state.get("rate_limited")),
+                "pid": int(state.get("pid") or 0) if state.get("pid") else 0,
+                "next_restart_at": float(state.get("next_restart_at") or 0.0),
+            }
+            if desired:
+                desired_count += 1
+            if running:
+                running_count += 1
+            if status == "active" and active_url:
+                active_count += 1
+                active_urls.append(active_url)
+            elif status == "stale":
+                stale_count += 1
+            elif status == "error":
+                error_count += 1
+
+        return {
+            "status": "success",
+            "enabled": True,
+            "feature_flag_enabled": bool((self.feature_flags or {}).get("cloudflared_manager")),
+            "config": runtime_cfg,
+            "services": services,
+            "summary": {
+                "service_count": len(services),
+                "desired_count": desired_count,
+                "running_count": running_count,
+                "active_count": active_count,
+                "stale_count": stale_count,
+                "error_count": error_count,
+                "active_urls": active_urls,
+            },
+        }
 
     def _detect_lan_ip(self) -> str:
         try:
@@ -8406,6 +8694,70 @@ class Router:
                 self.telemetry_state["resolve_success_out"] = int(self.telemetry_state.get("resolve_success_out", 0)) + 1
             else:
                 self.telemetry_state["resolve_fail_out"] = int(self.telemetry_state.get("resolve_fail_out", 0)) + 1
+
+    @staticmethod
+    def _owner_key_hint(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) <= 10:
+            return text[0] + "*" * max(0, len(text) - 2) + text[-1:]
+        return f"{text[:6]}...{text[-4:]}"
+
+    def _owner_auth_payload(self, *, authenticated: bool = False) -> Dict[str, Any]:
+        required = bool(self.owner_auth_required and self.owner_key)
+        return {
+            "required": required,
+            "authenticated": bool(authenticated),
+            "owner_key_hint": self._owner_key_hint(self.owner_key),
+            "owner_auth_header": "X-Hydra-Owner-Key",
+            "alternate_headers": ["X-Owner-Key", "Authorization"],
+            "status": "locked" if (required and not authenticated) else "ready",
+        }
+
+    def _extract_owner_key_from_request(self, request_obj: Any, body: Optional[Dict[str, Any]] = None) -> str:
+        req = request_obj
+        if req is None:
+            return ""
+        headers = getattr(req, "headers", None)
+        if headers is not None:
+            for key in ("X-Hydra-Owner-Key", "X-Owner-Key"):
+                candidate = str(headers.get(key) or "").strip()
+                if candidate:
+                    return candidate
+            auth_header = str(headers.get("Authorization") or "").strip()
+            if auth_header:
+                parts = auth_header.split(None, 1)
+                if len(parts) == 2 and parts[0].strip().lower() in {"hydra-owner", "owner-key", "bearer"}:
+                    token = parts[1].strip()
+                    if token:
+                        return token
+        payload = body if isinstance(body, dict) else {}
+        return str(payload.get("owner_key") or payload.get("ownerKey") or "").strip()
+
+    def _authorize_owner_request(
+        self,
+        request_obj: Any,
+        *,
+        body: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Dict[str, Any], int]:
+        payload = self._owner_auth_payload(authenticated=False)
+        required = bool(payload.get("required"))
+        if not required:
+            payload["authenticated"] = True
+            payload["status"] = "ready"
+            return True, payload, 200
+
+        candidate = self._extract_owner_key_from_request(request_obj, body=body)
+        if candidate and hmac.compare_digest(candidate, str(self.owner_key or "")):
+            payload["authenticated"] = True
+            payload["status"] = "ready"
+            return True, payload, 200
+
+        payload["status"] = "denied"
+        payload["error"] = "owner_key_required"
+        payload["message"] = "Owner key required for marketplace policy access"
+        return False, payload, 401
 
     def _auth_capabilities_payload(self) -> Dict[str, Any]:
         auth = self.auth_cfg if isinstance(self.auth_cfg, dict) else {}
@@ -9542,6 +9894,7 @@ class Router:
             "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
             "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "auth_capabilities": self._auth_capabilities_payload(),
+            "owner_auth": self._owner_auth_payload(authenticated=False),
             "network": network_urls,
             "feature_flags": dict(getattr(self, "feature_flags", {}) or {}),
             "routes": {
@@ -9550,6 +9903,9 @@ class Router:
                 "services": "/services/snapshot",
                 "nkn_info": "/nkn/info",
                 "nkn_resolve": "/nkn/resolve",
+                "cloudflared_state": "/cloudflared/state",
+                "owner_auth_status": "/owner/auth/status",
+                "owner_auth_validate": "/owner/auth/validate",
                 "marketplace_catalog": "/marketplace/catalog",
                 "marketplace_catalog_overrides": "/marketplace/catalog/overrides",
                 "marketplace_sync": "/marketplace/sync",
@@ -11739,6 +12095,7 @@ class Router:
             "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
             "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "auth_capabilities": self._auth_capabilities_payload(),
+            "owner_auth": self._owner_auth_payload(authenticated=False),
             "uptime_seconds": round(time.time() - self.startup_time, 2),
             "requests_served": int(self.request_counter.get("value", 0)),
             "pending_resolves": int(max(0, pending_count)),
@@ -11771,6 +12128,7 @@ class Router:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
         catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
+        cloudflared_state = self._cloudflared_state_payload()
         return {
             "status": "success",
             "interop_contract": self._interop_contract_payload(),
@@ -11778,10 +12136,12 @@ class Router:
             "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
             "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "auth_capabilities": self._auth_capabilities_payload(),
+            "owner_auth": self._owner_auth_payload(authenticated=False),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
             "resolve_summary": summary,
             "catalog": catalog,
             "marketplace_sync": self._marketplace_sync_state_payload(),
+            "cloudflared": cloudflared_state,
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -11790,6 +12150,7 @@ class Router:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
         catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
+        cloudflared_state = self._cloudflared_state_payload()
         return {
             "status": "success",
             "interop_contract": self._interop_contract_payload(),
@@ -11797,6 +12158,7 @@ class Router:
             "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
             "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "auth_capabilities": self._auth_capabilities_payload(),
+            "owner_auth": self._owner_auth_payload(authenticated=False),
             "network": self._router_network_urls(),
             "nkn": {
                 "enabled": bool(self.nkn_settings.get("enable", True)),
@@ -11810,6 +12172,7 @@ class Router:
             "catalog_summary": catalog.get("summary", {}) if isinstance(catalog, dict) else {},
             "provider": catalog.get("provider", {}) if isinstance(catalog, dict) else {},
             "marketplace_sync": self._marketplace_sync_state_payload(),
+            "cloudflared": cloudflared_state,
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -11970,7 +12333,7 @@ class Router:
         def _cors_headers(response):
             response.headers["Access-Control-Allow-Origin"] = "*"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type,If-Match"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type,If-Match,X-Hydra-Owner-Key,X-Owner-Key,Authorization"
             response.headers["Access-Control-Expose-Headers"] = "ETag"
             return response
 
@@ -12000,6 +12363,33 @@ class Router:
         def _nkn_info():
             snapshot = self.get_service_snapshot(force_refresh=False)
             return _public_json(self._nkn_info_payload(snapshot))
+
+        @app.route("/cloudflared/state", methods=["GET"])
+        def _cloudflared_state():
+            return _public_json(self._cloudflared_state_payload())
+
+        @app.route("/owner/auth/status", methods=["GET"])
+        def _owner_auth_status():
+            return _public_json(
+                {
+                    "status": "success",
+                    "owner_auth": self._owner_auth_payload(authenticated=False),
+                }
+            )
+
+        @app.route("/owner/auth/validate", methods=["POST"])
+        def _owner_auth_validate():
+            body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                body = {}
+            ok, auth_payload, status_code = self._authorize_owner_request(request, body=body)
+            return _public_json(
+                {
+                    "status": "success" if ok else "error",
+                    "owner_auth": auth_payload,
+                },
+                status_code=200 if ok else status_code,
+            )
 
         @app.route("/nkn/resolve", methods=["POST"])
         def _nkn_resolve():
@@ -12101,7 +12491,19 @@ class Router:
         @app.route("/marketplace/config", methods=["GET", "PUT", "OPTIONS"])
         def _marketplace_config():
             if request.method == "GET":
+                ok, auth_payload, status_code = self._authorize_owner_request(request)
+                if not ok:
+                    return _public_json(
+                        {
+                            "status": "error",
+                            "error": "owner_key_required",
+                            "message": "Owner key required to access marketplace config",
+                            "owner_auth": auth_payload,
+                        },
+                        status_code=status_code,
+                    )
                 payload = self._marketplace_config_editor_payload()
+                payload["owner_auth"] = self._owner_auth_payload(authenticated=True)
                 etag = str(payload.get("etag") or "")
                 response = _public_json(payload)
                 with contextlib.suppress(Exception):
@@ -12118,8 +12520,21 @@ class Router:
                     },
                     status_code=400,
                 )
+            ok, auth_payload, status_code = self._authorize_owner_request(request, body=body)
+            if not ok:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "owner_key_required",
+                        "message": "Owner key required to update marketplace config",
+                        "owner_auth": auth_payload,
+                    },
+                    status_code=status_code,
+                )
             if_match = str(request.headers.get("If-Match") or "").strip()
             payload, status_code = self._apply_marketplace_config_update(body, if_match=if_match)
+            if isinstance(payload, dict):
+                payload["owner_auth"] = self._owner_auth_payload(authenticated=True)
             response = _public_json(payload, status_code=status_code)
             etag = str(payload.get("etag") or payload.get("current_etag") or "")
             if etag:
@@ -12130,6 +12545,19 @@ class Router:
         @app.route("/marketplace/catalog/publish", methods=["POST"])
         def _marketplace_publish():
             body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                body = {}
+            ok, auth_payload, status_code = self._authorize_owner_request(request, body=body)
+            if not ok:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "owner_key_required",
+                        "message": "Owner key required to publish catalog manually",
+                        "owner_auth": auth_payload,
+                    },
+                    status_code=status_code,
+                )
             market_enabled = self._as_bool((self.marketplace_cfg or {}).get("enable_catalog"), True)
             if not market_enabled:
                 return _public_json(
@@ -12291,6 +12719,19 @@ class Router:
         @app.route("/marketplace/nats/publish", methods=["POST"])
         def _marketplace_nats_publish():
             body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                body = {}
+            ok, auth_payload, status_code = self._authorize_owner_request(request, body=body)
+            if not ok:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "owner_key_required",
+                        "message": "Owner key required to publish NATS catalog packets",
+                        "owner_auth": auth_payload,
+                    },
+                    status_code=status_code,
+                )
             include_unhealthy: Optional[bool] = None
             include_unhealthy_raw = body.get("include_unhealthy")
             if include_unhealthy_raw is not None:
@@ -12327,6 +12768,17 @@ class Router:
         @app.route("/marketplace/catalog/overrides", methods=["POST", "DELETE"])
         def _marketplace_catalog_overrides():
             if request.method == "DELETE":
+                ok, auth_payload, status_code = self._authorize_owner_request(request)
+                if not ok:
+                    return _public_json(
+                        {
+                            "status": "error",
+                            "error": "owner_key_required",
+                            "message": "Owner key required to clear runtime overrides",
+                            "owner_auth": auth_payload,
+                        },
+                        status_code=status_code,
+                    )
                 svc_hint = str(request.args.get("service") or "").strip()
                 if svc_hint:
                     canonical = self._canonical_router_service(svc_hint)
@@ -12341,6 +12793,19 @@ class Router:
                     }
                 )
             body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                body = {}
+            ok, auth_payload, status_code = self._authorize_owner_request(request, body=body)
+            if not ok:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "owner_key_required",
+                        "message": "Owner key required to update runtime overrides",
+                        "owner_auth": auth_payload,
+                    },
+                    status_code=status_code,
+                )
             runtime_overrides = self._apply_catalog_overrides(body if isinstance(body, dict) else {})
             return _public_json({"status": "success", "runtime_overrides": runtime_overrides})
 
@@ -12778,6 +13243,47 @@ class Router:
                     self._update_service_ports()
                     port_detection_counter = 0
                 self._sync_cloudflared_tunnels()
+                with contextlib.suppress(Exception):
+                    ui_snapshot = self.get_service_snapshot(force_refresh=False)
+                    ui_catalog = self._marketplace_catalog_payload(ui_snapshot if isinstance(ui_snapshot, dict) else {})
+                    ui_summary = ui_catalog.get("summary") if isinstance(ui_catalog.get("summary"), dict) else {}
+                    sync_http_state = "idle"
+                    with self.marketplace_sync_state_lock:
+                        sync_in_flight = bool(self.marketplace_sync_state.get("in_flight"))
+                        sync_last_success = int(self.marketplace_sync_state.get("last_success_ts_ms") or 0)
+                        sync_last_failure = int(self.marketplace_sync_state.get("last_failure_ts_ms") or 0)
+                        sync_last_error = str(self.marketplace_sync_state.get("last_error") or "").strip()
+                    if sync_in_flight:
+                        sync_http_state = "publishing"
+                    elif sync_last_failure > sync_last_success and sync_last_failure > 0:
+                        sync_http_state = "error"
+                    elif sync_last_success > 0:
+                        sync_http_state = "ok"
+                    elif sync_last_error:
+                        sync_http_state = "error"
+                    sync_nats_state = "idle"
+                    with self.marketplace_nats_state_lock:
+                        nats_connected = bool(self.marketplace_nats_state.get("connected"))
+                        nats_last_error = str(self.marketplace_nats_state.get("last_error") or "").strip()
+                        nats_publish_count = int(self.marketplace_nats_state.get("publish_count") or 0)
+                    if nats_connected:
+                        sync_nats_state = "connected"
+                    elif nats_last_error:
+                        sync_nats_state = "error"
+                    elif nats_publish_count > 0:
+                        sync_nats_state = "published"
+                    self.ui.set_marketplace_summary(
+                        {
+                            "service_count": int(ui_summary.get("service_count") or 0),
+                            "published_count": int(ui_summary.get("published_count") or 0),
+                            "healthy_count": int(ui_summary.get("healthy_count") or 0),
+                            "catalog_ready": bool(ui_summary.get("catalog_ready")),
+                            "selected_transport_top": str(ui_summary.get("selected_transport_top") or ""),
+                            "source": str(ui_catalog.get("discovery_source") or ui_snapshot.get("discovery_source") or ""),
+                            "sync_http_state": sync_http_state,
+                            "sync_nats_state": sync_nats_state,
+                        }
+                    )
                 self._maybe_start_marketplace_sync()
                 self._maybe_start_marketplace_nats_sync()
                 self._sample_telemetry()

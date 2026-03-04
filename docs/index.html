@@ -36,23 +36,47 @@
         <section class="span-12" id="graphCard">
             <div id="workspaceWrap" class="">
                 <div class="menu-row">
-                    <div class="node-row">
-                        <div class="node-menu">
-                            <button id="nodeMenuToggle" class="secondary"><img class="icon" src="img/plus.svg"
-                                    alt=""></button>
-                            <div id="nodeMenuList" class="node-menu-list hidden"></div>
+                    <button id="leftSidebarToggle" class="sidebar-toggle left" title="Toggle Nodes / Graphs">Nodes</button>
+                    <aside id="leftSidebar" class="slide-sidebar left" data-open="true">
+                        <div class="slide-sidebar-head">
+                            <span class="slide-sidebar-title">Workspace</span>
+                            <button id="leftSidebarClose" class="ghost sidebar-close" title="Close left sidebar">✕</button>
                         </div>
-                        <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt=""
-                                class="icon inverted"></button>
-                        <button id="peerListButton" class="ghost">
-                            <img src="img/network.svg" alt="" class="icon inverted">
-                            <span id="peerOnlineBadge" class="peer-badge hidden">0</span>
-                            <span id="noclipPeerBadge" class="noclip-peer-badge hidden">0</span>
-                        </button>
-                        <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt=""
-                                class="icon inverted"></button>
-                    </div>
-                    <div class="header-actions">
+                        <div class="slide-sidebar-body">
+                            <details class="sidebar-group" open>
+                                <summary>Available Nodes</summary>
+                                <div class="node-row">
+                                    <div class="node-menu">
+                                        <button id="nodeMenuToggle" class="secondary sidebar-inline-btn"><img class="icon" src="img/plus.svg"
+                                                alt=""></button>
+                                        <div id="nodeMenuList" class="node-menu-list hidden"></div>
+                                    </div>
+                                </div>
+                            </details>
+                            <details class="sidebar-group" open>
+                                <summary>Graphs</summary>
+                                <div class="left-sidebar-actions">
+                                    <button id="flowsButton" class="ghost"><img src="img/layer.svg" alt=""
+                                            class="icon inverted"></button>
+                                    <button id="peerListButton" class="ghost">
+                                        <img src="img/network.svg" alt="" class="icon inverted">
+                                        <span id="peerOnlineBadge" class="peer-badge hidden">0</span>
+                                        <span id="noclipPeerBadge" class="noclip-peer-badge hidden">0</span>
+                                    </button>
+                                    <button id="syncQrButton" class="ghost"><img src="img/qr.svg" alt=""
+                                            class="icon inverted"></button>
+                                </div>
+                            </details>
+                        </div>
+                    </aside>
+                    <button id="rightSidebarToggle" class="sidebar-toggle right" title="Toggle Marketplace / Router">Market</button>
+                    <aside id="rightSidebar" class="slide-sidebar right" data-open="true">
+                        <div class="slide-sidebar-head">
+                            <span class="slide-sidebar-title">Marketplace</span>
+                            <button id="rightSidebarClose" class="ghost sidebar-close" title="Close right sidebar">✕</button>
+                        </div>
+                        <div class="slide-sidebar-body">
+                            <div class="header-actions">
                         <div class="router-controls-wrap">
                             <div class="router-controls">
                                 <input id="routerTargetInput" class="router-target-input" type="text"
@@ -100,57 +124,71 @@
                                 <span id="marketplacePublishResult" class="market-publish-result">publish idle</span>
                             </div>
                             <div id="marketplaceConfigPanel" class="market-config-panel" aria-live="polite">
-                                <div class="market-config-head">
-                                    <span class="market-config-title">Provider Config</span>
-                                    <span id="marketConfigStatus" class="market-config-status">config idle</span>
+                                <div id="marketOwnerAuthPanel" class="market-owner-auth">
+                                    <div class="market-owner-auth-head">
+                                        <span class="market-owner-auth-title">Owner Auth</span>
+                                        <span id="marketOwnerAuthStatus" class="market-owner-auth-status" data-tone="warn">locked</span>
+                                    </div>
+                                    <div class="market-owner-auth-row">
+                                        <input id="marketOwnerKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="Enter owner key from router UI">
+                                        <button id="marketOwnerUnlockBtn" class="ghost market-directory-refresh" title="Unlock marketplace policy editor">Unlock</button>
+                                        <button id="marketOwnerLockBtn" class="ghost market-directory-refresh" title="Lock marketplace policy editor">Lock</button>
+                                    </div>
+                                    <div id="marketOwnerAuthHint" class="market-owner-auth-hint">Owner key is shown in router curses UI (top-left, above the hydra animation).</div>
                                 </div>
-                                <div class="market-config-toolbar">
-                                    <button id="marketConfigLoadBtn" class="ghost market-directory-refresh" title="Load marketplace config from router">Load</button>
-                                    <button id="marketConfigSaveBtn" class="ghost market-directory-refresh" title="Save marketplace config to router">Save</button>
-                                    <button id="marketConfigExportBtn" class="ghost market-directory-refresh" title="Export marketplace config JSON">Export</button>
-                                    <label class="ghost market-directory-refresh market-config-import-label" title="Import marketplace config JSON">
-                                        Import
-                                        <input id="marketConfigImportInput" type="file" accept="application/json,.json">
-                                    </label>
+                                <div id="marketConfigProtected" class="market-config-protected is-locked">
+                                    <div class="market-config-head">
+                                        <span class="market-config-title">Provider Config</span>
+                                        <span id="marketConfigStatus" class="market-config-status">config locked</span>
+                                    </div>
+                                    <div class="market-config-toolbar">
+                                        <button id="marketConfigLoadBtn" class="ghost market-directory-refresh" title="Load marketplace config from router">Load</button>
+                                        <button id="marketConfigSaveBtn" class="ghost market-directory-refresh" title="Save marketplace config to router">Save</button>
+                                        <button id="marketConfigExportBtn" class="ghost market-directory-refresh" title="Export marketplace config JSON">Export</button>
+                                        <label class="ghost market-directory-refresh market-config-import-label" title="Import marketplace config JSON">
+                                            Import
+                                            <input id="marketConfigImportInput" type="file" accept="application/json,.json">
+                                        </label>
+                                    </div>
+                                    <div class="market-config-grid">
+                                        <label class="market-config-field">
+                                            Provider ID
+                                            <input id="marketProviderIdInput" type="text" maxlength="64" placeholder="hydra-router" autocomplete="off" spellcheck="false">
+                                        </label>
+                                        <label class="market-config-field">
+                                            Label
+                                            <input id="marketProviderLabelInput" type="text" maxlength="120" placeholder="Hydra Router" autocomplete="off" spellcheck="false">
+                                        </label>
+                                        <label class="market-config-field">
+                                            Network
+                                            <input id="marketProviderNetworkInput" type="text" maxlength="32" placeholder="hydra" autocomplete="off" spellcheck="false">
+                                        </label>
+                                        <label class="market-config-field">
+                                            Contact
+                                            <input id="marketProviderContactInput" type="text" maxlength="160" placeholder="dm:@handle or email" autocomplete="off" spellcheck="false">
+                                        </label>
+                                    </div>
+                                    <div class="market-config-grid compact">
+                                        <label class="market-config-field">
+                                            Currency
+                                            <input id="marketDefaultCurrencyInput" type="text" maxlength="12" placeholder="USDC" autocomplete="off" spellcheck="false">
+                                        </label>
+                                        <label class="market-config-field">
+                                            Unit
+                                            <input id="marketDefaultUnitInput" type="text" maxlength="32" placeholder="request" autocomplete="off" spellcheck="false">
+                                        </label>
+                                        <label class="market-config-field">
+                                            Base Price
+                                            <input id="marketDefaultPriceInput" type="number" min="0" step="0.000001" placeholder="0.0">
+                                        </label>
+                                        <label class="market-config-field market-config-checkbox">
+                                            <input id="marketIncludeUnhealthyInput" type="checkbox">
+                                            Include unhealthy
+                                        </label>
+                                    </div>
+                                    <div class="market-service-config-head">Service Publication</div>
+                                    <div id="marketServiceConfigList" class="market-service-config-list"></div>
                                 </div>
-                                <div class="market-config-grid">
-                                    <label class="market-config-field">
-                                        Provider ID
-                                        <input id="marketProviderIdInput" type="text" maxlength="64" placeholder="hydra-router" autocomplete="off" spellcheck="false">
-                                    </label>
-                                    <label class="market-config-field">
-                                        Label
-                                        <input id="marketProviderLabelInput" type="text" maxlength="120" placeholder="Hydra Router" autocomplete="off" spellcheck="false">
-                                    </label>
-                                    <label class="market-config-field">
-                                        Network
-                                        <input id="marketProviderNetworkInput" type="text" maxlength="32" placeholder="hydra" autocomplete="off" spellcheck="false">
-                                    </label>
-                                    <label class="market-config-field">
-                                        Contact
-                                        <input id="marketProviderContactInput" type="text" maxlength="160" placeholder="dm:@handle or email" autocomplete="off" spellcheck="false">
-                                    </label>
-                                </div>
-                                <div class="market-config-grid compact">
-                                    <label class="market-config-field">
-                                        Currency
-                                        <input id="marketDefaultCurrencyInput" type="text" maxlength="12" placeholder="USDC" autocomplete="off" spellcheck="false">
-                                    </label>
-                                    <label class="market-config-field">
-                                        Unit
-                                        <input id="marketDefaultUnitInput" type="text" maxlength="32" placeholder="request" autocomplete="off" spellcheck="false">
-                                    </label>
-                                    <label class="market-config-field">
-                                        Base Price
-                                        <input id="marketDefaultPriceInput" type="number" min="0" step="0.000001" placeholder="0.0">
-                                    </label>
-                                    <label class="market-config-field market-config-checkbox">
-                                        <input id="marketIncludeUnhealthyInput" type="checkbox">
-                                        Include unhealthy
-                                    </label>
-                                </div>
-                                <div class="market-service-config-head">Service Publication</div>
-                                <div id="marketServiceConfigList" class="market-service-config-list"></div>
                             </div>
                             <div id="marketplaceServiceBadges" class="marketplace-service-badges"></div>
                         </div>
@@ -160,6 +198,8 @@
                         <button id="healthCheckBtn" class="ghost" title="Check relay services">Health</button>
                         <button id="transportToggle" class="transport-btn">NKN</button>
                     </div>
+                        </div>
+                    </aside>
                 </div>
                 <svg id="linksSvg" width="100%" height="100%" preserveAspectRatio="none"></svg>
                 <div id="workspace">

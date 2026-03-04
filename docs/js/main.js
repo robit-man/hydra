@@ -827,6 +827,13 @@ const createMarketplaceDirectoryClient = ({ CFG, saveCFG, setBadge, log, onDirec
 const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog }) => {
   const ui = {
     root: qs('#marketplaceConfigPanel'),
+    ownerPanel: qs('#marketOwnerAuthPanel'),
+    ownerStatus: qs('#marketOwnerAuthStatus'),
+    ownerInput: qs('#marketOwnerKeyInput'),
+    ownerUnlockBtn: qs('#marketOwnerUnlockBtn'),
+    ownerLockBtn: qs('#marketOwnerLockBtn'),
+    ownerHint: qs('#marketOwnerAuthHint'),
+    protectedWrap: qs('#marketConfigProtected'),
     status: qs('#marketConfigStatus'),
     loadBtn: qs('#marketConfigLoadBtn'),
     saveBtn: qs('#marketConfigSaveBtn'),
@@ -857,6 +864,12 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
       provider: {},
       services: {}
     },
+    ownerRequired: true,
+    ownerAuthenticated: false,
+    ownerKey: '',
+    ownerHeader: 'X-Hydra-Owner-Key',
+    ownerHint: '',
+    ownerStatusLoaded: false,
     inFlight: false,
     started: false
   };
@@ -868,6 +881,96 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
     if (!ui.status) return;
     ui.status.textContent = String(text || 'config idle');
     ui.status.dataset.tone = String(tone || 'muted');
+  };
+
+  const setOwnerStatus = (text, tone = 'warn') => {
+    if (!ui.ownerStatus) return;
+    ui.ownerStatus.textContent = String(text || 'locked');
+    ui.ownerStatus.dataset.tone = String(tone || 'warn');
+  };
+
+  const setOwnerHint = (ownerHint = '') => {
+    const hint = String(ownerHint || '').trim();
+    state.ownerHint = hint;
+    if (!ui.ownerHint) return;
+    if (!state.ownerRequired) {
+      ui.ownerHint.textContent = 'Owner auth is disabled in router policy. Marketplace policy edits are open.';
+      return;
+    }
+    if (hint) {
+      ui.ownerHint.textContent = `Owner key required for marketplace policy edits. Key hint: ${hint}`;
+      return;
+    }
+    ui.ownerHint.textContent = 'Owner key is shown in router curses UI (top-left, above the hydra animation).';
+  };
+
+  const setProtectedLocked = (locked = true) => {
+    const isLocked = !!locked;
+    if (ui.protectedWrap) {
+      ui.protectedWrap.classList.toggle('is-locked', isLocked);
+    }
+    if (ui.loadBtn) ui.loadBtn.disabled = isLocked;
+    if (ui.saveBtn) ui.saveBtn.disabled = isLocked;
+    if (ui.exportBtn) ui.exportBtn.disabled = isLocked;
+    if (ui.importInput) ui.importInput.disabled = isLocked;
+    if (ui.ownerUnlockBtn) ui.ownerUnlockBtn.disabled = !state.ownerRequired;
+    if (ui.ownerLockBtn) ui.ownerLockBtn.disabled = !state.ownerRequired || isLocked;
+    if (ui.ownerInput) {
+      ui.ownerInput.disabled = !state.ownerRequired;
+      if (state.ownerRequired) {
+        ui.ownerInput.placeholder = 'Enter owner key from router UI';
+      } else {
+        ui.ownerInput.placeholder = 'Owner auth disabled by router policy';
+      }
+    }
+  };
+
+  const renderOwnerState = () => {
+    const locked = !!(state.ownerRequired && !state.ownerAuthenticated);
+    setProtectedLocked(locked);
+    if (!state.ownerRequired) {
+      setOwnerStatus('disabled', 'ok');
+      if (ui.ownerInput) ui.ownerInput.value = '';
+      setStatus('config unlocked (owner auth disabled)', 'ok');
+      setOwnerHint(state.ownerHint);
+      return;
+    }
+    if (state.ownerAuthenticated) {
+      setOwnerStatus('unlocked', 'ok');
+      setStatus(state.inFlight ? 'saving...' : 'config unlocked', state.inFlight ? 'warn' : 'ok');
+      setOwnerHint(state.ownerHint);
+      return;
+    }
+    setOwnerStatus('locked', 'warn');
+    if (!state.inFlight) setStatus('config locked', 'warn');
+    setOwnerHint(state.ownerHint);
+  };
+
+  const applyOwnerAuthPayload = (ownerAuth = {}, { authenticatedFallback = false } = {}) => {
+    const payload = ownerAuth && typeof ownerAuth === 'object' ? ownerAuth : {};
+    const required = payload.required !== false;
+    const authenticated = required
+      ? (payload.authenticated === true || (!!authenticatedFallback && !!state.ownerKey))
+      : true;
+    state.ownerRequired = required;
+    state.ownerAuthenticated = authenticated;
+    const headerName = String(payload.owner_auth_header || payload.ownerAuthHeader || '').trim();
+    if (headerName) state.ownerHeader = headerName;
+    const hint = String(payload.owner_key_hint || payload.ownerKeyHint || '').trim();
+    if (hint) state.ownerHint = hint;
+    state.ownerStatusLoaded = true;
+    if (!authenticated && required) {
+      state.ownerKey = '';
+    }
+    renderOwnerState();
+  };
+
+  const ownerHeaders = (headers = {}) => {
+    const out = { ...(headers || {}) };
+    const key = String(state.ownerKey || '').trim();
+    const headerName = String(state.ownerHeader || 'X-Hydra-Owner-Key').trim() || 'X-Hydra-Owner-Key';
+    if (key) out[headerName] = key;
+    return out;
   };
 
   const normalizeApiBase = (value) => {
@@ -1140,23 +1243,144 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
     };
   };
 
-  const loadConfig = async ({ silent = false } = {}) => {
-    if (state.inFlight) return { ok: false, reason: 'in_flight' };
-    state.inFlight = true;
-    setStatus('loading...', 'warn');
+  const lockOwnerSession = ({ clearInput = true } = {}) => {
+    state.ownerAuthenticated = false;
+    state.ownerKey = '';
+    if (clearInput && ui.ownerInput) ui.ownerInput.value = '';
+    renderOwnerState();
+  };
+
+  const handleOwnerAuthRejected = (payload = {}, { silent = false, context = 'config request' } = {}) => {
+    const ownerAuth = payload && typeof payload === 'object' ? payload.owner_auth : null;
+    if (ownerAuth && typeof ownerAuth === 'object') {
+      applyOwnerAuthPayload(ownerAuth, { authenticatedFallback: false });
+    } else {
+      lockOwnerSession({ clearInput: false });
+    }
+    const reason = String(payload?.message || payload?.error || 'owner key required').trim();
+    setStatus(`locked • ${reason}`, 'warn');
+    if (!silent) setBadge(`Marketplace config locked: ${reason}`, false);
+    return { ok: false, locked: true, error: reason };
+  };
+
+  const fetchOwnerAuthStatus = async ({ silent = false } = {}) => {
     try {
-      const response = await fetch(apiUrl('/marketplace/config'), {
+      const response = await fetch(apiUrl('/owner/auth/status'), {
         method: 'GET',
         cache: 'no-store',
         headers: { Accept: 'application/json' }
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok || !payload || payload.status !== 'success') {
+        const reason = String(payload?.message || payload?.error || `http_${response.status}`).trim();
+        state.ownerStatusLoaded = false;
+        state.ownerRequired = true;
+        state.ownerAuthenticated = false;
+        renderOwnerState();
+        setOwnerStatus('unknown', 'error');
+        setStatus(`owner auth unavailable • ${reason}`, 'warn');
+        if (!silent) setBadge(`Owner auth status unavailable: ${reason}`, false);
+        return { ok: false, error: reason };
+      }
+      applyOwnerAuthPayload(payload.owner_auth, { authenticatedFallback: !!state.ownerKey });
+      if (!state.ownerRequired) {
+        setStatus('config unlocked (owner auth disabled)', 'ok');
+      } else if (!state.ownerAuthenticated) {
+        setStatus('config locked', 'warn');
+      }
+      return {
+        ok: true,
+        required: !!state.ownerRequired,
+        authenticated: !!state.ownerAuthenticated
+      };
+    } catch (err) {
+      const reason = String(err?.message || err || 'owner auth status failed').trim();
+      state.ownerStatusLoaded = false;
+      state.ownerRequired = true;
+      state.ownerAuthenticated = false;
+      renderOwnerState();
+      setOwnerStatus('unknown', 'error');
+      setStatus(`owner auth unavailable • ${reason}`, 'warn');
+      if (!silent) setBadge(`Owner auth status unavailable: ${reason}`, false);
+      return { ok: false, error: reason };
+    }
+  };
+
+  const validateOwnerKey = async (keyText) => {
+    const candidate = String(keyText || '').trim();
+    if (!candidate) {
+      setOwnerStatus('locked', 'warn');
+      setStatus('owner key required', 'warn');
+      setBadge('Owner key is required to unlock marketplace config', false);
+      return { ok: false, error: 'missing_owner_key' };
+    }
+    setOwnerStatus('checking', 'warn');
+    setStatus('validating owner key...', 'warn');
+    try {
+      const response = await fetch(apiUrl('/owner/auth/validate'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ owner_key: candidate })
+      });
+      const payload = await response.json().catch(() => null);
+      const ownerAuth = payload && typeof payload === 'object' ? payload.owner_auth : null;
+      if (!response.ok || !payload || payload.status !== 'success' || !ownerAuth || ownerAuth.authenticated !== true) {
+        applyOwnerAuthPayload(ownerAuth || {}, { authenticatedFallback: false });
+        state.ownerKey = '';
+        const reason = String(payload?.message || payload?.error || `http_${response.status}`).trim() || 'owner key rejected';
+        setOwnerStatus('denied', 'error');
+        setStatus(`owner key denied • ${reason}`, 'error');
+        setBadge(`Owner key denied: ${reason}`, false);
+        return { ok: false, error: reason };
+      }
+      state.ownerKey = candidate;
+      applyOwnerAuthPayload(ownerAuth, { authenticatedFallback: true });
+      setOwnerStatus('unlocked', 'ok');
+      setStatus('owner auth passed • loading config...', 'ok');
+      setBadge('Marketplace config editor unlocked');
+      return loadConfig({ silent: true });
+    } catch (err) {
+      const reason = String(err?.message || err || 'owner key validation failed').trim();
+      state.ownerKey = '';
+      state.ownerAuthenticated = false;
+      renderOwnerState();
+      setOwnerStatus('error', 'error');
+      setStatus(`owner auth failed • ${reason}`, 'error');
+      setBadge(`Owner key validation failed: ${reason}`, false);
+      return { ok: false, error: reason };
+    }
+  };
+
+  const loadConfig = async ({ silent = false } = {}) => {
+    if (state.inFlight) return { ok: false, reason: 'in_flight' };
+    if (state.ownerRequired && !state.ownerAuthenticated) {
+      setStatus('config locked', 'warn');
+      if (!silent) setBadge('Unlock marketplace config with owner key first', false);
+      return { ok: false, locked: true, reason: 'owner_locked' };
+    }
+    state.inFlight = true;
+    setStatus('loading...', 'warn');
+    try {
+      const response = await fetch(apiUrl('/marketplace/config'), {
+        method: 'GET',
+        cache: 'no-store',
+        headers: ownerHeaders({ Accept: 'application/json' })
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.status === 401 || String(payload?.error || '').trim().toLowerCase() === 'owner_key_required') {
+        return handleOwnerAuthRejected(payload, { silent, context: 'load marketplace config' });
+      }
+      if (!response.ok || !payload || payload.status !== 'success') {
         const reason = String(payload?.error || `http_${response.status}` || 'load_failed').trim();
         setStatus(`load failed • ${reason}`, 'error');
         if (!silent) setBadge(`Marketplace config load failed: ${reason}`, false);
         return { ok: false, error: reason };
       }
+      applyOwnerAuthPayload(payload.owner_auth, { authenticatedFallback: true });
       const etag = String(payload.etag || response.headers.get('ETag') || '').trim().replace(/"/g, '');
       applyConfig(payload.config, {
         etag,
@@ -1178,6 +1402,11 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
 
   const saveConfig = async () => {
     if (state.inFlight) return { ok: false, reason: 'in_flight' };
+    if (state.ownerRequired && !state.ownerAuthenticated) {
+      setStatus('config locked', 'warn');
+      setBadge('Unlock marketplace config with owner key before saving', false);
+      return { ok: false, locked: true, reason: 'owner_locked' };
+    }
     const collected = collectPayload();
     if (!collected.ok) {
       const message = collected.errors[0] || 'validation failed';
@@ -1191,17 +1420,20 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
       const response = await fetch(apiUrl('/marketplace/config'), {
         method: 'PUT',
         cache: 'no-store',
-        headers: {
+        headers: ownerHeaders({
           Accept: 'application/json',
           'Content-Type': 'application/json',
           ...(state.etag ? { 'If-Match': state.etag } : {})
-        },
+        }),
         body: JSON.stringify({
           ...collected.payload,
           persist: true
         })
       });
       const payload = await response.json().catch(() => null);
+      if (response.status === 401 || String(payload?.error || '').trim().toLowerCase() === 'owner_key_required') {
+        return handleOwnerAuthRejected(payload, { silent: false, context: 'save marketplace config' });
+      }
       if (response.status === 409) {
         const reason = String(payload?.message || payload?.error || 'config_conflict').trim();
         setStatus(`conflict • ${reason}`, 'warn');
@@ -1215,6 +1447,7 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
         setBadge(`Marketplace config save failed: ${firstError}`, false);
         return { ok: false, error: firstError };
       }
+      applyOwnerAuthPayload(payload.owner_auth, { authenticatedFallback: true });
       applyConfig(payload.config, {
         etag: String(payload.etag || response.headers.get('ETag') || '').trim().replace(/"/g, ''),
         statusText: 'saved'
@@ -1295,6 +1528,7 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
   const start = () => {
     if (state.started) return;
     state.started = true;
+    renderOwnerState();
     ui.loadBtn?.addEventListener('click', async (event) => {
       event.preventDefault();
       if (ui.loadBtn.disabled) return;
@@ -1323,7 +1557,34 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
       const file = ui.importInput?.files?.[0];
       await importConfigFromFile(file);
     });
-    loadConfig({ silent: true });
+    ui.ownerUnlockBtn?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (ui.ownerUnlockBtn.disabled) return;
+      ui.ownerUnlockBtn.disabled = true;
+      try {
+        await validateOwnerKey(ui.ownerInput?.value || '');
+      } finally {
+        ui.ownerUnlockBtn.disabled = !state.ownerRequired;
+      }
+    });
+    ui.ownerLockBtn?.addEventListener('click', (event) => {
+      event.preventDefault();
+      if (!state.ownerRequired) return;
+      lockOwnerSession();
+      setOwnerStatus('locked', 'warn');
+      setStatus('config locked', 'warn');
+      setBadge('Marketplace config editor locked');
+    });
+    ui.ownerInput?.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      ui.ownerUnlockBtn?.click();
+    });
+    fetchOwnerAuthStatus({ silent: true }).then((result) => {
+      if (result?.ok && (!result.required || result.authenticated)) {
+        loadConfig({ silent: true });
+      }
+    });
   };
 
   const stop = () => {
@@ -2130,6 +2391,49 @@ function bindUI() {
   const publishResultEl = qs('#marketplacePublishResult');
   const routerStatus = qs('#routerResolveStatus');
   const routerMessage = qs('#routerResolveMessage');
+  const leftSidebar = qs('#leftSidebar');
+  const rightSidebar = qs('#rightSidebar');
+  const leftSidebarToggle = qs('#leftSidebarToggle');
+  const rightSidebarToggle = qs('#rightSidebarToggle');
+  const leftSidebarClose = qs('#leftSidebarClose');
+  const rightSidebarClose = qs('#rightSidebarClose');
+
+  const applySidebarState = (name, open) => {
+    const key = name === 'left' ? 'leftSidebarOpen' : 'rightSidebarOpen';
+    const sidebar = name === 'left' ? leftSidebar : rightSidebar;
+    const toggleBtn = name === 'left' ? leftSidebarToggle : rightSidebarToggle;
+    const isOpen = !!open;
+    if (sidebar) sidebar.dataset.open = isOpen ? 'true' : 'false';
+    if (toggleBtn) {
+      toggleBtn.classList.toggle('active', isOpen);
+      toggleBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      toggleBtn.setAttribute('aria-label', isOpen ? `Hide ${name} sidebar` : `Show ${name} sidebar`);
+    }
+    if (CFG[key] !== isOpen) {
+      CFG[key] = isOpen;
+      saveCFG();
+    }
+  };
+
+  const initSidebar = (name, fallbackOpen = true) => {
+    const key = name === 'left' ? 'leftSidebarOpen' : 'rightSidebarOpen';
+    const toggleBtn = name === 'left' ? leftSidebarToggle : rightSidebarToggle;
+    const closeBtn = name === 'left' ? leftSidebarClose : rightSidebarClose;
+    const startOpen = typeof CFG[key] === 'boolean' ? CFG[key] : fallbackOpen;
+    applySidebarState(name, startOpen);
+    toggleBtn?.addEventListener('click', (event) => {
+      event.preventDefault();
+      const currentOpen = (name === 'left' ? leftSidebar : rightSidebar)?.dataset?.open !== 'false';
+      applySidebarState(name, !currentOpen);
+    });
+    closeBtn?.addEventListener('click', (event) => {
+      event.preventDefault();
+      applySidebarState(name, false);
+    });
+  };
+
+  initSidebar('left', true);
+  initSidebar('right', true);
 
   const formatResolveError = (message) => {
     const text = String(message || '').trim();
