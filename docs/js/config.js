@@ -11,6 +11,7 @@ const CFG_PERSIST_ALLOWLIST = new Set([
   'routerLastResolveStatus',
   'routerLastResolveError',
   'routerLastResolvedAt',
+  'routerLastInteropContractVersion',
   'featureFlags'
 ]);
 const CFG_PERSIST_DROP_KEYS = new Set([
@@ -110,6 +111,7 @@ const CFG_DEFAULTS = {
   routerLastResolveStatus: 'idle',
   routerLastResolveError: '',
   routerLastResolvedAt: 0,
+  routerLastInteropContractVersion: '',
   featureFlags: sanitizeFeatureFlags(FEATURE_FLAG_DEFAULTS)
 };
 const CFG = {
@@ -141,6 +143,7 @@ if (!Number.isFinite(Number(CFG.routerAutoResolveIntervalMs))) CFG.routerAutoRes
 if (!CFG.routerLastResolveStatus) CFG.routerLastResolveStatus = 'idle';
 if (CFG.routerLastResolveError === undefined) CFG.routerLastResolveError = '';
 if (!Number.isFinite(Number(CFG.routerLastResolvedAt))) CFG.routerLastResolvedAt = 0;
+if (CFG.routerLastInteropContractVersion === undefined) CFG.routerLastInteropContractVersion = '';
 if (!Array.isArray(CFG.wires)) CFG.wires = [];
 CFG.featureFlags = sanitizeFeatureFlags(CFG.featureFlags);
 try {

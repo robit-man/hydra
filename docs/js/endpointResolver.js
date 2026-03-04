@@ -179,6 +179,11 @@ function normalizeResolvedEntry(service, rawEntry) {
   const baseUrl = stripTrailingSlash(extractEndpointAny(raw.baseUrl, raw.base_url, raw.httpEndpoint, raw.http_endpoint, raw));
   const httpEndpoint = stripTrailingSlash(extractEndpointAny(raw.httpEndpoint, raw.http_endpoint, baseUrl));
   const wsEndpoint = asString(raw.wsEndpoint || raw.ws_endpoint);
+  const interopContractVersion = asString(
+    raw.interopContractVersion ||
+    raw.interop_contract_version ||
+    fallback.interop_contract_version
+  );
 
   const candidates = {
     cloudflare: stripTrailingSlash(extractEndpointAny(
@@ -238,6 +243,7 @@ function normalizeResolvedEntry(service, rawEntry) {
     transport: selectedTransport || normalizeTransport(raw.transport),
     selectedTransport: selectedTransport || normalizeTransport(raw.transport),
     selectionReason: asString(raw.selectionReason || raw.selection_reason),
+    interopContractVersion,
     baseUrl,
     httpEndpoint,
     wsEndpoint,
@@ -259,6 +265,7 @@ function mergeEntries(existing, incoming) {
     transport: incoming.transport || existing.transport,
     selectedTransport: incoming.selectedTransport || existing.selectedTransport,
     selectionReason: incoming.selectionReason || existing.selectionReason,
+    interopContractVersion: incoming.interopContractVersion || existing.interopContractVersion || '',
     baseUrl: incoming.baseUrl || existing.baseUrl,
     httpEndpoint: incoming.httpEndpoint || existing.httpEndpoint,
     wsEndpoint: incoming.wsEndpoint || existing.wsEndpoint,

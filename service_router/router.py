@@ -127,6 +127,10 @@ ROUTER_CONFIG_MIGRATION_MAP = {
     1: "nested_schema_v1",
     2: "typed_schema_v2",
 }
+INTEROP_CONTRACT = {
+    "name": "hydra_noclip_interop",
+    "version": "1.0.0",
+}
 
 ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "api": {
@@ -6942,6 +6946,8 @@ class Router:
             "status": "error",
             "service": target_key,
             "watchdog_service": service_name,
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "transport": "local",
             "base_url": base_url,
             "http_endpoint": base_url,
@@ -7186,6 +7192,8 @@ class Router:
 
             resolved[service] = {
                 "service": service,
+                "interop_contract": dict(INTEROP_CONTRACT),
+                "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
                 "transport": selected_transport,
                 "selected_transport": selected_transport,
                 "selection_reason": selected_reason,
@@ -7244,7 +7252,14 @@ class Router:
                     normalized = stale_copy
             services[target_key] = normalized
         resolved = self._build_resolved_endpoints(services)
-        return {"ts_ms": ts_ms, "services": services, "resolved": resolved, "stale": False}
+        return {
+            "ts_ms": ts_ms,
+            "services": services,
+            "resolved": resolved,
+            "stale": False,
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+        }
 
     def get_service_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
@@ -7490,6 +7505,8 @@ class Router:
         public_snapshot = self._redact_public_payload(snapshot)
         reply = {
             "event": "resolve_tunnels_result",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "request_id": request_id,
             "source_address": node.current_address or "",
             "timestamp_ms": int(time.time() * 1000),
@@ -7699,6 +7716,8 @@ class Router:
         return {
             "status": "ok",
             "service": "hydra_router",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "network": network_urls,
             "feature_flags": dict(getattr(self, "feature_flags", {}) or {}),
             "routes": {
@@ -7733,6 +7752,8 @@ class Router:
         return {
             "status": "ok",
             "service": "hydra_router",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "uptime_seconds": round(time.time() - self.startup_time, 2),
             "requests_served": int(self.request_counter.get("value", 0)),
             "pending_resolves": int(max(0, pending_count)),
@@ -7750,6 +7771,8 @@ class Router:
     def _services_snapshot_payload(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "status": "success",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
 
@@ -7757,6 +7780,8 @@ class Router:
         addresses = self._current_node_addresses()
         return {
             "status": "success",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "network": self._router_network_urls(),
             "nkn": {
                 "enabled": bool(self.nkn_settings.get("enable", True)),
@@ -7773,6 +7798,8 @@ class Router:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         return {
             "status": "success",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "mode": "local",
             "target_address": str(target_address or (addresses[0] if addresses else "")),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
@@ -7790,6 +7817,8 @@ class Router:
     ) -> Dict[str, Any]:
         return {
             "status": "success",
+            "interop_contract": dict(INTEROP_CONTRACT),
+            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
             "mode": "remote",
             "request_id": str(request_id or ""),
             "target_address": str(target_address or ""),

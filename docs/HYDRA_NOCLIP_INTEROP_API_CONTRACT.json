@@ -1,0 +1,57 @@
+{
+  "interop_contract": {
+    "name": "hydra_noclip_interop",
+    "version": "1.0.0"
+  },
+  "envelope": {
+    "required": [
+      "event"
+    ],
+    "optional": [
+      "interop_contract",
+      "interop_contract_version",
+      "timestamp_ms",
+      "source_address",
+      "target_address",
+      "payload"
+    ]
+  },
+  "transport_enum": [
+    "cloudflare",
+    "upnp",
+    "nats",
+    "nkn",
+    "local"
+  ],
+  "resolved_entry_fields": {
+    "required": [
+      "service"
+    ],
+    "optional": [
+      "interop_contract_version",
+      "selected_transport",
+      "transport",
+      "selection_reason",
+      "base_url",
+      "http_endpoint",
+      "ws_endpoint",
+      "remote_routable",
+      "loopback_only",
+      "is_public",
+      "candidates"
+    ]
+  },
+  "error_codes": [
+    "INVALID_ENVELOPE",
+    "INVALID_TRANSPORT",
+    "INVALID_TARGET",
+    "UNSUPPORTED_CONTRACT_VERSION",
+    "AUTH_REQUIRED",
+    "FORBIDDEN"
+  ],
+  "compatibility": {
+    "accept_version_field_without_contract_object": true,
+    "prefer_contract_object_version": true,
+    "preserve_unknown_fields": true
+  }
+}

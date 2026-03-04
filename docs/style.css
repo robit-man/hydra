@@ -196,6 +196,7 @@ main {
   display: flex;
   flex-flow: row;
   gap: 0.5rem;
+  height:fit-content;
   pointer-events: all !important;
 }
 

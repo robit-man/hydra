@@ -58,11 +58,37 @@ function firstEndpoint(...values) {
   return '';
 }
 
+function extractInteropContract(reply) {
+  const fallback = { name: '', version: '' };
+  if (!isObject(reply)) return fallback;
+  const candidates = [
+    reply.interop_contract,
+    reply.snapshot?.interop_contract,
+    reply.reply?.interop_contract,
+    reply.rawReply?.interop_contract
+  ];
+  for (const candidate of candidates) {
+    if (!isObject(candidate)) continue;
+    const name = String(candidate.name || '').trim();
+    const version = String(candidate.version || '').trim();
+    if (name || version) return { name, version };
+  }
+  const version = String(
+    reply.interop_contract_version ||
+    reply.snapshot?.interop_contract_version ||
+    reply.reply?.interop_contract_version ||
+    reply.rawReply?.interop_contract_version ||
+    ''
+  ).trim();
+  return { name: '', version };
+}
+
 function normalizeResolvedEndpoints(reply) {
   const source = isObject(reply)
     ? (isObject(reply.resolved) ? reply.resolved : (isObject(reply.snapshot) ? reply.snapshot.resolved : null))
     : null;
   if (!isObject(source)) return {};
+  const contract = extractInteropContract(reply);
 
   const normalized = {};
   for (const [service, entryRaw] of Object.entries(source)) {
@@ -72,11 +98,18 @@ function normalizeResolvedEndpoints(reply) {
     const baseUrl = firstEndpoint(entry.base_url, entry.http_endpoint);
     const httpEndpoint = firstEndpoint(entry.http_endpoint, baseUrl);
     const wsEndpoint = toEndpointString(entry.ws_endpoint || '');
+    const entryContractVersion = String(
+      entry.interop_contract_version ||
+      entry.interopContractVersion ||
+      contract.version ||
+      ''
+    ).trim();
     normalized[service] = {
       service,
       transport: selectedTransport,
       selectedTransport,
       selectionReason: String(entry.selection_reason || '').trim(),
+      interopContractVersion: entryContractVersion,
       baseUrl,
       httpEndpoint,
       wsEndpoint,
@@ -114,6 +147,7 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
       target: String(CFG.routerTargetNknAddress || ''),
       lastResolvedAt: Number(CFG.routerLastResolvedAt || 0),
       lastError: String(CFG.routerLastResolveError || ''),
+      lastInteropContractVersion: String(CFG.routerLastInteropContractVersion || ''),
       ...extra
     };
     state.listeners.forEach((fn) => {
@@ -126,6 +160,9 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
     CFG.routerLastResolveStatus = state.status;
     if (extra.error !== undefined) CFG.routerLastResolveError = String(extra.error || '');
     if (extra.resolvedAt !== undefined) CFG.routerLastResolvedAt = Number(extra.resolvedAt || 0);
+    if (extra.interopContractVersion !== undefined) {
+      CFG.routerLastInteropContractVersion = String(extra.interopContractVersion || '');
+    }
     saveCFG();
     emit(extra);
   };
@@ -177,12 +214,15 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
         state.appliedSeq = seq;
         state.latestResolvedAt = ts;
         state.autoFailures = 0;
+        const interopContract = extractInteropContract(reply);
         const normalizedResolved = normalizeResolvedEndpoints(reply);
         const resolvedPayload = {
           target,
           requestId: String(reply?.request_id || ''),
           sourceAddress: String(reply?.source_address || ''),
           timestampMs: ts,
+          interopContract,
+          interopContractVersion: String(interopContract.version || ''),
           resolved: normalizedResolved,
           rawReply: reply
         };
@@ -190,13 +230,20 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
         CFG.routerLastResolvedAt = ts;
         CFG.routerLastResolveError = '';
         CFG.routerLastResolveStatus = 'ok';
+        CFG.routerLastInteropContractVersion = String(interopContract.version || '');
         saveCFG();
         if (typeof onResolved === 'function') {
           try { onResolved(resolvedPayload); } catch (_) { /* ignore */ }
         }
         log?.(`[router.resolve] target=${target} services=${Object.keys(normalizedResolved).length}`);
         setBadge('Router resolve complete');
-        setStatus('ok', { resolvedAt: ts, reply, resolved: normalizedResolved, target });
+        setStatus('ok', {
+          resolvedAt: ts,
+          interopContractVersion: String(interopContract.version || ''),
+          reply,
+          resolved: normalizedResolved,
+          target
+        });
         return resolvedPayload;
       } catch (err) {
         const msg = err?.message || String(err || 'resolve failed');
