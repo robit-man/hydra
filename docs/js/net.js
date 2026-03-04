@@ -1008,6 +1008,140 @@ const Net = {
     }).then((reply) => this._normalizeResolveReply(reply || {}));
   },
 
+  _normalizeRpcTicketInput(input, fallback = {}) {
+    const base = fallback && typeof fallback === 'object' ? fallback : {};
+    if (!input) {
+      return {
+        token: '',
+        kid: String(base.kid || ''),
+        scope: String(base.scope || ''),
+        audience: String(base.audience || ''),
+        nonce: String(base.nonce || ''),
+      };
+    }
+    if (typeof input === 'string') {
+      return {
+        token: input.trim(),
+        kid: String(base.kid || ''),
+        scope: String(base.scope || ''),
+        audience: String(base.audience || ''),
+        nonce: String(base.nonce || ''),
+      };
+    }
+    if (typeof input !== 'object') {
+      return {
+        token: '',
+        kid: String(base.kid || ''),
+        scope: String(base.scope || ''),
+        audience: String(base.audience || ''),
+        nonce: String(base.nonce || ''),
+      };
+    }
+    return {
+      token: String(input.token || input.access_ticket || input.accessTicket || input.ticket || '').trim(),
+      kid: String(input.kid || base.kid || '').trim(),
+      scope: String(input.scope || base.scope || '').trim(),
+      audience: String(input.audience || base.audience || '').trim(),
+      nonce: String(input.nonce || base.nonce || '').trim(),
+    };
+  },
+
+  _normalizeRpcMeteringInput(input, fallback = {}) {
+    const base = fallback && typeof fallback === 'object' ? fallback : {};
+    const src = input && typeof input === 'object' ? input : {};
+    const readNum = (value, fb = 0) => {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return Number(fb) || 0;
+      return num;
+    };
+    const readInt = (value, fb = 0) => Math.max(0, Math.round(readNum(value, fb)));
+    const readFloat = (value, fb = 0) => {
+      const out = readNum(value, fb);
+      return out > 0 ? out : (Number(fb) > 0 ? Number(fb) : 0);
+    };
+    const out = {
+      billable_unit: String(
+        src.billable_unit
+        || src.unit
+        || src.usage_unit
+        || base.billable_unit
+        || 'request'
+      ).trim().toLowerCase() || 'request',
+      requested_units: readFloat(
+        src.requested_units ?? src.requestedUnits,
+        base.requested_units ?? 1
+      ),
+      min_units: readFloat(
+        src.min_units ?? src.minUnits,
+        base.min_units ?? 1
+      ),
+      price_per_unit_micros: readInt(
+        src.price_per_unit_micros ?? src.pricePerUnitMicros,
+        base.price_per_unit_micros ?? 0
+      ),
+      max_charge_micros: readInt(
+        src.max_charge_micros ?? src.maxChargeMicros,
+        base.max_charge_micros ?? 0
+      ),
+      settled_micros: readInt(
+        src.settled_micros ?? src.settledMicros,
+        base.settled_micros ?? 0
+      ),
+      quote_id: String(src.quote_id || src.quoteId || base.quote_id || '').trim(),
+      charge_id: String(src.charge_id || src.chargeId || base.charge_id || '').trim(),
+      reservation_id: String(
+        src.reservation_id
+        || src.reservationId
+        || src.credit_reservation_id
+        || src.creditReservationId
+        || base.reservation_id
+        || ''
+      ).trim(),
+      correlation_id: String(
+        src.correlation_id
+        || src.correlationId
+        || base.correlation_id
+        || ''
+      ).trim(),
+      usage_label: String(src.usage_label || src.usageLabel || base.usage_label || '').trim().toLowerCase(),
+      transport_tag: String(src.transport_tag || src.transportTag || base.transport_tag || '').trim().toLowerCase(),
+      frames: readInt(src.frames, base.frames || 0),
+    };
+    if (out.requested_units <= 0) out.requested_units = 1;
+    if (out.min_units <= 0) out.min_units = 1;
+    if (!out.correlation_id) {
+      out.correlation_id = `rpc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+    return out;
+  },
+
+  _isBillableRpcRequest(metering = {}, options = {}) {
+    const meter = metering && typeof metering === 'object' ? metering : {};
+    const opts = options && typeof options === 'object' ? options : {};
+    const pricePerUnit = Number(meter.price_per_unit_micros || 0);
+    const maxCharge = Number(meter.max_charge_micros || 0);
+    const settled = Number(meter.settled_micros || 0);
+    const explicitBillable = opts.billable === true || opts.requireBillingPreflight === true || opts.requireMarketplaceAuth === true;
+    return explicitBillable
+      || (Number.isFinite(pricePerUnit) && pricePerUnit > 0)
+      || (Number.isFinite(maxCharge) && maxCharge > 0)
+      || (Number.isFinite(settled) && settled > 0)
+      || !!String(meter.quote_id || '').trim()
+      || !!String(meter.charge_id || '').trim()
+      || !!String(meter.reservation_id || '').trim();
+  },
+
+  _isRpcTicketErrorCode(code) {
+    const key = String(code || '').trim().toLowerCase();
+    return key === 'ticket_missing'
+      || key === 'ticket_expired'
+      || key === 'ticket_not_yet_valid'
+      || key === 'signature_invalid'
+      || key === 'scope_denied'
+      || key === 'audience_denied'
+      || key === 'ticket_replay';
+  },
+
   async nknServiceRpc(arg1, arg2, arg3, arg4 = undefined) {
     // Supports both signatures:
     // 1) nknServiceRpc(service, path, options)
@@ -1031,45 +1165,181 @@ const Net = {
     const timeout = this._normalizeTimeoutMs(options.timeout_ms ?? options.timeout, 45000);
     const maxPayloadB = Math.max(1024, Number(options.maxPayloadB || (512 * 1024)) || (512 * 1024));
     const sendAttempts = Math.max(1, Math.min(3, Number(options.sendAttempts || 1) || 1));
+    const authOptions = options.auth && typeof options.auth === 'object' ? options.auth : {};
+    const requiredScope = String(
+      options.scope
+      || authOptions.scope
+      || options.requiredScope
+      || 'infer'
+    ).trim() || 'infer';
+    const requiredAudience = String(
+      options.audience
+      || authOptions.audience
+      || options.requiredAudience
+      || 'public'
+    ).trim() || 'public';
+    const serviceId = String(options.serviceId || authOptions.serviceId || svc || '').trim();
+    const metering = this._normalizeRpcMeteringInput(
+      options.metering || options.usage || null,
+      {
+        billable_unit: options.unit || options.billableUnit || 'request',
+        requested_units: options.requestedUnits || options.requested_units || 1,
+        min_units: options.minUnits || options.min_units || 1,
+        price_per_unit_micros: options.pricePerUnitMicros || options.price_per_unit_micros || 0,
+        max_charge_micros: options.maxChargeMicros || options.max_charge_micros || 0,
+        settled_micros: options.settledMicros || options.settled_micros || 0,
+        quote_id: options.quoteId || options.quote_id || '',
+        charge_id: options.chargeId || options.charge_id || '',
+        reservation_id: options.reservationId || options.reservation_id || options.creditReservationId || options.credit_reservation_id || '',
+        correlation_id: options.correlationId || options.correlation_id || '',
+        usage_label: options.usageLabel || options.usage_label || `${svc}:${method}:${rpcPath}`,
+        transport_tag: options.transportTag || options.transport_tag || 'nkn',
+      }
+    );
+    const billable = this._isBillableRpcRequest(metering, options);
+    const requireQuoteForBillable = options.requireQuoteForBillable !== false;
+    const requireChargeForBillable = options.requireChargeForBillable !== false;
+    const retryOnTicketError = options.retryOnTicketError !== false;
+    const hasTicketProvider = typeof options.ticketProvider === 'function';
+    let cachedTicket = this._normalizeRpcTicketInput(
+      options.accessTicket || options.ticket || authOptions.ticket || null,
+      {
+        scope: requiredScope,
+        audience: requiredAudience,
+      }
+    );
+
+    const resolveTicket = async (refresh = false) => {
+      if (!refresh && cachedTicket.token) return cachedTicket;
+      if (!hasTicketProvider) return cachedTicket;
+      const providerPayload = await options.ticketProvider({
+        refresh: !!refresh,
+        service: svc,
+        serviceId,
+        path: rpcPath,
+        method,
+        scope: requiredScope,
+        audience: requiredAudience,
+        relay: target,
+      });
+      cachedTicket = this._normalizeRpcTicketInput(providerPayload, {
+        scope: requiredScope,
+        audience: requiredAudience,
+      });
+      return cachedTicket;
+    };
+
+    const throwPreflightError = (code, message, status = 403) => {
+      const err = new Error(message);
+      err.code = String(code || 'rpc_preflight_failed');
+      err.status = Number(status) || 403;
+      err.preflight = true;
+      err.service = svc;
+      err.path = rpcPath;
+      err.metering = { ...metering };
+      throw err;
+    };
+
+    if (billable && requireQuoteForBillable && !String(metering.quote_id || '').trim()) {
+      throwPreflightError('quote_missing', 'Billable RPC requires quote_id preflight', 402);
+    }
+    const hasChargeReservation = !!String(metering.charge_id || metering.reservation_id || '').trim()
+      || Number(metering.max_charge_micros || 0) > 0
+      || Number(metering.settled_micros || 0) > 0;
+    if (billable && requireChargeForBillable && !hasChargeReservation) {
+      throwPreflightError('credit_reservation_missing', 'Billable RPC requires charge/reservation preflight', 402);
+    }
+
+    const sendOnce = async (ticketState) => {
+      const requestId = 'rpc-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.nkn.rpcPend.delete(requestId);
+          const err = new Error('NKN service RPC timeout');
+          err.code = 'rpc_timeout';
+          reject(err);
+        }, timeout);
+        this.nkn.rpcPend.set(requestId, { res: resolve, rej: reject, t: timer });
+        const payload = {
+          event: 'service_rpc_request',
+          request_id: requestId,
+          from: this.nkn.addr || '',
+          service: svc,
+          service_id: serviceId || svc,
+          path: rpcPath.startsWith('/') ? rpcPath : ('/' + rpcPath),
+          method,
+          timeout_ms: timeout,
+          headers: options.headers || {},
+          scope: requiredScope,
+          audience: requiredAudience,
+          correlation_id: metering.correlation_id,
+          quote_id: metering.quote_id,
+          charge_id: metering.charge_id,
+          reservation_id: metering.reservation_id,
+          usage_label: metering.usage_label,
+          transport_tag: metering.transport_tag || 'nkn',
+          requested_units: metering.requested_units,
+          price_per_unit_micros: metering.price_per_unit_micros,
+          max_charge_micros: metering.max_charge_micros,
+          settled_micros: metering.settled_micros,
+          metering: {
+            ...metering,
+          },
+        };
+        if (options.json !== undefined) payload.json = options.json;
+        if (options.body_b64 !== undefined) payload.body_b64 = options.body_b64;
+        if (ticketState && ticketState.token) {
+          payload.access_ticket = ticketState.token;
+          payload.ticket = ticketState.token;
+          payload.auth = {
+            kid: ticketState.kid || '',
+            scope: ticketState.scope || requiredScope,
+            audience: ticketState.audience || requiredAudience,
+            nonce: ticketState.nonce || '',
+          };
+        }
+        try {
+          const payloadBytes = new TextEncoder().encode(JSON.stringify(payload)).length;
+          if (Number.isFinite(maxPayloadB) && maxPayloadB > 0 && payloadBytes > maxPayloadB) {
+            clearTimeout(timer);
+            this.nkn.rpcPend.delete(requestId);
+            reject(new Error(`RPC payload too large (${payloadBytes} > ${maxPayloadB})`));
+            return;
+          }
+        } catch (_) {}
+        this._sendNkn(target, payload, { noReply: true, maxHoldingSeconds: 120, _attempts: sendAttempts }, timeout)
+          .catch((err) => {
+            clearTimeout(timer);
+            this.nkn.rpcPend.delete(requestId);
+            reject(err);
+          });
+      });
+    };
+
     if (!this.nkn.client) this.ensureNkn();
     await this.waitForReady(timeout);
-    const requestId = 'rpc-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-    const rpcPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.nkn.rpcPend.delete(requestId);
-        reject(new Error('NKN service RPC timeout'));
-      }, timeout);
-      this.nkn.rpcPend.set(requestId, { res: resolve, rej: reject, t: timer });
-      const payload = {
-        event: 'service_rpc_request',
-        request_id: requestId,
-        from: this.nkn.addr || '',
-        service: svc,
-        path: rpcPath.startsWith('/') ? rpcPath : ('/' + rpcPath),
-        method,
-        timeout_ms: timeout,
-        headers: options.headers || {}
-      };
-      if (options.json !== undefined) payload.json = options.json;
-      if (options.body_b64 !== undefined) payload.body_b64 = options.body_b64;
-      try {
-        const payloadBytes = new TextEncoder().encode(JSON.stringify(payload)).length;
-        if (Number.isFinite(maxPayloadB) && maxPayloadB > 0 && payloadBytes > maxPayloadB) {
-          clearTimeout(timer);
-          this.nkn.rpcPend.delete(requestId);
-          reject(new Error(`RPC payload too large (${payloadBytes} > ${maxPayloadB})`));
-          return;
-        }
-      } catch (_) {}
-      this._sendNkn(target, payload, { noReply: true, maxHoldingSeconds: 120, _attempts: sendAttempts }, timeout)
-        .catch((err) => {
-          clearTimeout(timer);
-          this.nkn.rpcPend.delete(requestId);
-          reject(err);
-        });
-    });
-    return rpcPromise.then((result) => {
-      const out = result && typeof result === 'object' ? { ...result } : result;
+    const firstTicket = await resolveTicket(false);
+    if (billable && !String(firstTicket?.token || '').trim()) {
+      throwPreflightError('ticket_missing', 'Billable RPC requires access ticket', 403);
+    }
+    let result = await sendOnce(firstTicket);
+    let out = result && typeof result === 'object' ? { ...result } : result;
+    if (
+      retryOnTicketError
+      && hasTicketProvider
+      && out
+      && typeof out === 'object'
+      && out.ok === false
+      && this._isRpcTicketErrorCode(out.error_code || out.errorCode)
+    ) {
+      const refreshed = await resolveTicket(true);
+      if (refreshed && refreshed.token && refreshed.token !== firstTicket.token) {
+        result = await sendOnce(refreshed);
+        out = result && typeof result === 'object' ? { ...result } : result;
+      }
+    }
+    return Promise.resolve(out).then((resultObj) => {
+      const out = resultObj && typeof resultObj === 'object' ? { ...resultObj } : resultObj;
       if (out && typeof out === 'object' && out.result && typeof out.result === 'object' && out.ok === undefined) {
         // Compatibility with nested teleoperation-style result payloads.
         Object.assign(out, out.result);
@@ -1081,6 +1351,42 @@ const Net = {
         if (!out.selected_transport && out.selectedTransport) {
           out.selected_transport = out.selectedTransport;
         }
+        if (!out.error_code && out.errorCode) {
+          out.error_code = out.errorCode;
+        }
+        if (!out.correlation_id && metering.correlation_id) {
+          out.correlation_id = metering.correlation_id;
+        }
+        if (!out.quote_id && metering.quote_id) {
+          out.quote_id = metering.quote_id;
+        }
+        if (!out.charge_id && metering.charge_id) {
+          out.charge_id = metering.charge_id;
+        }
+        if (!out.reservation_id && metering.reservation_id) {
+          out.reservation_id = metering.reservation_id;
+        }
+        if (!out.transport_tag && metering.transport_tag) {
+          out.transport_tag = metering.transport_tag;
+        }
+        if (!out.metering || typeof out.metering !== 'object') {
+          out.metering = {
+            billable_unit: metering.billable_unit,
+            requested_units: metering.requested_units,
+            min_units: metering.min_units,
+            price_per_unit_micros: metering.price_per_unit_micros,
+            max_charge_micros: metering.max_charge_micros,
+            settled_micros: metering.settled_micros,
+            quote_id: metering.quote_id,
+            charge_id: metering.charge_id,
+            reservation_id: metering.reservation_id,
+            correlation_id: metering.correlation_id,
+            usage_label: metering.usage_label,
+            transport_tag: metering.transport_tag,
+          };
+        }
+        if (!out.scope) out.scope = requiredScope;
+        if (!out.audience) out.audience = requiredAudience;
       }
       if (options.decodeBody && out && out.body_b64 && out.json == null) {
         try {
@@ -1097,9 +1403,11 @@ const Net = {
       }
       if (options.throwOnError && out && out.ok === false) {
         const status = Number(out.status || 0);
+        const code = String(out.error_code || out.errorCode || '');
         const msg = String(out.error || `RPC failed with status ${status}`);
         const err = new Error(msg);
         err.status = status;
+        err.code = code || '';
         err.payload = out;
         throw err;
       }

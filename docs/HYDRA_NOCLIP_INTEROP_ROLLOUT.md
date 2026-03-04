@@ -19,10 +19,12 @@ python3 service_router/tools/hydra_noclip_rollout_gate.py \
   --router-base http://127.0.0.1:9071 \
   --overlay-ingress-url http://127.0.0.1:8080/api/interop/overlay/ingest \
   --media-echo-url http://127.0.0.1:8080/api/interop/media/echo \
+  --marketplace-gate-url http://127.0.0.1:3001/marketplace/gates \
   --endpoint-update-url http://127.0.0.1:3001/api/p2p/endpoint/update \
   --backend-health-url http://127.0.0.1:3001/health \
   --da3-health-url http://127.0.0.1:3001/api/da3/health \
   --require-backend-health \
+  --require-marketplace-gate \
   --json
 ```
 2. Smoke test only (diagnostics):
@@ -37,13 +39,22 @@ python3 service_router/tools/hydra_noclip_interop_smoke.py \
 ```bash
 python3 service_router/tools/hydra_noclip_failure_drill.py \
   --endpoint-update-url http://127.0.0.1:3001/api/p2p/endpoint/update \
+  --marketplace-gate-url http://127.0.0.1:3001/marketplace/gates \
   --json
 ```
 4. Health-gate sanity:
 ```bash
 curl -s http://127.0.0.1:9071/health | jq '.rollout_gates'
 curl -s http://127.0.0.1:9071/nkn/resolve -X POST -H 'content-type: application/json' -d '{"refresh_local": true}' | jq '.rollout_gates'
+curl -s http://127.0.0.1:9071/marketplace/sync | jq '.state'
+curl -s http://127.0.0.1:3001/health | jq '.marketplace.external_catalogs,.interop.gates.marketplace_external_catalog_fresh'
+curl -s "http://127.0.0.1:3001/api/interop/marketplace/catalog/providers?sourceNetwork=hydra&activeOnly=true" | jq '.total,.diagnostics'
 ```
+5. Frontend peer-ingress sanity:
+- In Hydra dashboard, click `Dir Refresh` and confirm marketplace directory text includes `peers <m>`.
+- Open peer list (`Hydra` network) and confirm imported marketplace routers appear without manual entry.
+- Open peer list (`NoClip` network), click `Bridge` on a peer, and confirm a `NoClipBridge` node is configured (or created) with that target.
+- Open Hydra using invite URL params (`noclip`, optional `object/session`) and confirm bridge target/context are auto-applied with URL params cleared after ingest.
 
 ## Rollout Gates
 Rollout proceeds only when all conditions hold:
@@ -58,6 +69,15 @@ Rollout proceeds only when all conditions hold:
   - `resolve_error_rate_ok=true`
   - `pending_resolves_clear=true`
 - NoClip backend `/health` and `/api/da3/health` return `status=ok` with interop gate payload.
+- Marketplace rollout gates are green:
+  - `contract_version_ok=true`
+  - `provider_catalog_integrity_ok=true`
+  - `quote_settlement_integrity_ok=true`
+  - `credit_ledger_invariants_ok=true`
+  - `ticket_replay_defense_ok=true`
+  - `fraud_controls_ready=true`
+  - `publication_enabled=true`
+  - `billing_enabled=true`
 
 ## Rollout Procedure
 1. Apply config with feature flags in staging.
@@ -84,6 +104,24 @@ Rollout proceeds only when all conditions hold:
 ```bash
 python3 service_router/tools/hydra_noclip_rollout_gate.py --simulate --json
 ```
+
+## Phase-10 Security Gates
+- Keep marketplace kill switches independently addressable:
+  - publication switch blocks new offer publication but keeps read-only catalog/health online.
+  - billing switch blocks quote settlement and debit execution while preserving diagnostics.
+- Require fraud counters and replay defense to be active before rollout:
+  - backend `/health.interop.gates.marketplace_fraud_controls_ready=true`
+  - backend `/health.interop.gates.marketplace_ticket_replay_defense_ok=true`
+- Always archive audit bundle data from rollout artifacts:
+  - `trace_id`
+  - `failed_required_checks`
+  - `raw_errors`
+  - `rollback_instructions`
+
+## Operator Runbooks
+- Core rollout + rollback flow remains in this document.
+- Detailed marketplace-specific incident actions are in:
+  - `docs/HYDRA_NOCLIP_MARKETPLACE_RUNBOOK.md`
 
 ## Failure Modes And Recovery Mapping
 - NATS unavailable:

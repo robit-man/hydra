@@ -83,14 +83,128 @@ function getUnlockTtlMs(config) {
   return DEFAULT_UNLOCK_TTL_MS;
 }
 
-function isSellerMode(mode) {
-  const text = String(mode || 'seller').toLowerCase();
-  return text === 'seller' || text === 'both';
+function normalizeTransferRole(configOrMode) {
+  if (configOrMode && typeof configOrMode === 'object') {
+    const role = String(configOrMode.transferRole || 'seller').toLowerCase();
+    if (role === 'buyer' || role === 'both') return role;
+    return 'seller';
+  }
+  const text = String(configOrMode || 'seller').toLowerCase();
+  if (text === 'buyer' || text === 'both') return text;
+  return 'seller';
 }
 
-function isBuyerMode(mode) {
-  const text = String(mode || 'seller').toLowerCase();
-  return text === 'buyer' || text === 'both';
+function normalizePaymentMode(configOrMode) {
+  if (configOrMode && typeof configOrMode === 'object') {
+    const mode = String(configOrMode.mode || 'credit-ledger').toLowerCase();
+    return mode === 'wallet-transfer' ? 'wallet-transfer' : 'credit-ledger';
+  }
+  const mode = String(configOrMode || 'credit-ledger').toLowerCase();
+  return mode === 'wallet-transfer' ? 'wallet-transfer' : 'credit-ledger';
+}
+
+function isWalletTransferMode(configOrMode) {
+  return normalizePaymentMode(configOrMode) === 'wallet-transfer';
+}
+
+function isCreditLedgerMode(configOrMode) {
+  return normalizePaymentMode(configOrMode) === 'credit-ledger';
+}
+
+function isSellerMode(configOrMode) {
+  if (!isWalletTransferMode(configOrMode)) return false;
+  const role = normalizeTransferRole(configOrMode);
+  return role === 'seller' || role === 'both';
+}
+
+function isBuyerMode(configOrMode) {
+  if (!isWalletTransferMode(configOrMode)) return false;
+  const role = normalizeTransferRole(configOrMode);
+  return role === 'buyer' || role === 'both';
+}
+
+function parseBool(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  const text = String(value == null ? '' : value).trim().toLowerCase();
+  if (!text) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  return fallback;
+}
+
+function toMicrosFromDecimal(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^-?\d+$/.test(text)) {
+    return String(Math.max(0, Number(text)) * 1_000_000);
+  }
+  const num = Number(text);
+  if (!Number.isFinite(num)) return null;
+  return String(Math.max(0, Math.round(num * 1_000_000)));
+}
+
+function resolveCreditAmountMicros(config, payload = {}) {
+  const explicitPayloadMicros = payload?.amountMicros ?? payload?.amount_micros;
+  if (explicitPayloadMicros != null && String(explicitPayloadMicros).trim()) {
+    return String(explicitPayloadMicros).trim();
+  }
+  const configuredMicros = String(config?.creditAmountMicros || '').trim();
+  if (configuredMicros) return configuredMicros;
+  const payloadAmount = payload?.amount ?? payload?.price ?? payload?.cost;
+  const payloadMicros = toMicrosFromDecimal(payloadAmount);
+  if (payloadMicros) return payloadMicros;
+  return toMicrosFromDecimal(config?.creditAmount || '0.1') || '100000';
+}
+
+function normalizeApiBase(base) {
+  const text = String(base || '').trim();
+  if (!text) return '';
+  return text.replace(/\/+$/, '');
+}
+
+function resolveOfferId(config, payload = {}) {
+  return String(
+    payload?.offerId
+    || payload?.offer_id
+    || payload?.marketplace?.offerId
+    || payload?.marketplace?.offer_id
+    || config?.marketplaceOfferId
+    || ''
+  ).trim();
+}
+
+function resolveServiceId(config, payload = {}) {
+  return String(
+    payload?.serviceId
+    || payload?.service_id
+    || payload?.marketplace?.serviceId
+    || payload?.marketplace?.service_id
+    || config?.marketplaceServiceId
+    || ''
+  ).trim();
+}
+
+function resolveRequestedUnits(config, payload = {}) {
+  const unitCandidate = payload?.requestedUnits
+    ?? payload?.requested_units
+    ?? payload?.usage?.units
+    ?? payload?.metering?.requested_units
+    ?? config?.requestedUnits;
+  const parsed = Number(unitCandidate);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return 1;
+}
+
+function getCreditHeaders(config) {
+  const headers = { 'Content-Type': 'application/json' };
+  const rawToken = String(config?.creditAuthToken || '').trim();
+  if (rawToken) {
+    headers.Authorization = rawToken.toLowerCase().startsWith('bearer ')
+      ? rawToken
+      : `Bearer ${rawToken}`;
+  }
+  return headers;
 }
 
 function shortenKey(key, length = 10) {
@@ -104,6 +218,26 @@ function formatChain(chainId) {
   const num = Number(chainId);
   if (!Number.isFinite(num) || num <= 0) return 'unknown';
   return `chain ${num}`;
+}
+
+function formatMicrosToUsdText(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return '';
+  return (numeric / 1_000_000).toFixed(4).replace(/\.?0+$/, '');
+}
+
+function dispatchMarketplacePreviewEvent(eventName, detail = {}) {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+  try {
+    window.dispatchEvent(new CustomEvent(eventName, {
+      detail: {
+        ...(detail && typeof detail === 'object' ? detail : {}),
+        updatedAtMs: Number(detail?.updatedAtMs || Date.now()) || Date.now()
+      }
+    }));
+  } catch (_) {
+    // ignore DOM dispatch failures
+  }
 }
 
 function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
@@ -120,6 +254,11 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
         remoteIncoming: new Map(),
         requestedRemotes: new Set(),
         tokenMeta: new Map(),
+        creditLocks: new Map(),
+        creditEvents: [],
+        creditBalance: null,
+        creditLastGrantAt: '',
+        quotePreview: null,
         wallet: null,
         ui: null,
         mounted: false
@@ -191,7 +330,18 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     const ui = st.ui;
     if (!ui?.summary) return;
     const cfg = getConfig(nodeId);
-    const modeText = String(cfg.mode || 'seller').toUpperCase();
+    const modeText = String(normalizePaymentMode(cfg) || 'credit-ledger').toUpperCase();
+    if (ui.connectBtn) {
+      ui.connectBtn.textContent = isCreditLedgerMode(cfg) ? 'Refresh Credits' : 'Connect Wallet';
+    }
+    if (isCreditLedgerMode(cfg)) {
+      const amountText = String(cfg.creditAmount || '0.1');
+      const scopeText = String(cfg.creditScope || 'infer');
+      const offerHint = String(cfg.marketplaceOfferId || '').trim();
+      const offerFrag = offerHint ? ` • offer ${offerHint.slice(0, 8)}` : '';
+      ui.summary.textContent = `Mode: ${modeText} • ${amountText} USDC • ${scopeText}${offerFrag}`;
+      return;
+    }
     const asset = cfg.asset || ZERO_ADDRESS;
     const amount = cfg.amount || '1';
     const chain = cfg.chainId ? ` • ${formatChain(cfg.chainId)}` : '';
@@ -202,6 +352,16 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     const st = ensureState(nodeId);
     const ui = st.ui;
     if (!ui?.wallet) return;
+    const cfg = getConfig(nodeId);
+    if (isCreditLedgerMode(cfg)) {
+      const balance = st.creditBalance;
+      const available = balance?.available ?? balance?.balance ?? '—';
+      const grant = st.creditLastGrantAt
+        ? new Date(st.creditLastGrantAt).toLocaleString()
+        : '—';
+      ui.wallet.textContent = `Credits: ${available} USDC • Last Grant: ${grant}`;
+      return;
+    }
     const wallet = st.wallet;
     if (!wallet) {
       ui.wallet.textContent = 'Wallet: not connected';
@@ -211,12 +371,123 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     ui.wallet.textContent = `Wallet: ${shortAddr} • ${formatChain(wallet.chainId)}`;
   }
 
+  function updateCreditPreview(nodeId) {
+    const st = ensureState(nodeId);
+    const ui = st.ui;
+    const cfg = getConfig(nodeId);
+    if (!isCreditLedgerMode(cfg)) return;
+    const balance = st.creditBalance || {};
+    let text = '';
+    const available = String(balance?.available ?? balance?.balance ?? '').trim();
+    if (available) {
+      text = `Credits: ${available} USDC`;
+    } else {
+      const micros = String(balance?.availableMicros ?? balance?.available_micros ?? '').trim();
+      if (micros) {
+        const usd = formatMicrosToUsdText(micros);
+        text = usd ? `Credits: ${usd} USDC` : '';
+      }
+    }
+    if (!text) text = 'Credits: --';
+    if (ui?.creditPreview) {
+      ui.creditPreview.textContent = text;
+      ui.creditPreview.title = text;
+    }
+    dispatchMarketplacePreviewEvent('hydra-market-credit-preview', {
+      nodeId,
+      text,
+      balance: st.creditBalance || null,
+      updatedAtMs: Date.now()
+    });
+  }
+
+  function updateQuotePreview(nodeId, preview = null) {
+    const st = ensureState(nodeId);
+    const ui = st.ui;
+    if (preview && typeof preview === 'object') {
+      st.quotePreview = {
+        ...st.quotePreview,
+        ...preview
+      };
+    }
+    const quote = st.quotePreview && typeof st.quotePreview === 'object' ? st.quotePreview : {};
+    let text = '';
+    if (String(quote.estimatedCharge || '').trim()) {
+      text = `Estimate: ${String(quote.estimatedCharge).trim()} USDC`;
+    } else {
+      const micros = String(
+        quote.estimatedChargeMicros ||
+        quote.estimated_charge_micros ||
+        quote.amountMicros ||
+        quote.amount_micros ||
+        ''
+      ).trim();
+      if (micros) {
+        const usd = formatMicrosToUsdText(micros);
+        text = usd ? `Estimate: ${usd} USDC` : '';
+      }
+    }
+    if (!text) {
+      const cfg = getConfig(nodeId);
+      const fallback = String(cfg.creditAmount || '').trim();
+      text = fallback ? `Estimate: ${fallback} USDC` : 'Estimate: --';
+    }
+    if (ui?.quotePreview) {
+      ui.quotePreview.textContent = text;
+      ui.quotePreview.title = text;
+    }
+    dispatchMarketplacePreviewEvent('hydra-market-quote-preview', {
+      nodeId,
+      text,
+      quote: quote || null,
+      updatedAtMs: Date.now()
+    });
+  }
+
   function renderInvoices(nodeId) {
     const st = ensureState(nodeId);
     const ui = st.ui;
     if (!ui?.invoices) return;
     const container = ui.invoices;
     container.innerHTML = '';
+    const cfg = getConfig(nodeId);
+
+    if (isCreditLedgerMode(cfg)) {
+      const events = Array.isArray(st.creditEvents) ? [...st.creditEvents] : [];
+      events.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+      if (!events.length) {
+        const empty = document.createElement('div');
+        empty.className = 'payment-invoice-empty';
+        empty.textContent = 'No credit charge activity yet.';
+        container.appendChild(empty);
+        return;
+      }
+      events.slice(0, 30).forEach((evt) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'payment-invoice';
+        wrapper.dataset.status = String(evt.status || '');
+        const title = document.createElement('div');
+        title.className = 'payment-invoice-title';
+        title.textContent = `Credit Charge ${evt.status ? `(${evt.status})` : ''}`;
+        wrapper.appendChild(title);
+        const details = document.createElement('div');
+        details.className = 'payment-invoice-details';
+        const amountText = evt.amount
+          ? `${evt.amount} USDC`
+          : (evt.amountMicros ? `${evt.amountMicros} micros` : 'amount pending');
+        const quoteText = evt.quoteId ? ` • quote ${String(evt.quoteId).slice(0, 8)}` : '';
+        details.textContent = `${amountText}${quoteText}`;
+        wrapper.appendChild(details);
+        const meta = document.createElement('div');
+        meta.className = 'payment-invoice-status';
+        const when = evt.ts ? new Date(evt.ts).toLocaleTimeString() : '';
+        const error = evt.error ? ` • ${evt.error}` : '';
+        meta.textContent = `${when}${error}`;
+        wrapper.appendChild(meta);
+        container.appendChild(wrapper);
+      });
+      return;
+    }
 
     const entries = [];
     st.pendingInvoices.forEach((record) => {
@@ -438,12 +709,250 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     return true;
   }
 
+  function pushCreditEvent(nodeId, patch = {}) {
+    const st = ensureState(nodeId);
+    const event = {
+      ts: Date.now(),
+      status: String(patch.status || '').toLowerCase() || 'info',
+      amount: patch.amount ? String(patch.amount) : '',
+      amountMicros: patch.amountMicros ? String(patch.amountMicros) : '',
+      quoteId: patch.quoteId ? String(patch.quoteId) : '',
+      requestId: patch.requestId ? String(patch.requestId) : '',
+      settlementId: patch.settlementId ? String(patch.settlementId) : '',
+      error: patch.error ? String(patch.error) : ''
+    };
+    st.creditEvents = Array.isArray(st.creditEvents) ? st.creditEvents : [];
+    st.creditEvents.push(event);
+    if (st.creditEvents.length > 60) {
+      st.creditEvents = st.creditEvents.slice(-60);
+    }
+    renderInvoices(nodeId);
+  }
+
+  async function fetchCreditBalance(nodeId, options = {}) {
+    const st = ensureState(nodeId);
+    const cfg = getConfig(nodeId);
+    const base = normalizeApiBase(cfg.creditApiBase);
+    if (!base) throw new Error('creditApiBase is required for credit-ledger mode');
+    const applyEntitlements = options.applyEntitlements !== false && parseBool(cfg.creditApplyEntitlements, true);
+    const params = new URLSearchParams();
+    params.set('applyEntitlements', applyEntitlements ? 'true' : 'false');
+    if (options.forceRefresh || parseBool(cfg.creditForceRefreshOnReserve, false)) {
+      params.set('forceRefresh', 'true');
+    }
+    const resp = await fetch(`${base}/credits/balance?${params.toString()}`, {
+      method: 'GET',
+      headers: getCreditHeaders(cfg)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data?.success === false) {
+      throw new Error(data?.message || data?.error || `Credit balance failed (${resp.status})`);
+    }
+    const balance = data?.balance || {};
+    st.creditBalance = balance;
+    st.creditLastGrantAt = String(balance?.lastGrantAt || '');
+    updateWalletStatus(nodeId);
+    updateCreditPreview(nodeId);
+    return balance;
+  }
+
+  async function requestMarketplaceQuote(nodeId, remoteKey, payload, requestId) {
+    const cfg = getConfig(nodeId);
+    const base = normalizeApiBase(cfg.creditApiBase);
+    const offerId = resolveOfferId(cfg, payload);
+    if (!base || !offerId) return null;
+    const serviceId = resolveServiceId(cfg, payload);
+    const requestedUnits = resolveRequestedUnits(cfg, payload);
+    const body = {
+      requestId,
+      serviceId: serviceId || undefined,
+      requestedUnits,
+      transportHint: 'nkn',
+      correlationId: `hydra-${nodeId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      consumerCapMicros: String(cfg.marketplaceMaxChargeMicros || payload?.maxChargeMicros || '').trim() || undefined,
+      metadata: {
+        remoteKey: remoteKey || '',
+        sourceNodeId: nodeId,
+        graphId: CFG.graphId || '',
+        scope: String(cfg.creditScope || 'infer'),
+        payloadHint: String(payload?.type || payload?.event || payload?.kind || '')
+      }
+    };
+    const resp = await fetch(`${base}/marketplace/offers/${encodeURIComponent(offerId)}/quote`, {
+      method: 'POST',
+      headers: getCreditHeaders(cfg),
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data?.message || data?.error || `Quote failed (${resp.status})`);
+    }
+    const quote = data?.quote || null;
+    if (quote && typeof quote === 'object') {
+      updateQuotePreview(nodeId, quote);
+    }
+    return quote;
+  }
+
+  async function settleMarketplaceQuote(nodeId, quote, payload, requestId) {
+    const cfg = getConfig(nodeId);
+    const base = normalizeApiBase(cfg.creditApiBase);
+    if (!base || !quote?.quoteId) return null;
+    const requestedUnits = resolveRequestedUnits(cfg, payload);
+    const resp = await fetch(`${base}/marketplace/quotes/${encodeURIComponent(quote.quoteId)}/settle`, {
+      method: 'POST',
+      headers: getCreditHeaders(cfg),
+      body: JSON.stringify({
+        requestId,
+        actualUnits: requestedUnits,
+        transportTag: String(cfg.marketplaceTransportTag || 'nkn'),
+        correlationId: String(quote.correlationId || ''),
+        usagePayload: {
+          type: String(payload?.type || payload?.event || payload?.kind || ''),
+          serviceId: resolveServiceId(cfg, payload),
+          remoteKey: String(payload?.from || payload?.target || ''),
+          graphId: CFG.graphId || ''
+        },
+        meteringPayload: {
+          requested_units: requestedUnits,
+          usage_label: String(cfg.creditScope || 'infer')
+        },
+        metadata: {
+          nodeId,
+          remoteKey: payload?.from || payload?.target || '',
+          graphId: CFG.graphId || ''
+        }
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(data?.message || data?.error || `Settlement failed (${resp.status})`);
+    }
+    return data;
+  }
+
+  async function commitCreditsDirect(nodeId, payload, requestId) {
+    const cfg = getConfig(nodeId);
+    const base = normalizeApiBase(cfg.creditApiBase);
+    if (!base) throw new Error('creditApiBase is required for credit-ledger mode');
+    const amountMicros = resolveCreditAmountMicros(cfg, payload);
+    const resp = await fetch(`${base}/credits/spend/commit`, {
+      method: 'POST',
+      headers: getCreditHeaders(cfg),
+      body: JSON.stringify({
+        requestId,
+        amountMicros,
+        scope: String(cfg.creditScope || 'infer'),
+        mode: 'credit-ledger',
+        ttlSeconds: Number(cfg.creditReservationTtlSec || 90) || 90,
+        metadata: {
+          nodeId,
+          graphId: CFG.graphId || '',
+          remoteKey: String(payload?.from || payload?.target || ''),
+        }
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data?.success === false) {
+      throw new Error(data?.message || data?.error || `Credit commit failed (${resp.status})`);
+    }
+    return data;
+  }
+
+  async function ensureCreditUnlock(nodeId, remoteKey, payload = {}) {
+    const st = ensureState(nodeId);
+    const cfg = getConfig(nodeId);
+    const key = normalizeKey(remoteKey) || '__local__';
+    const existing = st.creditLocks.get(key);
+    if (existing) return existing;
+    const requestId = `credit-${nodeId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+    const lockPromise = (async () => {
+      try {
+        await fetchCreditBalance(nodeId, {
+          forceRefresh: parseBool(cfg.creditForceRefreshOnReserve, false),
+          applyEntitlements: parseBool(cfg.creditApplyEntitlements, true),
+        }).catch(() => null);
+        let amount = '';
+        let amountMicros = '';
+        let quoteId = '';
+        let settlementId = '';
+        const quote = await requestMarketplaceQuote(nodeId, key, payload, requestId).catch(() => null);
+        if (quote?.quoteId) {
+          quoteId = String(quote.quoteId);
+          updateQuotePreview(nodeId, quote);
+          const settled = await settleMarketplaceQuote(nodeId, quote, payload, requestId);
+          const settlement = settled?.settlement || {};
+          const balance = settled?.balance || {};
+          amount = String(settlement.amount || quote.estimatedCharge || '');
+          amountMicros = String(settlement.amountMicros || quote.estimatedChargeMicros || '');
+          settlementId = String(settlement.settlementId || '');
+          st.creditBalance = balance || st.creditBalance;
+          st.creditLastGrantAt = String(balance?.lastGrantAt || st.creditLastGrantAt || '');
+        } else {
+          const committed = await commitCreditsDirect(nodeId, payload, requestId);
+          const reservation = committed?.reservation || {};
+          const balance = committed?.balance || {};
+          amount = String(reservation.amount || '');
+          amountMicros = String(reservation.amountMicros || '');
+          st.creditBalance = balance || st.creditBalance;
+          st.creditLastGrantAt = String(balance?.lastGrantAt || st.creditLastGrantAt || '');
+          updateQuotePreview(nodeId, {
+            estimatedCharge: amount,
+            estimatedChargeMicros: amountMicros
+          });
+        }
+        markUnlocked(nodeId, key);
+        flushQueue(nodeId, key);
+        updateWalletStatus(nodeId);
+        updateCreditPreview(nodeId);
+        pushCreditEvent(nodeId, {
+          status: 'committed',
+          amount,
+          amountMicros,
+          quoteId,
+          requestId,
+          settlementId,
+        });
+        emitEvent(nodeId, {
+          type: 'payment.status',
+          mode: 'credit-ledger',
+          status: 'unlocked',
+          target: key,
+          amount,
+          amountMicros,
+          quoteId,
+          requestId,
+          settlementId
+        });
+        setBadge?.(`Credits committed for ${shortenKey(key)}`);
+      } catch (err) {
+        const message = err?.message || String(err);
+        pushCreditEvent(nodeId, {
+          status: 'failed',
+          error: message,
+          requestId,
+        });
+        setBadge?.(`Credit charge failed: ${message}`, false);
+      } finally {
+        st.creditLocks.delete(key);
+        updateCreditPreview(nodeId);
+        renderInvoices(nodeId);
+      }
+    })();
+    st.creditLocks.set(key, lockPromise);
+    return lockPromise;
+  }
+
   function mount(nodeId, panelEl) {
     const st = ensureState(nodeId);
     if (!panelEl || st.mounted) return;
     panelEl.innerHTML = `
       <div class="payment-summary" data-payment-summary>—</div>
       <div class="payment-wallet" data-payment-wallet>Wallet: not connected</div>
+      <div class="payment-preview-row">
+        <div class="payment-credit-preview" data-payment-credit-preview>Credits: --</div>
+        <div class="payment-quote-preview" data-payment-quote-preview>Estimate: --</div>
+      </div>
       <div class="payment-actions">
         <button type="button" class="secondary" data-payment-connect>Connect Wallet</button>
         <button type="button" class="ghost" data-payment-refresh>Refresh</button>
@@ -453,6 +962,8 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     `;
     const summary = panelEl.querySelector('[data-payment-summary]');
     const wallet = panelEl.querySelector('[data-payment-wallet]');
+    const creditPreview = panelEl.querySelector('[data-payment-credit-preview]');
+    const quotePreview = panelEl.querySelector('[data-payment-quote-preview]');
     const connectBtn = panelEl.querySelector('[data-payment-connect]');
     const refreshBtn = panelEl.querySelector('[data-payment-refresh]');
     const clearBtn = panelEl.querySelector('[data-payment-clear]');
@@ -462,6 +973,8 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
       panel: panelEl,
       summary,
       wallet,
+      creditPreview,
+      quotePreview,
       connectBtn,
       refreshBtn,
       clearBtn,
@@ -472,8 +985,15 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
       connectBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         try {
-          await connectWallet(nodeId);
-          setBadge?.('Payments: wallet connected');
+          const cfg = getConfig(nodeId);
+          if (isCreditLedgerMode(cfg)) {
+            await fetchCreditBalance(nodeId, { applyEntitlements: true });
+            renderInvoices(nodeId);
+            setBadge?.('Payments: credit balance refreshed');
+          } else {
+            await connectWallet(nodeId);
+            setBadge?.('Payments: wallet connected');
+          }
         } catch (err) {
           setBadge?.(`Payments: ${err?.message || err}`, false);
         }
@@ -482,10 +1002,20 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     }
 
     if (refreshBtn && !refreshBtn._paymentsBound) {
-      refreshBtn.addEventListener('click', (e) => {
+      refreshBtn.addEventListener('click', async (e) => {
         e.preventDefault();
+        const cfg = getConfig(nodeId);
+        if (isCreditLedgerMode(cfg)) {
+          try {
+            await fetchCreditBalance(nodeId, { applyEntitlements: true });
+          } catch (err) {
+            setBadge?.(`Payments: ${err?.message || err}`, false);
+          }
+        }
         updateSummary(nodeId);
         updateWalletStatus(nodeId);
+        updateCreditPreview(nodeId);
+        updateQuotePreview(nodeId);
         renderInvoices(nodeId);
       });
       refreshBtn._paymentsBound = true;
@@ -535,6 +1065,8 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     st.mounted = true;
     updateSummary(nodeId);
     updateWalletStatus(nodeId);
+    updateCreditPreview(nodeId);
+    updateQuotePreview(nodeId);
     renderInvoices(nodeId);
   }
 
@@ -553,7 +1085,7 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
     const st = ensureState(nodeId);
     if (st.remoteInvoices.has(key)) return st.remoteInvoices.get(key);
     const cfg = getConfig(nodeId);
-    if (!isSellerMode(cfg.mode)) return;
+    if (!isSellerMode(cfg)) return;
     const receiver = normalizeKey(cfg.receiver) || st.wallet?.address;
     if (!receiver) {
       setBadge?.('Payments: receiver address required for invoices', false);
@@ -590,7 +1122,7 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
   function handleInvoiceReceived(nodeId, payload, remoteKey) {
     const st = ensureState(nodeId);
     const cfg = getConfig(nodeId);
-    if (!isBuyerMode(cfg.mode)) return;
+    if (!isBuyerMode(cfg)) return;
     if (!payload || typeof payload !== 'object') return;
     const invoice = {
       ...payload,
@@ -612,7 +1144,7 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
   async function handleReceipt(nodeId, payload, remoteKey) {
     const st = ensureState(nodeId);
     const cfg = getConfig(nodeId);
-    if (!isSellerMode(cfg.mode)) return;
+    if (!isSellerMode(cfg)) return;
     const lookupKey = normalizeKey(remoteKey || payload?.from || payload?.target);
     const invoiceId =
       payload?.invoiceId ||
@@ -663,14 +1195,14 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
 
   function handleRequest(nodeId, payload, remoteKey) {
     const cfg = getConfig(nodeId);
-    if (!isSellerMode(cfg.mode)) return;
+    if (!isSellerMode(cfg)) return;
     ensureInvoiceForRemote(nodeId, remoteKey, payload);
   }
 
   function maybeRequestInvoice(nodeId, remoteKey) {
     const st = ensureState(nodeId);
     const cfg = getConfig(nodeId);
-    if (!isBuyerMode(cfg.mode)) return;
+    if (!isBuyerMode(cfg)) return;
     const key = normalizeKey(remoteKey);
     if (!key) return;
     if (st.requestedRemotes.has(key)) return;
@@ -717,15 +1249,31 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
       Router.sendFrom(nodeId, 'output', payload);
       return;
     }
+    if (isCreditLedgerMode(cfg)) {
+      if (isUnlocked(st, remoteKey, getUnlockTtlMs(cfg))) {
+        Router.sendFrom(nodeId, 'output', payload);
+        return;
+      }
+      enqueuePayload(nodeId, remoteKey, portName, payload);
+      emitEvent(nodeId, {
+        type: 'payment.required',
+        mode: 'credit-ledger',
+        target: remoteKey
+      });
+      ensureCreditUnlock(nodeId, remoteKey, payload).catch((err) => {
+        setBadge?.(`Credit unlock failed: ${err?.message || err}`, false);
+      });
+      return;
+    }
     if (isUnlocked(st, remoteKey, getUnlockTtlMs(cfg))) {
       Router.sendFrom(nodeId, 'output', payload);
       return;
     }
     enqueuePayload(nodeId, remoteKey, portName, payload);
     emitEvent(nodeId, { type: 'payment.required', target: remoteKey });
-    if (isSellerMode(cfg.mode)) {
+    if (isSellerMode(cfg)) {
       ensureInvoiceForRemote(nodeId, remoteKey, {});
-    } else if (isBuyerMode(cfg.mode)) {
+    } else if (isBuyerMode(cfg)) {
       maybeRequestInvoice(nodeId, remoteKey);
     }
   }
@@ -753,12 +1301,25 @@ function createPayments({ Router, NodeStore, CFG, setBadge, log }) {
   function init(nodeId) {
     updateSummary(nodeId);
     updateWalletStatus(nodeId);
+    updateCreditPreview(nodeId);
+    updateQuotePreview(nodeId);
     renderInvoices(nodeId);
+    const cfg = getConfig(nodeId);
+    if (isCreditLedgerMode(cfg)) {
+      fetchCreditBalance(nodeId, { applyEntitlements: true }).catch(() => {});
+    }
   }
 
   function refresh(nodeId) {
     updateSummary(nodeId);
+    updateWalletStatus(nodeId);
+    updateCreditPreview(nodeId);
+    updateQuotePreview(nodeId);
     renderInvoices(nodeId);
+    const cfg = getConfig(nodeId);
+    if (isCreditLedgerMode(cfg)) {
+      fetchCreditBalance(nodeId, { applyEntitlements: true }).catch(() => {});
+    }
   }
 
   return {

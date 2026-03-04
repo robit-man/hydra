@@ -16,6 +16,8 @@ import atexit
 import base64
 import codecs
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -130,7 +132,14 @@ ROUTER_CONFIG_MIGRATION_MAP = {
 INTEROP_CONTRACT = {
     "name": "hydra_noclip_interop",
     "version": "1.0.0",
+    "compat_min_version": "1.0.0",
+    "namespace": "hydra.noclip.marketplace.v1",
+    "schema": "hydra_noclip_marketplace_contract_v1",
 }
+DEFAULT_TICKET_KID = "noclip-dev-k1"
+DEFAULT_TICKET_SECRET = "dev-hydra-noclip-shared-ticket-key-change-me-0123456789abcdef"
+AUTH_ALLOWED_SCOPES = {"infer", "overlay.write", "stream"}
+AUTH_ALLOWED_AUDIENCE = {"public", "friends", "private"}
 
 ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "api": {
@@ -188,6 +197,42 @@ ROUTER_SECTION_FIELD_SPECS: Dict[str, Dict[str, Dict[str, Any]]] = {
         "resolver_auto_apply": {"type": "bool", "default": True},
         "cloudflared_manager": {"type": "bool", "default": False},
     },
+    "marketplace": {
+        "enable_catalog": {"type": "bool", "default": True},
+        "provider_id": {"type": "str", "default": "hydra-router"},
+        "provider_label": {"type": "str", "default": "Hydra Router"},
+        "provider_network": {"type": "str", "default": "hydra"},
+        "provider_contact": {"type": "str", "default": ""},
+        "default_currency": {"type": "str", "default": "USDC"},
+        "default_unit": {"type": "str", "default": "request"},
+        "default_price_per_unit": {"type": "float", "default": 0.0, "min": 0.0, "max": 1000000.0},
+        "include_unhealthy": {"type": "bool", "default": True},
+        "catalog_ttl_seconds": {"type": "int", "default": 20, "min": 2, "max": 600},
+    },
+    "marketplace_sync": {
+        "enable_auto_publish": {"type": "bool", "default": False},
+        "target_urls": {"type": "str", "default": ""},
+        "auth_token": {"type": "str", "default": ""},
+        "auth_token_env": {"type": "str", "default": "HYDRA_MARKETPLACE_SYNC_TOKEN"},
+        "auth_header": {"type": "str", "default": "Authorization"},
+        "auth_scheme": {"type": "str", "default": "Bearer"},
+        "publish_interval_seconds": {"type": "int", "default": 45, "min": 5, "max": 3600},
+        "publish_timeout_seconds": {"type": "float", "default": 6.0, "min": 1.0, "max": 120.0},
+        "max_backoff_seconds": {"type": "int", "default": 300, "min": 5, "max": 7200},
+        "include_unhealthy": {"type": "bool", "default": True},
+    },
+    "auth": {
+        "require_service_rpc_ticket": {"type": "bool", "default": True},
+        "require_billing_preflight": {"type": "bool", "default": True},
+        "require_quote_for_billable": {"type": "bool", "default": True},
+        "require_charge_for_billable": {"type": "bool", "default": True},
+        "allow_unauthenticated_resolve": {"type": "bool", "default": True},
+        "clock_skew_seconds": {"type": "int", "default": 30, "min": 0, "max": 300},
+        "replay_cache_seconds": {"type": "int", "default": 900, "min": 30, "max": 3600},
+        "ticket_ttl_seconds": {"type": "int", "default": 300, "min": 30, "max": 1800},
+        "active_kid": {"type": "str", "default": DEFAULT_TICKET_KID},
+        "default_scope": {"type": "str", "default": "infer"},
+    },
 }
 
 ROUTER_TARGET_LEGACY_KEYS: Dict[str, Tuple[str, ...]] = {
@@ -222,6 +267,103 @@ SENSITIVE_FIELD_EXCEPTIONS = {
 SENSITIVE_FIELD_REGEX = re.compile(
     r"(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|auth_header|bearer)"
 )
+
+
+def _parse_semver_tuple(value: Any) -> Tuple[int, int, int]:
+    text = str(value or "").strip()
+    if not text:
+        return (0, 0, 0)
+    m = re.match(r"^v?(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:\.(?P<patch>\d+))?", text, re.IGNORECASE)
+    if not m:
+        return (0, 0, 0)
+    major = int(m.group("major") or 0)
+    minor = int(m.group("minor") or 0)
+    patch = int(m.group("patch") or 0)
+    return (major, minor, patch)
+
+
+def _semver_gte(left: Any, right: Any) -> bool:
+    return _parse_semver_tuple(left) >= _parse_semver_tuple(right)
+
+
+def _base64url_decode(value: Any) -> bytes:
+    text = str(value or "").strip()
+    if not text:
+        return b""
+    pad = "=" * ((4 - (len(text) % 4)) % 4)
+    return base64.urlsafe_b64decode((text + pad).encode("ascii", errors="ignore"))
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _normalize_scope(value: Any, default: str = "infer") -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"asr", "tts", "llm", "request"}:
+        raw = "infer"
+    if raw in AUTH_ALLOWED_SCOPES:
+        return raw
+    return default if default in AUTH_ALLOWED_SCOPES else "infer"
+
+
+def _normalize_audience(value: Any, default: str = "public") -> str:
+    raw = str(value or "").strip().lower()
+    if raw == "friend":
+        raw = "friends"
+    if raw in AUTH_ALLOWED_AUDIENCE:
+        return raw
+    return default if default in AUTH_ALLOWED_AUDIENCE else "public"
+
+
+def _normalize_ticket_key_map(raw_keys: Any, fallback: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    src = raw_keys if isinstance(raw_keys, dict) else {}
+    defaults = fallback if isinstance(fallback, dict) else {}
+    out: Dict[str, str] = {}
+    for kid, secret in src.items():
+        kid_text = str(kid or "").strip()
+        secret_text = str(secret or "").strip()
+        if not kid_text or not secret_text:
+            continue
+        out[kid_text] = secret_text
+    if out:
+        return out
+    default_out: Dict[str, str] = {}
+    for kid, secret in defaults.items():
+        kid_text = str(kid or "").strip()
+        secret_text = str(secret or "").strip()
+        if not kid_text or not secret_text:
+            continue
+        default_out[kid_text] = secret_text
+    if default_out:
+        return default_out
+    return {DEFAULT_TICKET_KID: DEFAULT_TICKET_SECRET}
+
+
+def _normalize_ticket_kid_list(raw: Any, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    if isinstance(raw, list):
+        values = [str(item or "").strip() for item in raw]
+    elif isinstance(raw, str):
+        values = [part.strip() for part in raw.split(",")]
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    if out:
+        return out
+    fallback_values = [str(item or "").strip() for item in (fallback or [])]
+    out = []
+    seen = set()
+    for value in fallback_values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 SERVICE_TARGETS = {
     "whisper_asr": {
@@ -261,6 +403,101 @@ SERVICE_TARGETS = {
         "endpoint": "http://127.0.0.1:5000",
     },
 }
+MARKETPLACE_VISIBILITY = {"public", "friends", "private"}
+
+
+def _normalize_marketplace_visibility(value: Any, default: str = "public") -> str:
+    text = str(value or "").strip().lower()
+    if text in MARKETPLACE_VISIBILITY:
+        return text
+    return default if default in MARKETPLACE_VISIBILITY else "public"
+
+
+def _normalize_marketplace_tags(raw_tags: Any, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str]
+    if isinstance(raw_tags, list):
+        values = [str(item or "").strip().lower() for item in raw_tags]
+    elif isinstance(raw_tags, str):
+        values = [part.strip().lower() for part in raw_tags.split(",")]
+    else:
+        values = []
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        if not value:
+            continue
+        token = re.sub(r"[^a-z0-9_.:-]+", "_", value).strip("_.:-")
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+        if len(out) >= 16:
+            break
+    if out:
+        return out
+    return list(fallback or [])
+
+
+def _normalize_marketplace_sync_targets(raw_urls: Any, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    if isinstance(raw_urls, list):
+        values = [str(item or "").strip() for item in raw_urls]
+    elif isinstance(raw_urls, str):
+        values = [part.strip() for part in re.split(r"[,\n\r\t ]+", raw_urls)]
+    elif raw_urls is not None:
+        values = [str(raw_urls).strip()]
+    if not values:
+        values = [str(item or "").strip() for item in (fallback or [])]
+
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        parsed = urllib.parse.urlparse(text)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if not parsed.netloc:
+            continue
+        normalized = urllib.parse.urlunparse(parsed._replace(fragment="")).rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+        if len(out) >= 32:
+            break
+    return out
+
+
+def _default_service_publication() -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for service_name, info in SERVICE_TARGETS.items():
+        target = str((info or {}).get("target") or service_name)
+        category = target or service_name
+        default_unit = "request"
+        if service_name == "whisper_asr":
+            default_unit = "audio_second"
+        elif service_name == "piper_tts":
+            default_unit = "text_char"
+        elif service_name == "depth_any":
+            default_unit = "image"
+        out[service_name] = {
+            "enabled": True,
+            "visibility": "public",
+            "repository": "hydra",
+            "category": category,
+            "capacity_hint": 1,
+            "tags": _normalize_marketplace_tags([category, service_name], fallback=[service_name]),
+            "pricing": {
+                "currency": "USDC",
+                "unit": default_unit,
+                "base_price": 0.0,
+                "min_units": 1,
+                "quote_public": True,
+            },
+        }
+    return out
 
 DAEMON_SENTINEL = Path.home() / ".unified_router_daemon.json"
 
@@ -2192,7 +2429,18 @@ def _normalize_router_config(raw_cfg: Any) -> Tuple[dict, bool, List[str], List[
     normalized["targets"] = targets_out
 
     # Typed sections
-    known_top = {"schema", "schema_version", "version", "targets", "service_relays", "nodes", "service_assignments"}
+    known_top = {
+        "schema",
+        "schema_version",
+        "version",
+        "targets",
+        "service_relays",
+        "nodes",
+        "service_assignments",
+        "service_publication",
+        "ticket_keys",
+        "ticket_accepted_kids",
+    }
     known_top.update(ROUTER_SECTION_FIELD_SPECS.keys())
     known_legacy_top = set()
     for section_name, section_spec in ROUTER_SECTION_FIELD_SPECS.items():
@@ -2255,6 +2503,47 @@ def _normalize_router_config(raw_cfg: Any) -> Tuple[dict, bool, List[str], List[
         warnings.append(f"{top_key} ignored (unknown top-level key)")
         changed = True
 
+    raw_publication_value = raw.get("service_publication", defaults.get("service_publication", {}))
+    raw_publication = raw_publication_value if isinstance(raw_publication_value, dict) else {}
+    if "service_publication" in raw and not isinstance(raw_publication_value, dict):
+        errors.append(f"service_publication: expected object, got {type(raw_publication_value).__name__}")
+    default_publication = defaults.get("service_publication", {}) if isinstance(defaults.get("service_publication"), dict) else {}
+    normalized_publication: Dict[str, Dict[str, Any]] = {}
+    for service_name in SERVICE_TARGETS.keys():
+        raw_entry = raw_publication.get(service_name, default_publication.get(service_name, {}))
+        if raw_entry is None:
+            raw_entry = {}
+        if not isinstance(raw_entry, dict):
+            errors.append(f"service_publication.{service_name}: expected object, got {type(raw_entry).__name__}")
+            raw_entry = default_publication.get(service_name, {}) if isinstance(default_publication.get(service_name), dict) else {}
+        normalized_publication[service_name] = _json_clone(raw_entry) if isinstance(raw_entry, dict) else {}
+    for extra_key in raw_publication.keys():
+        if extra_key in normalized_publication:
+            continue
+        warnings.append(f"service_publication.{extra_key} ignored (unknown service)")
+        changed = True
+    normalized["service_publication"] = normalized_publication
+
+    raw_ticket_keys_value = raw.get("ticket_keys", defaults.get("ticket_keys", {}))
+    raw_ticket_keys = raw_ticket_keys_value if isinstance(raw_ticket_keys_value, dict) else {}
+    if "ticket_keys" in raw and not isinstance(raw_ticket_keys_value, dict):
+        errors.append(f"ticket_keys: expected object, got {type(raw_ticket_keys_value).__name__}")
+    default_ticket_keys = defaults.get("ticket_keys", {}) if isinstance(defaults.get("ticket_keys"), dict) else {}
+    normalized["ticket_keys"] = _normalize_ticket_key_map(raw_ticket_keys, fallback=default_ticket_keys)
+    if raw_ticket_keys and normalized["ticket_keys"] != raw_ticket_keys:
+        changed = True
+        warnings.append("ticket_keys normalized (empty kid/secret entries removed)")
+
+    raw_ticket_kids_value = raw.get("ticket_accepted_kids", defaults.get("ticket_accepted_kids", []))
+    if "ticket_accepted_kids" in raw and not isinstance(raw_ticket_kids_value, (list, str)):
+        errors.append(
+            "ticket_accepted_kids: expected list or comma-delimited string, "
+            f"got {type(raw_ticket_kids_value).__name__}"
+        )
+    default_ticket_kids = defaults.get("ticket_accepted_kids", []) if isinstance(defaults.get("ticket_accepted_kids"), list) else []
+    normalized_ticket_kids = _normalize_ticket_kid_list(raw_ticket_kids_value, fallback=default_ticket_kids)
+    normalized["ticket_accepted_kids"] = normalized_ticket_kids
+
     relays, assignments, nodes, relay_changed, relay_warnings, relay_errors = _normalize_service_relay_sections(raw, defaults)
     normalized["service_relays"] = relays
     normalized["service_assignments"] = assignments
@@ -2273,6 +2562,7 @@ def _default_config() -> dict:
     assignments = {}
     now = int(time.time())
     targets = dict(DEFAULT_TARGETS)
+    service_publication = _default_service_publication()
 
     for definition in ServiceWatchdog.DEFINITIONS:
         svc = definition.name
@@ -2345,6 +2635,47 @@ def _default_config() -> dict:
             "resolver_auto_apply": True,
             "cloudflared_manager": False,
         },
+        "marketplace": {
+            "enable_catalog": True,
+            "provider_id": "hydra-router",
+            "provider_label": "Hydra Router",
+            "provider_network": "hydra",
+            "provider_contact": "",
+            "default_currency": "USDC",
+            "default_unit": "request",
+            "default_price_per_unit": 0.0,
+            "include_unhealthy": True,
+            "catalog_ttl_seconds": 20,
+        },
+        "marketplace_sync": {
+            "enable_auto_publish": False,
+            "target_urls": "",
+            "auth_token": "",
+            "auth_token_env": "HYDRA_MARKETPLACE_SYNC_TOKEN",
+            "auth_header": "Authorization",
+            "auth_scheme": "Bearer",
+            "publish_interval_seconds": 45,
+            "publish_timeout_seconds": 6.0,
+            "max_backoff_seconds": 300,
+            "include_unhealthy": True,
+        },
+        "auth": {
+            "require_service_rpc_ticket": True,
+            "require_billing_preflight": True,
+            "require_quote_for_billable": True,
+            "require_charge_for_billable": True,
+            "allow_unauthenticated_resolve": True,
+            "clock_skew_seconds": 30,
+            "replay_cache_seconds": 900,
+            "ticket_ttl_seconds": 300,
+            "active_kid": DEFAULT_TICKET_KID,
+            "default_scope": "infer",
+        },
+        "ticket_keys": {
+            DEFAULT_TICKET_KID: DEFAULT_TICKET_SECRET,
+        },
+        "ticket_accepted_kids": [DEFAULT_TICKET_KID],
+        "service_publication": service_publication,
         "service_relays": service_relays,
         "nodes": nodes,
         "service_assignments": assignments,
@@ -6608,6 +6939,33 @@ class Router:
         self.nkn_settings: Dict[str, Any] = {}
         self.cloudflared_enabled = False
         self.cloudflared_cfg: Dict[str, Any] = {}
+        self.auth_cfg: Dict[str, Any] = {}
+        self.ticket_keys: Dict[str, str] = {}
+        self.ticket_accepted_kids: List[str] = []
+        self.ticket_replay_cache: Dict[str, float] = {}
+        self.ticket_replay_lock = threading.Lock()
+        self.marketplace_cfg: Dict[str, Any] = {}
+        self.marketplace_sync_cfg: Dict[str, Any] = {}
+        self.marketplace_sync_worker: Optional[threading.Thread] = None
+        self.marketplace_sync_state_lock = threading.Lock()
+        self.marketplace_sync_state: Dict[str, Any] = {
+            "in_flight": False,
+            "last_trigger": "",
+            "last_attempt_ts_ms": 0,
+            "last_success_ts_ms": 0,
+            "last_failure_ts_ms": 0,
+            "last_error": "",
+            "last_status_code": 0,
+            "last_result": {},
+            "results": deque(maxlen=24),
+            "target_urls": [],
+            "next_due_ts_ms": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "consecutive_failures": 0,
+        }
+        self.service_publication_cfg: Dict[str, Dict[str, Any]] = {}
+        self.catalog_runtime_overrides: Dict[str, Dict[str, Any]] = {}
         self.config_dirty = False
 
         self.use_ui = use_ui
@@ -6650,6 +7008,24 @@ class Router:
             "peer_usage": {},
             "endpoint_hits": {},
             "history": deque(maxlen=240),
+            "rpc_metering": {
+                "requests": 0,
+                "success": 0,
+                "failure": 0,
+                "estimated_units_total": 0.0,
+                "estimated_micros_total": 0,
+                "settled_micros_total": 0,
+                "by_service": {},
+                "events": deque(maxlen=300),
+            },
+            "rpc_enforcement": {
+                "checks": 0,
+                "allow": 0,
+                "deny": 0,
+                "denied_codes": {},
+                "by_service": {},
+                "last_event": {},
+            },
         }
         self.activity_log: Deque[dict] = deque(maxlen=240)
         self.api_server = None
@@ -6765,6 +7141,103 @@ class Router:
         next_api_enabled = bool(next_api_enabled and next_feature_flags["router_control_plane_api"])
         next_cloudflared_enabled = bool(next_cloudflared_enabled and next_feature_flags["cloudflared_manager"])
 
+        marketplace_cfg = dict(next_cfg.get("marketplace", {}))
+        next_marketplace_cfg = {
+            "enable_catalog": self._as_bool(marketplace_cfg.get("enable_catalog"), True),
+            "provider_id": str(marketplace_cfg.get("provider_id") or "hydra-router").strip() or "hydra-router",
+            "provider_label": str(marketplace_cfg.get("provider_label") or "Hydra Router").strip() or "Hydra Router",
+            "provider_network": str(marketplace_cfg.get("provider_network") or "hydra").strip().lower() or "hydra",
+            "provider_contact": str(marketplace_cfg.get("provider_contact") or "").strip(),
+            "default_currency": str(marketplace_cfg.get("default_currency") or "USDC").strip().upper() or "USDC",
+            "default_unit": str(marketplace_cfg.get("default_unit") or "request").strip().lower() or "request",
+            "default_price_per_unit": self._as_float(
+                marketplace_cfg.get("default_price_per_unit"),
+                0.0,
+                minimum=0.0,
+                maximum=1_000_000.0,
+            ),
+            "include_unhealthy": self._as_bool(marketplace_cfg.get("include_unhealthy"), True),
+            "catalog_ttl_seconds": self._as_int(marketplace_cfg.get("catalog_ttl_seconds"), 20, minimum=2, maximum=600),
+        }
+        next_cfg["marketplace"] = next_marketplace_cfg
+        marketplace_sync_cfg = dict(next_cfg.get("marketplace_sync", {}))
+        next_marketplace_sync_cfg = {
+            "enable_auto_publish": self._as_bool(marketplace_sync_cfg.get("enable_auto_publish"), False),
+            "target_urls": str(marketplace_sync_cfg.get("target_urls") or "").strip(),
+            "auth_token": str(marketplace_sync_cfg.get("auth_token") or "").strip(),
+            "auth_token_env": str(
+                marketplace_sync_cfg.get("auth_token_env") or "HYDRA_MARKETPLACE_SYNC_TOKEN"
+            ).strip() or "HYDRA_MARKETPLACE_SYNC_TOKEN",
+            "auth_header": str(marketplace_sync_cfg.get("auth_header") or "Authorization").strip() or "Authorization",
+            "auth_scheme": str(marketplace_sync_cfg.get("auth_scheme") or "Bearer").strip(),
+            "publish_interval_seconds": self._as_int(
+                marketplace_sync_cfg.get("publish_interval_seconds"),
+                45,
+                minimum=5,
+                maximum=3600,
+            ),
+            "publish_timeout_seconds": self._as_float(
+                marketplace_sync_cfg.get("publish_timeout_seconds"),
+                6.0,
+                minimum=1.0,
+                maximum=120.0,
+            ),
+            "max_backoff_seconds": self._as_int(
+                marketplace_sync_cfg.get("max_backoff_seconds"),
+                300,
+                minimum=5,
+                maximum=7200,
+            ),
+            "include_unhealthy": self._as_bool(marketplace_sync_cfg.get("include_unhealthy"), True),
+        }
+        if any(ch in next_marketplace_sync_cfg["auth_header"] for ch in ("\r", "\n", ":")):
+            next_marketplace_sync_cfg["auth_header"] = "Authorization"
+            changed = True
+        next_marketplace_sync_targets = _normalize_marketplace_sync_targets(next_marketplace_sync_cfg.get("target_urls"))
+        normalized_targets_csv = ",".join(next_marketplace_sync_targets)
+        if normalized_targets_csv != next_marketplace_sync_cfg["target_urls"]:
+            next_marketplace_sync_cfg["target_urls"] = normalized_targets_csv
+            changed = True
+        next_cfg["marketplace_sync"] = next_marketplace_sync_cfg
+        next_marketplace_sync_runtime = dict(next_marketplace_sync_cfg)
+        next_marketplace_sync_runtime["target_urls_list"] = list(next_marketplace_sync_targets)
+        service_publication_cfg = self._normalize_service_publication_map(
+            next_cfg.get("service_publication"),
+            marketplace_cfg=next_marketplace_cfg,
+        )
+        next_cfg["service_publication"] = service_publication_cfg
+
+        auth_cfg = dict(next_cfg.get("auth", {}))
+        next_auth_cfg = {
+            "require_service_rpc_ticket": self._as_bool(auth_cfg.get("require_service_rpc_ticket"), True),
+            "require_billing_preflight": self._as_bool(auth_cfg.get("require_billing_preflight"), True),
+            "require_quote_for_billable": self._as_bool(auth_cfg.get("require_quote_for_billable"), True),
+            "require_charge_for_billable": self._as_bool(auth_cfg.get("require_charge_for_billable"), True),
+            "allow_unauthenticated_resolve": self._as_bool(auth_cfg.get("allow_unauthenticated_resolve"), True),
+            "clock_skew_seconds": self._as_int(auth_cfg.get("clock_skew_seconds"), 30, minimum=0, maximum=300),
+            "replay_cache_seconds": self._as_int(auth_cfg.get("replay_cache_seconds"), 900, minimum=30, maximum=3600),
+            "ticket_ttl_seconds": self._as_int(auth_cfg.get("ticket_ttl_seconds"), 300, minimum=30, maximum=1800),
+            "active_kid": str(auth_cfg.get("active_kid") or DEFAULT_TICKET_KID).strip() or DEFAULT_TICKET_KID,
+            "default_scope": _normalize_scope(auth_cfg.get("default_scope"), default="infer"),
+        }
+        next_ticket_keys = _normalize_ticket_key_map(
+            next_cfg.get("ticket_keys"),
+            fallback=_normalize_ticket_key_map(self.ticket_keys or next_cfg.get("ticket_keys", {}), fallback={DEFAULT_TICKET_KID: DEFAULT_TICKET_SECRET}),
+        )
+        if next_auth_cfg["active_kid"] not in next_ticket_keys:
+            first_kid = next(iter(next_ticket_keys.keys()), DEFAULT_TICKET_KID)
+            next_auth_cfg["active_kid"] = first_kid
+        next_ticket_kids = _normalize_ticket_kid_list(
+            next_cfg.get("ticket_accepted_kids"),
+            fallback=[next_auth_cfg["active_kid"], *list(next_ticket_keys.keys())],
+        )
+        next_ticket_kids = [kid for kid in next_ticket_kids if kid in next_ticket_keys]
+        if next_auth_cfg["active_kid"] not in next_ticket_kids:
+            next_ticket_kids.insert(0, next_auth_cfg["active_kid"])
+        next_cfg["auth"] = next_auth_cfg
+        next_cfg["ticket_keys"] = dict(next_ticket_keys)
+        next_cfg["ticket_accepted_kids"] = list(next_ticket_kids)
+
         http_cfg = dict(next_cfg.get("http", {}))
         chunk_upload_b = self._as_int(http_cfg.get("chunk_upload_b"), 600 * 1024, minimum=4 * 1024)
         next_chunk_upload_kb = max(4, chunk_upload_b // 1024)
@@ -6779,6 +7252,21 @@ class Router:
         self.nkn_settings = next_nkn_settings
         self.cloudflared_enabled = next_cloudflared_enabled
         self.cloudflared_cfg = cloudflared_cfg
+        self.auth_cfg = next_auth_cfg
+        self.ticket_keys = dict(next_ticket_keys)
+        self.ticket_accepted_kids = list(next_ticket_kids)
+        self.marketplace_cfg = next_marketplace_cfg
+        self.marketplace_sync_cfg = next_marketplace_sync_runtime
+        self.service_publication_cfg = service_publication_cfg
+
+        if hasattr(self, "marketplace_sync_state_lock") and hasattr(self, "marketplace_sync_state"):
+            with self.marketplace_sync_state_lock:
+                self.marketplace_sync_state["target_urls"] = list(next_marketplace_sync_targets)
+                if self.marketplace_sync_cfg.get("enable_auto_publish") and next_marketplace_sync_targets:
+                    if int(self.marketplace_sync_state.get("next_due_ts_ms") or 0) <= 0:
+                        self.marketplace_sync_state["next_due_ts_ms"] = int(time.time() * 1000)
+                else:
+                    self.marketplace_sync_state["next_due_ts_ms"] = 0
 
         if getattr(self, "ui", None):
             self.ui.set_chunk_upload_kb(next_chunk_upload_kb)
@@ -6804,6 +7292,139 @@ class Router:
                 if str(alias or "").strip().lower() == text:
                     return svc_name
         return text
+
+    def _default_service_publication_entry(
+        self,
+        service_name: str,
+        marketplace_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        defaults = _default_service_publication().get(service_name, {})
+        if not isinstance(defaults, dict) or not defaults:
+            info = SERVICE_TARGETS.get(service_name) if isinstance(SERVICE_TARGETS.get(service_name), dict) else {}
+            target = str((info or {}).get("target") or service_name)
+            defaults = {
+                "enabled": True,
+                "visibility": "public",
+                "repository": "hydra",
+                "category": target or service_name,
+                "capacity_hint": 1,
+                "tags": [service_name],
+                "pricing": {
+                    "currency": "USDC",
+                    "unit": "request",
+                    "base_price": 0.0,
+                    "min_units": 1,
+                    "quote_public": True,
+                },
+            }
+        market = marketplace_cfg if isinstance(marketplace_cfg, dict) else (self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {})
+        pricing = defaults.get("pricing") if isinstance(defaults.get("pricing"), dict) else {}
+        currency = str(market.get("default_currency") or pricing.get("currency") or "USDC").strip().upper() or "USDC"
+        unit = str(market.get("default_unit") or pricing.get("unit") or "request").strip().lower() or "request"
+        try:
+            base_price = float(pricing.get("base_price") if pricing.get("base_price") is not None else market.get("default_price_per_unit") or 0.0)
+        except Exception:
+            base_price = 0.0
+        base_price = max(0.0, base_price)
+        tags = _normalize_marketplace_tags(defaults.get("tags"), fallback=[service_name])
+        return {
+            "enabled": bool(defaults.get("enabled", True)),
+            "visibility": _normalize_marketplace_visibility(defaults.get("visibility"), default="public"),
+            "repository": str(defaults.get("repository") or "hydra").strip() or "hydra",
+            "category": str(defaults.get("category") or service_name).strip() or service_name,
+            "capacity_hint": self._as_int(defaults.get("capacity_hint"), 1, minimum=0, maximum=100000),
+            "tags": tags,
+            "pricing": {
+                "currency": currency,
+                "unit": unit,
+                "base_price": round(base_price, 8),
+                "min_units": self._as_int(pricing.get("min_units"), 1, minimum=1, maximum=1000000),
+                "quote_public": self._as_bool(pricing.get("quote_public"), True),
+            },
+        }
+
+    def _normalize_service_publication_entry(
+        self,
+        service_name: str,
+        raw_entry: Any,
+        *,
+        marketplace_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        base = self._default_service_publication_entry(service_name, marketplace_cfg=marketplace_cfg)
+        if not isinstance(raw_entry, dict):
+            return base
+        out = dict(base)
+        out["enabled"] = self._as_bool(raw_entry.get("enabled"), base.get("enabled", True))
+        out["visibility"] = _normalize_marketplace_visibility(raw_entry.get("visibility"), default=str(base.get("visibility") or "public"))
+        out["repository"] = str(raw_entry.get("repository") or base.get("repository") or "hydra").strip() or "hydra"
+        out["category"] = str(raw_entry.get("category") or base.get("category") or service_name).strip() or service_name
+        out["capacity_hint"] = self._as_int(raw_entry.get("capacity_hint"), int(base.get("capacity_hint") or 1), minimum=0, maximum=100000)
+        out["tags"] = _normalize_marketplace_tags(raw_entry.get("tags"), fallback=base.get("tags") if isinstance(base.get("tags"), list) else [service_name])
+        market = marketplace_cfg if isinstance(marketplace_cfg, dict) else (self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {})
+        default_pricing = base.get("pricing") if isinstance(base.get("pricing"), dict) else {}
+        raw_pricing = raw_entry.get("pricing") if isinstance(raw_entry.get("pricing"), dict) else {}
+        out["pricing"] = {
+            "currency": str(raw_pricing.get("currency") or market.get("default_currency") or default_pricing.get("currency") or "USDC").strip().upper() or "USDC",
+            "unit": str(raw_pricing.get("unit") or market.get("default_unit") or default_pricing.get("unit") or "request").strip().lower() or "request",
+            "base_price": round(
+                self._as_float(
+                    raw_pricing.get("base_price"),
+                    float(default_pricing.get("base_price") or market.get("default_price_per_unit") or 0.0),
+                    minimum=0.0,
+                    maximum=1_000_000.0,
+                ),
+                8,
+            ),
+            "min_units": self._as_int(raw_pricing.get("min_units"), int(default_pricing.get("min_units") or 1), minimum=1, maximum=1_000_000),
+            "quote_public": self._as_bool(raw_pricing.get("quote_public"), self._as_bool(default_pricing.get("quote_public"), True)),
+        }
+        return out
+
+    def _normalize_service_publication_map(
+        self,
+        raw_section: Any,
+        *,
+        marketplace_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        raw_map = raw_section if isinstance(raw_section, dict) else {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for service_name in SERVICE_TARGETS.keys():
+            out[service_name] = self._normalize_service_publication_entry(
+                service_name,
+                raw_map.get(service_name, {}),
+                marketplace_cfg=marketplace_cfg,
+            )
+        return out
+
+    @staticmethod
+    def _deep_merge_obj(base: Any, overlay: Any) -> Any:
+        if not isinstance(base, dict) or not isinstance(overlay, dict):
+            return overlay
+        out = dict(base)
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(out.get(key), dict):
+                out[key] = Router._deep_merge_obj(out.get(key), value)
+            else:
+                out[key] = value
+        return out
+
+    def _effective_service_publication(self, service_name: str) -> Dict[str, Any]:
+        canonical = self._canonical_router_service(service_name) or service_name
+        base = self.service_publication_cfg.get(canonical) if isinstance(self.service_publication_cfg.get(canonical), dict) else {}
+        merged = dict(base) if isinstance(base, dict) else {}
+        override = self.catalog_runtime_overrides.get(canonical) if isinstance(self.catalog_runtime_overrides.get(canonical), dict) else {}
+        if override:
+            merged = self._deep_merge_obj(merged, override)
+        return self._normalize_service_publication_entry(canonical, merged, marketplace_cfg=self.marketplace_cfg)
+
+    def _router_provider_fingerprint(self, addresses: Optional[List[str]] = None) -> str:
+        raw_list = addresses if isinstance(addresses, list) else self._current_node_addresses()
+        values = [str(item or "").strip() for item in raw_list if str(item or "").strip()]
+        if not values:
+            provider_id = str((self.marketplace_cfg or {}).get("provider_id") or "hydra-router")
+            values = [provider_id]
+        digest = hashlib.sha256("|".join(sorted(values)).encode("utf-8", errors="replace")).hexdigest()
+        return digest[:16]
 
     def _router_network_urls(self) -> Dict[str, str]:
         host = self.api_host
@@ -6946,8 +7567,10 @@ class Router:
             "status": "error",
             "service": target_key,
             "watchdog_service": service_name,
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "transport": "local",
             "base_url": base_url,
             "http_endpoint": base_url,
@@ -7222,8 +7845,10 @@ class Router:
 
             resolved[service] = {
                 "service": service,
-                "interop_contract": dict(INTEROP_CONTRACT),
-                "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+                "interop_contract": self._interop_contract_payload(),
+                "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+                "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+                "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
                 "transport": selected_transport,
                 "selected_transport": selected_transport,
                 "selection_reason": selected_reason,
@@ -7297,8 +7922,10 @@ class Router:
             "resolved": resolved,
             "stale": False,
             "discovery_source": "local_snapshot",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
         }
 
     def get_service_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -7475,7 +8102,9 @@ class Router:
             "has_stale_rejections": False,
             "candidates": {},
             "candidate_coverage": {},
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
             "generated_at_ms": int(time.time() * 1000),
         }
         if not isinstance(resolved, dict):
@@ -7533,6 +8162,288 @@ class Router:
                 self.telemetry_state["resolve_success_out"] = int(self.telemetry_state.get("resolve_success_out", 0)) + 1
             else:
                 self.telemetry_state["resolve_fail_out"] = int(self.telemetry_state.get("resolve_fail_out", 0)) + 1
+
+    def _auth_capabilities_payload(self) -> Dict[str, Any]:
+        auth = self.auth_cfg if isinstance(self.auth_cfg, dict) else {}
+        keys = self.ticket_keys if isinstance(self.ticket_keys, dict) else {}
+        accepted = self.ticket_accepted_kids if isinstance(self.ticket_accepted_kids, list) else []
+        active_kid = str(auth.get("active_kid") or next(iter(keys.keys()), DEFAULT_TICKET_KID)).strip()
+        accepted_kids = [str(kid) for kid in accepted if str(kid or "").strip() in keys]
+        if active_kid and active_kid not in accepted_kids and active_kid in keys:
+            accepted_kids.insert(0, active_kid)
+        return {
+            "require_service_rpc_ticket": bool(auth.get("require_service_rpc_ticket", True)),
+            "require_billing_preflight": bool(auth.get("require_billing_preflight", True)),
+            "require_quote_for_billable": bool(auth.get("require_quote_for_billable", True)),
+            "require_charge_for_billable": bool(auth.get("require_charge_for_billable", True)),
+            "allow_unauthenticated_resolve": bool(auth.get("allow_unauthenticated_resolve", True)),
+            "algorithm": "HS256",
+            "active_kid": active_kid,
+            "accepted_kids": accepted_kids,
+            "ticket_ttl_seconds": int(auth.get("ticket_ttl_seconds") or 300),
+            "clock_skew_seconds": int(auth.get("clock_skew_seconds") or 30),
+            "replay_cache_seconds": int(auth.get("replay_cache_seconds") or 900),
+            "default_scope": _normalize_scope(auth.get("default_scope"), default="infer"),
+            "allowed_scopes": sorted(AUTH_ALLOWED_SCOPES),
+            "allowed_audience": sorted(AUTH_ALLOWED_AUDIENCE),
+            "error_codes": [
+                "ticket_missing",
+                "ticket_expired",
+                "ticket_not_yet_valid",
+                "signature_invalid",
+                "scope_denied",
+                "audience_denied",
+                "ticket_replay",
+                "quote_missing",
+                "credit_reservation_missing",
+                "insufficient_credit_reservation",
+            ],
+            "billable_preflight_fields": ["quote_id", "charge_id|max_charge_micros|settled_micros"],
+        }
+
+    @staticmethod
+    def _token_fingerprint(token: Any) -> str:
+        text = str(token or "").strip()
+        if not text:
+            return ""
+        digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+        return digest[:16]
+
+    @staticmethod
+    def _audience_rank(value: Any) -> int:
+        audience = _normalize_audience(value, default="public")
+        if audience == "private":
+            return 0
+        if audience == "friends":
+            return 1
+        return 2
+
+    def _sweep_ticket_replay_cache_locked(self, now: Optional[float] = None) -> None:
+        ts = float(now if now is not None else time.time())
+        stale_keys = [key for key, expires_at in self.ticket_replay_cache.items() if float(expires_at or 0.0) <= ts]
+        for key in stale_keys:
+            self.ticket_replay_cache.pop(key, None)
+        if len(self.ticket_replay_cache) > 20000:
+            ranked = sorted(self.ticket_replay_cache.items(), key=lambda kv: float(kv[1] or 0.0), reverse=True)
+            self.ticket_replay_cache = dict(ranked[:12000])
+
+    def _check_and_mark_ticket_replay(
+        self,
+        claims: Dict[str, Any],
+        source: str,
+        exp_ts: float,
+    ) -> Tuple[bool, str]:
+        jti = str(claims.get("jti") or "").strip()
+        nonce = str(claims.get("nonce") or "").strip()
+        if not jti and not nonce:
+            return True, ""
+        ttl = int(self.auth_cfg.get("replay_cache_seconds") or 900)
+        now = float(time.time())
+        expires_at = max(now + 30.0, min(exp_ts + float(self.auth_cfg.get("clock_skew_seconds") or 30), now + float(ttl)))
+        source_key = str(source or "").strip()
+        keys = []
+        if jti:
+            keys.append(f"jti:{jti}")
+        if nonce:
+            keys.append(f"nonce:{nonce}:{source_key}")
+        with self.ticket_replay_lock:
+            self._sweep_ticket_replay_cache_locked(now=now)
+            for replay_key in keys:
+                existing = float(self.ticket_replay_cache.get(replay_key) or 0.0)
+                if existing > now:
+                    return False, replay_key
+            for replay_key in keys:
+                self.ticket_replay_cache[replay_key] = expires_at
+        return True, ""
+
+    def _verify_access_ticket(
+        self,
+        token: str,
+        *,
+        required_scope: str,
+        required_audience: str,
+        source: str,
+        service: str,
+    ) -> Dict[str, Any]:
+        token_text = str(token or "").strip()
+        token_fp = self._token_fingerprint(token_text)
+        if not token_text:
+            return {"ok": False, "error_code": "ticket_missing", "error": "access ticket required", "ticket_fingerprint": token_fp}
+
+        parts = token_text.split(".")
+        if len(parts) != 3:
+            return {"ok": False, "error_code": "signature_invalid", "error": "malformed ticket", "ticket_fingerprint": token_fp}
+        header_b64, payload_b64, sig_b64 = parts
+
+        try:
+            header = json.loads(_base64url_decode(header_b64).decode("utf-8", errors="replace"))
+            claims = json.loads(_base64url_decode(payload_b64).decode("utf-8", errors="replace"))
+        except Exception:
+            return {"ok": False, "error_code": "signature_invalid", "error": "invalid ticket encoding", "ticket_fingerprint": token_fp}
+        if not isinstance(header, dict) or not isinstance(claims, dict):
+            return {"ok": False, "error_code": "signature_invalid", "error": "invalid ticket envelope", "ticket_fingerprint": token_fp}
+
+        kid_hint = str(header.get("kid") or claims.get("kid") or "").strip()
+        keys = self.ticket_keys if isinstance(self.ticket_keys, dict) else {}
+        accepted = [str(k) for k in (self.ticket_accepted_kids or []) if str(k or "").strip()]
+        if not accepted:
+            accepted = list(keys.keys())
+        candidate_kids: List[str] = []
+        if kid_hint:
+            candidate_kids = [kid_hint]
+        else:
+            candidate_kids = list(accepted)
+
+        signing_input = f"{header_b64}.{payload_b64}".encode("ascii", errors="ignore")
+        provided_sig = _base64url_decode(sig_b64)
+        verified_kid = ""
+        for kid in candidate_kids:
+            if kid not in keys:
+                continue
+            if kid not in accepted:
+                continue
+            secret = str(keys.get(kid) or "")
+            if not secret:
+                continue
+            expected_sig = hmac.new(secret.encode("utf-8", errors="replace"), signing_input, hashlib.sha256).digest()
+            if hmac.compare_digest(provided_sig, expected_sig):
+                verified_kid = kid
+                break
+        if not verified_kid:
+            return {
+                "ok": False,
+                "error_code": "signature_invalid",
+                "error": "ticket signature validation failed",
+                "ticket_fingerprint": token_fp,
+                "kid": kid_hint,
+            }
+
+        now = int(time.time())
+        skew = int(self.auth_cfg.get("clock_skew_seconds") or 30)
+        exp = int(claims.get("exp") or 0)
+        iat = int(claims.get("iat") or 0)
+        nbf = int(claims.get("nbf") or iat or 0)
+        if exp <= 0 or (now - skew) >= exp:
+            return {"ok": False, "error_code": "ticket_expired", "error": "ticket expired", "ticket_fingerprint": token_fp, "kid": verified_kid}
+        if nbf and (now + skew) < nbf:
+            return {
+                "ok": False,
+                "error_code": "ticket_not_yet_valid",
+                "error": "ticket not yet valid",
+                "ticket_fingerprint": token_fp,
+                "kid": verified_kid,
+            }
+
+        typ = str(claims.get("typ") or "").strip().lower()
+        if typ and typ not in {"hydra_access_ticket", "hydra_access", "p2p", "p2p_ticket"}:
+            return {"ok": False, "error_code": "signature_invalid", "error": "invalid ticket type", "ticket_fingerprint": token_fp, "kid": verified_kid}
+
+        normalized_service = self._canonical_router_service(service or "")
+        service_claim = str(
+            claims.get("service_id")
+            or claims.get("serviceId")
+            or claims.get("service")
+            or ""
+        ).strip().lower()
+        if service_claim and service_claim not in {"*", normalized_service}:
+            return {"ok": False, "error_code": "scope_denied", "error": "service denied by ticket", "ticket_fingerprint": token_fp, "kid": verified_kid}
+
+        req_scope = _normalize_scope(required_scope or self.auth_cfg.get("default_scope"), default="infer")
+        scopes = set()
+        claim_scope = _normalize_scope(claims.get("scope"), default="")
+        if claim_scope:
+            scopes.add(claim_scope)
+        raw_scopes = claims.get("scopes")
+        if isinstance(raw_scopes, list):
+            for raw_scope in raw_scopes:
+                normalized = _normalize_scope(raw_scope, default="")
+                if normalized:
+                    scopes.add(normalized)
+        if req_scope and req_scope not in scopes:
+            return {"ok": False, "error_code": "scope_denied", "error": "scope denied", "ticket_fingerprint": token_fp, "kid": verified_kid}
+
+        ticket_audience = _normalize_audience(claims.get("audience"), default="public")
+        req_audience = _normalize_audience(required_audience, default="public")
+        if self._audience_rank(req_audience) > self._audience_rank(ticket_audience):
+            return {"ok": False, "error_code": "audience_denied", "error": "audience denied", "ticket_fingerprint": token_fp, "kid": verified_kid}
+
+        consumer_nkn = str(
+            claims.get("consumer_nkn")
+            or claims.get("consumerNkn")
+            or claims.get("source_nkn")
+            or claims.get("sourceNkn")
+            or ""
+        ).strip()
+        if consumer_nkn and ticket_audience == "private" and str(source or "").strip() and consumer_nkn != str(source or "").strip():
+            return {
+                "ok": False,
+                "error_code": "audience_denied",
+                "error": "private ticket source mismatch",
+                "ticket_fingerprint": token_fp,
+                "kid": verified_kid,
+            }
+
+        replay_ok, replay_key = self._check_and_mark_ticket_replay(claims, source=source, exp_ts=float(exp))
+        if not replay_ok:
+            return {
+                "ok": False,
+                "error_code": "ticket_replay",
+                "error": "ticket replay detected",
+                "ticket_fingerprint": token_fp,
+                "kid": verified_kid,
+                "replay_key": replay_key,
+            }
+
+        return {
+            "ok": True,
+            "claims": claims,
+            "kid": verified_kid,
+            "scope": req_scope,
+            "audience": ticket_audience,
+            "ticket_fingerprint": token_fp,
+        }
+
+    def _authorize_service_rpc(self, source: str, body: Dict[str, Any], service: str) -> Dict[str, Any]:
+        payload = body if isinstance(body, dict) else {}
+        auth_block = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+        ticket = str(
+            payload.get("access_ticket")
+            or payload.get("ticket")
+            or auth_block.get("ticket")
+            or auth_block.get("access_ticket")
+            or ""
+        ).strip()
+        required_scope = _normalize_scope(
+            payload.get("scope")
+            or auth_block.get("scope")
+            or self.auth_cfg.get("default_scope")
+            or "infer",
+            default="infer",
+        )
+        required_audience = _normalize_audience(
+            payload.get("audience")
+            or auth_block.get("audience")
+            or "public",
+            default="public",
+        )
+        require_ticket = bool(self.auth_cfg.get("require_service_rpc_ticket", True))
+        if not require_ticket and not ticket:
+            return {
+                "ok": True,
+                "claims": {},
+                "kid": "",
+                "scope": required_scope,
+                "audience": required_audience,
+                "ticket_fingerprint": "",
+                "unauthenticated": True,
+            }
+        return self._verify_access_ticket(
+            ticket,
+            required_scope=required_scope,
+            required_audience=required_audience,
+            source=source,
+            service=service,
+        )
 
     def _pick_send_node(self) -> Optional[RelayNode]:
         for node in self.nodes:
@@ -7594,16 +8505,52 @@ class Router:
     def _handle_resolve_tunnels_request(self, source: str, body: dict, node: RelayNode) -> None:
         self._record_inbound_nkn(source, body)
         request_id = str(body.get("request_id") or "")
+        if not self._as_bool((self.auth_cfg or {}).get("allow_unauthenticated_resolve"), True):
+            token = str(
+                body.get("access_ticket")
+                or body.get("ticket")
+                or ((body.get("auth") or {}).get("ticket") if isinstance(body.get("auth"), dict) else "")
+                or ""
+            ).strip()
+            authz = self._verify_access_ticket(
+                token,
+                required_scope=_normalize_scope((self.auth_cfg or {}).get("default_scope"), default="infer"),
+                required_audience="public",
+                source=source,
+                service="*",
+            )
+            if not authz.get("ok"):
+                reply = {
+                    "event": "resolve_tunnels_result",
+                    "interop_contract": self._interop_contract_payload(),
+                    "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+                    "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+                    "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+                    "auth_capabilities": self._auth_capabilities_payload(),
+                    "request_id": request_id,
+                    "source_address": node.current_address or "",
+                    "timestamp_ms": int(time.time() * 1000),
+                    "status": "error",
+                    "error": str(authz.get("error") or "resolve authorization denied"),
+                    "error_code": str(authz.get("error_code") or "signature_invalid"),
+                }
+                node.bridge.dm(source, reply, DM_OPTS_SINGLE)
+                self._record_outbound_nkn(source, reply)
+                return
         with self.telemetry_lock:
             self.telemetry_state["resolve_requests_in"] = int(self.telemetry_state.get("resolve_requests_in", 0)) + 1
         snapshot = self.get_service_snapshot(force_refresh=True)
         public_snapshot = self._redact_public_payload(snapshot)
         resolved_payload = public_snapshot.get("resolved", {}) if isinstance(public_snapshot, dict) else {}
         resolve_summary = self._resolved_discovery_summary(resolved_payload if isinstance(resolved_payload, dict) else {})
+        catalog_payload = self._marketplace_catalog_payload(public_snapshot if isinstance(public_snapshot, dict) else {})
         reply = {
             "event": "resolve_tunnels_result",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "request_id": request_id,
             "source_address": node.current_address or "",
             "timestamp_ms": int(time.time() * 1000),
@@ -7611,6 +8558,7 @@ class Router:
             "snapshot": public_snapshot,
             "resolved": resolved_payload if isinstance(resolved_payload, dict) else {},
             "resolve_summary": resolve_summary,
+            "catalog": catalog_payload,
         }
         node.bridge.dm(source, reply, DM_OPTS_SINGLE)
         self._record_outbound_nkn(source, reply)
@@ -7624,12 +8572,421 @@ class Router:
         request_id = str(body.get("request_id") or "")
         if not request_id:
             return
+        contract_status = self._interop_contract_status_from_payload(body)
         with self.pending_resolves_lock:
             pending = self.pending_resolves.get(request_id)
             if not pending:
                 return
-            pending["response"] = {"source": source, "payload": body}
+            payload = body if isinstance(body, dict) else {}
+            if not contract_status.get("ok"):
+                expected = contract_status.get("expected", {})
+                incoming = contract_status.get("incoming", {})
+                mismatch = (
+                    "interop contract mismatch: "
+                    f"expected {expected.get('name', '?')}@{expected.get('version', '?')} "
+                    f"(compat>={expected.get('compat_min_version', '?')}) "
+                    f"got {incoming.get('name', '?')}@{incoming.get('version', '?')} "
+                    f"(compat>={incoming.get('compat_min_version', '?')})"
+                )
+                payload = dict(payload)
+                payload["status"] = payload.get("status") or "error"
+                payload["error"] = payload.get("error") or mismatch
+                payload["error_code"] = payload.get("error_code") or "UNSUPPORTED_CONTRACT_VERSION"
+                payload["contract_ok"] = False
+                payload["expected_contract"] = expected
+                payload["incoming_contract"] = incoming
+            pending["response"] = {"source": source, "payload": payload}
             pending["event"].set()
+
+    def _normalize_rpc_metering(self, body: Dict[str, Any], service: str) -> Dict[str, Any]:
+        payload = body if isinstance(body, dict) else {}
+        raw_metering = payload.get("metering") if isinstance(payload.get("metering"), dict) else {}
+        request_b = int(self._payload_size_bytes(payload.get("json"))) if payload.get("json") is not None else 0
+        if payload.get("body_b64") is not None:
+            try:
+                request_b = max(request_b, len(base64.b64decode(str(payload.get("body_b64")), validate=False)))
+            except Exception:
+                request_b = max(request_b, 0)
+        unit = str(
+            raw_metering.get("billable_unit")
+            or raw_metering.get("unit")
+            or raw_metering.get("usage_unit")
+            or ""
+        ).strip().lower()
+        if not unit:
+            svc = str(service or "").strip().lower()
+            if svc in {"whisper_asr", "asr"}:
+                unit = "audio_second"
+            elif svc in {"piper_tts", "tts"}:
+                unit = "text_char"
+            elif svc in {"llm", "ollama_llm"}:
+                unit = "token"
+            elif svc in {"depth_any", "pointcloud"}:
+                unit = "image"
+            else:
+                unit = "request"
+
+        requested_units = self._as_float(
+            raw_metering.get("requested_units"),
+            self._as_float(payload.get("requested_units"), 1.0, minimum=0.000001),
+            minimum=0.000001,
+        )
+        min_units = self._as_float(raw_metering.get("min_units"), 1.0, minimum=0.000001)
+        price_per_unit_micros = self._as_int(
+            raw_metering.get("price_per_unit_micros"),
+            self._as_int(payload.get("price_per_unit_micros"), 0, minimum=0),
+            minimum=0,
+        )
+        max_charge_micros = self._as_int(
+            raw_metering.get("max_charge_micros"),
+            self._as_int(payload.get("max_charge_micros"), 0, minimum=0),
+            minimum=0,
+        )
+        settled_micros = self._as_int(
+            raw_metering.get("settled_micros"),
+            self._as_int(payload.get("settled_micros"), 0, minimum=0),
+            minimum=0,
+        )
+        correlation_id = str(
+            raw_metering.get("correlation_id")
+            or payload.get("correlation_id")
+            or payload.get("request_id")
+            or ""
+        ).strip()
+        quote_id = str(
+            raw_metering.get("quote_id")
+            or payload.get("quote_id")
+            or ""
+        ).strip()
+        charge_id = str(
+            raw_metering.get("charge_id")
+            or payload.get("charge_id")
+            or ""
+        ).strip()
+        usage_label = str(
+            raw_metering.get("usage_label")
+            or payload.get("usage_label")
+            or ""
+        ).strip().lower()
+        transport_tag = str(
+            raw_metering.get("transport_tag")
+            or payload.get("transport_tag")
+            or ""
+        ).strip().lower()
+        reservation_id = str(
+            raw_metering.get("reservation_id")
+            or raw_metering.get("credit_reservation_id")
+            or payload.get("reservation_id")
+            or payload.get("credit_reservation_id")
+            or ""
+        ).strip()
+        return {
+            "unit": unit,
+            "requested_units": requested_units,
+            "min_units": min_units,
+            "price_per_unit_micros": price_per_unit_micros,
+            "max_charge_micros": max_charge_micros,
+            "settled_micros": settled_micros,
+            "quote_id": quote_id,
+            "charge_id": charge_id,
+            "correlation_id": correlation_id,
+            "usage_label": usage_label,
+            "transport_tag": transport_tag,
+            "reservation_id": reservation_id,
+            "request_bytes": max(0, request_b),
+            "extra": _json_clone(raw_metering) if isinstance(raw_metering, dict) else {},
+        }
+
+    def _evaluate_rpc_execution_gate(
+        self,
+        source: str,
+        service: str,
+        metering: Dict[str, Any],
+        authz: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        canonical_service = self._canonical_router_service(service) or str(service or "").strip().lower()
+        publication = self._effective_service_publication(canonical_service) if canonical_service else {}
+        pricing = publication.get("pricing") if isinstance(publication.get("pricing"), dict) else {}
+        configured_unit = str(pricing.get("unit") or metering.get("unit") or "request").strip().lower() or "request"
+        configured_price = self._as_float(pricing.get("base_price"), 0.0, minimum=0.0)
+        configured_price_micros = int(max(0, round(float(configured_price) * 1_000_000.0)))
+        requested_units = float(self._as_float(metering.get("requested_units"), 1.0, minimum=0.000001))
+        min_units = float(self._as_float(metering.get("min_units"), 1.0, minimum=0.000001))
+        requested_units = max(requested_units, min_units)
+        requested_price_micros = int(self._as_int(metering.get("price_per_unit_micros"), 0, minimum=0))
+        effective_price_micros = requested_price_micros if requested_price_micros > 0 else configured_price_micros
+        max_charge_micros = int(self._as_int(metering.get("max_charge_micros"), 0, minimum=0))
+        settled_micros = int(self._as_int(metering.get("settled_micros"), 0, minimum=0))
+        quote_id = str(metering.get("quote_id") or "").strip()
+        charge_id = str(metering.get("charge_id") or "").strip()
+        reservation_id = str(metering.get("reservation_id") or "").strip()
+        reservation_micros = settled_micros if settled_micros > 0 else max_charge_micros
+        estimated_preflight_micros = int(max(0, round(float(requested_units) * float(effective_price_micros))))
+        enforce_preflight = bool(self.auth_cfg.get("require_billing_preflight", True))
+        billable = (
+            effective_price_micros > 0
+            or max_charge_micros > 0
+            or settled_micros > 0
+            or bool(quote_id)
+            or bool(charge_id)
+            or bool(reservation_id)
+        )
+
+        result: Dict[str, Any] = {
+            "ok": True,
+            "service": canonical_service,
+            "billable": bool(billable),
+            "enforced": bool(enforce_preflight and billable),
+            "requirements": {
+                "ticket": bool(authz.get("ok")),
+                "quote": bool(quote_id),
+                "charge": bool(charge_id or reservation_id or reservation_micros > 0),
+            },
+            "pricing": {
+                "unit": configured_unit,
+                "requested_units": float(requested_units),
+                "configured_price_per_unit_micros": int(configured_price_micros),
+                "effective_price_per_unit_micros": int(effective_price_micros),
+                "estimated_preflight_micros": int(estimated_preflight_micros),
+                "max_charge_micros": int(max_charge_micros),
+                "settled_micros": int(settled_micros),
+            },
+            "correlation_id": str(metering.get("correlation_id") or ""),
+            "quote_id": quote_id,
+            "charge_id": charge_id,
+            "reservation_id": reservation_id,
+            "error_code": "",
+            "error": "",
+        }
+
+        if enforce_preflight and billable:
+            require_quote = bool(self.auth_cfg.get("require_quote_for_billable", True))
+            require_charge = bool(self.auth_cfg.get("require_charge_for_billable", True))
+            ticket_ok = bool(authz.get("ok"))
+            ticket_fingerprint = str(authz.get("ticket_fingerprint") or "")
+            if not ticket_ok or not ticket_fingerprint:
+                result["ok"] = False
+                result["error_code"] = str(authz.get("error_code") or "ticket_missing")
+                result["error"] = str(authz.get("error") or "billable rpc requires a valid access ticket")
+            elif require_quote and not quote_id:
+                result["ok"] = False
+                result["error_code"] = "quote_missing"
+                result["error"] = "billable rpc requires quote_id preflight"
+            elif require_charge and not (charge_id or reservation_id or reservation_micros > 0):
+                result["ok"] = False
+                result["error_code"] = "credit_reservation_missing"
+                result["error"] = "billable rpc requires a credit reservation"
+            elif require_charge and reservation_micros > 0 and estimated_preflight_micros > reservation_micros:
+                result["ok"] = False
+                result["error_code"] = "insufficient_credit_reservation"
+                result["error"] = (
+                    f"estimated charge {estimated_preflight_micros} exceeds reservation {reservation_micros}"
+                )
+
+        with self.telemetry_lock:
+            rpc_enforcement = self.telemetry_state.setdefault("rpc_enforcement", {})
+            rpc_enforcement["checks"] = int(rpc_enforcement.get("checks", 0)) + 1
+            if result.get("ok"):
+                rpc_enforcement["allow"] = int(rpc_enforcement.get("allow", 0)) + 1
+            else:
+                rpc_enforcement["deny"] = int(rpc_enforcement.get("deny", 0)) + 1
+                denied_codes_global = rpc_enforcement.setdefault("denied_codes", {})
+                code_key = str(result.get("error_code") or "denied")
+                denied_codes_global[code_key] = int(denied_codes_global.get(code_key, 0)) + 1
+
+            by_service = rpc_enforcement.setdefault("by_service", {})
+            service_key = canonical_service or "(unknown)"
+            service_bucket = by_service.setdefault(
+                service_key,
+                {"checks": 0, "allow": 0, "deny": 0, "denied_codes": {}},
+            )
+            service_bucket["checks"] = int(service_bucket.get("checks", 0)) + 1
+            if result.get("ok"):
+                service_bucket["allow"] = int(service_bucket.get("allow", 0)) + 1
+            else:
+                service_bucket["deny"] = int(service_bucket.get("deny", 0)) + 1
+                denied_codes = service_bucket.setdefault("denied_codes", {})
+                code_key = str(result.get("error_code") or "denied")
+                denied_codes[code_key] = int(denied_codes.get(code_key, 0)) + 1
+            rpc_enforcement["last_event"] = {
+                "ts_ms": int(time.time() * 1000),
+                "source": str(source or ""),
+                "service": service_key,
+                "ok": bool(result.get("ok")),
+                "billable": bool(result.get("billable")),
+                "error_code": str(result.get("error_code") or ""),
+                "correlation_id": str(result.get("correlation_id") or ""),
+                "quote_id": str(result.get("quote_id") or ""),
+                "charge_id": str(result.get("charge_id") or ""),
+            }
+
+        if not result.get("ok"):
+            self._append_activity_log(
+                "service_rpc_preflight_denied",
+                source=source,
+                service=canonical_service,
+                error_code=result.get("error_code"),
+                error=result.get("error"),
+                billable=billable,
+                quote_id=quote_id,
+                charge_id=charge_id,
+                correlation_id=result.get("correlation_id"),
+            )
+
+        return result
+
+    def _estimate_rpc_units(
+        self,
+        req: Dict[str, Any],
+        result: Dict[str, Any],
+        metering: Dict[str, Any],
+        duration_ms: float,
+    ) -> float:
+        unit = str(metering.get("unit") or "request").strip().lower()
+        requested_units = float(self._as_float(metering.get("requested_units"), 1.0, minimum=0.000001))
+        min_units = float(self._as_float(metering.get("min_units"), 1.0, minimum=0.000001))
+        safe_requested = max(min_units, requested_units)
+        if unit in {"request", "operation", "ops"}:
+            return max(min_units, 1.0)
+        if unit in {"audio_second", "seconds", "sec"}:
+            src = None
+            if isinstance(req.get("json"), dict):
+                src = req.get("json")
+            if isinstance(result.get("json"), dict):
+                src = result.get("json")
+            seconds = self._as_float((src or {}).get("duration_seconds") if isinstance(src, dict) else None, 0.0, minimum=0.0)
+            if seconds > 0.0:
+                return max(min_units, float(seconds))
+            return max(min_units, safe_requested)
+        if unit in {"text_char", "char", "chars"}:
+            text_len = 0
+            if isinstance(req.get("json"), dict):
+                payload = req.get("json") or {}
+                text_candidate = str(payload.get("text") or payload.get("prompt") or "")
+                text_len = len(text_candidate)
+            if text_len > 0:
+                return max(min_units, float(text_len))
+            return max(min_units, safe_requested)
+        if unit in {"token", "tokens"}:
+            usage = result.get("json") if isinstance(result.get("json"), dict) else {}
+            usage_meta = usage.get("usage") if isinstance(usage, dict) and isinstance(usage.get("usage"), dict) else {}
+            total_tokens = self._as_int(
+                usage_meta.get("total_tokens"),
+                self._as_int(usage.get("total_tokens") if isinstance(usage, dict) else None, 0, minimum=0),
+                minimum=0,
+            )
+            if total_tokens > 0:
+                return max(min_units, float(total_tokens))
+            return max(min_units, safe_requested)
+        if unit in {"mb", "megabyte", "megabytes"}:
+            body_b64 = result.get("body_b64")
+            response_b = 0
+            if body_b64:
+                try:
+                    response_b = len(base64.b64decode(str(body_b64), validate=False))
+                except Exception:
+                    response_b = 0
+            if response_b <= 0:
+                response_b = int(self._payload_size_bytes(result.get("json")))
+            if response_b > 0:
+                return max(min_units, float(response_b) / float(1024 * 1024))
+            return max(min_units, safe_requested)
+        if unit in {"frame", "frames"}:
+            frames = self._as_int(metering.get("frames"), 0, minimum=0)
+            if frames > 0:
+                return max(min_units, float(frames))
+            return max(min_units, safe_requested)
+        if unit in {"duration_ms"}:
+            if duration_ms > 0:
+                return max(min_units, float(duration_ms))
+            return max(min_units, safe_requested)
+        return max(min_units, safe_requested)
+
+    def _record_rpc_metering(
+        self,
+        source: str,
+        req: Dict[str, Any],
+        result: Dict[str, Any],
+        metering: Dict[str, Any],
+        duration_ms: float,
+    ) -> Dict[str, Any]:
+        service = str(req.get("service") or "").strip()
+        ok = bool(result.get("ok"))
+        units = self._estimate_rpc_units(req, result, metering, duration_ms)
+        price_per_unit_micros = int(self._as_int(metering.get("price_per_unit_micros"), 0, minimum=0))
+        estimated_micros = int(max(0, round(units * float(price_per_unit_micros))))
+        max_charge_micros = int(self._as_int(metering.get("max_charge_micros"), 0, minimum=0))
+        if max_charge_micros > 0:
+            estimated_micros = min(estimated_micros, max_charge_micros)
+        settled_micros = int(self._as_int(metering.get("settled_micros"), 0, minimum=0))
+        if settled_micros > 0 and max_charge_micros > 0:
+            settled_micros = min(settled_micros, max_charge_micros)
+        if settled_micros < 0:
+            settled_micros = 0
+
+        event_payload = {
+            "ts_ms": int(time.time() * 1000),
+            "source": str(source or ""),
+            "service": service,
+            "path": str(req.get("path") or ""),
+            "method": str(req.get("method") or "").upper(),
+            "ok": ok,
+            "status": int(result.get("status") or 0),
+            "duration_ms": int(max(0.0, duration_ms)),
+            "unit": str(metering.get("unit") or "request"),
+            "requested_units": float(self._as_float(metering.get("requested_units"), 1.0, minimum=0.000001)),
+            "estimated_units": float(units),
+            "price_per_unit_micros": int(price_per_unit_micros),
+            "estimated_micros": int(estimated_micros),
+            "settled_micros": int(settled_micros),
+            "quote_id": str(metering.get("quote_id") or ""),
+            "charge_id": str(metering.get("charge_id") or ""),
+            "reservation_id": str(metering.get("reservation_id") or ""),
+            "correlation_id": str(metering.get("correlation_id") or ""),
+            "usage_label": str(metering.get("usage_label") or ""),
+            "transport_tag": str(metering.get("transport_tag") or ""),
+        }
+        with self.telemetry_lock:
+            rpc_metering = self.telemetry_state.setdefault("rpc_metering", {})
+            rpc_metering["requests"] = int(rpc_metering.get("requests", 0)) + 1
+            if ok:
+                rpc_metering["success"] = int(rpc_metering.get("success", 0)) + 1
+            else:
+                rpc_metering["failure"] = int(rpc_metering.get("failure", 0)) + 1
+            rpc_metering["estimated_units_total"] = float(rpc_metering.get("estimated_units_total", 0.0)) + float(units)
+            rpc_metering["estimated_micros_total"] = int(rpc_metering.get("estimated_micros_total", 0)) + int(estimated_micros)
+            rpc_metering["settled_micros_total"] = int(rpc_metering.get("settled_micros_total", 0)) + int(settled_micros)
+            by_service = rpc_metering.setdefault("by_service", {})
+            svc_entry = by_service.setdefault(
+                service or "(unknown)",
+                {
+                    "requests": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "estimated_units_total": 0.0,
+                    "estimated_micros_total": 0,
+                    "settled_micros_total": 0,
+                    "last_ts_ms": 0,
+                },
+            )
+            svc_entry["requests"] = int(svc_entry.get("requests", 0)) + 1
+            if ok:
+                svc_entry["success"] = int(svc_entry.get("success", 0)) + 1
+            else:
+                svc_entry["failure"] = int(svc_entry.get("failure", 0)) + 1
+            svc_entry["estimated_units_total"] = float(svc_entry.get("estimated_units_total", 0.0)) + float(units)
+            svc_entry["estimated_micros_total"] = int(svc_entry.get("estimated_micros_total", 0)) + int(estimated_micros)
+            svc_entry["settled_micros_total"] = int(svc_entry.get("settled_micros_total", 0)) + int(settled_micros)
+            svc_entry["last_ts_ms"] = int(event_payload["ts_ms"])
+            svc_entry["last_event"] = dict(event_payload)
+
+            events = rpc_metering.get("events")
+            if not isinstance(events, deque):
+                events = deque(maxlen=300)
+                rpc_metering["events"] = events
+            events.append(dict(event_payload))
+
+        return event_payload
 
     def _build_service_rpc_request(self, body: dict) -> dict:
         service = self._canonical_router_service(body.get("service"))
@@ -7697,6 +9054,11 @@ class Router:
             if len(raw) > max_request_b:
                 raise ValueError(f"rpc body payload too large ({len(raw)} > {max_request_b})")
             req["body_b64"] = body.get("body_b64")
+        metering = self._normalize_rpc_metering(body if isinstance(body, dict) else {}, service)
+        req["metering"] = metering
+        req["correlation_id"] = str(metering.get("correlation_id") or "")
+        req["quote_id"] = str(metering.get("quote_id") or "")
+        req["charge_id"] = str(metering.get("charge_id") or "")
         return req
 
     def _execute_service_rpc(self, req: dict) -> dict:
@@ -7757,14 +9119,90 @@ class Router:
         with self.telemetry_lock:
             self.telemetry_state["rpc_requests_in"] = int(self.telemetry_state.get("rpc_requests_in", 0)) + 1
         request_id = str(body.get("request_id") or "")
+        service_hint = self._canonical_router_service((body or {}).get("service")) if isinstance(body, dict) else ""
+        authz = self._authorize_service_rpc(source, body if isinstance(body, dict) else {}, service_hint)
+        rpc_start_ts = time.time()
+        metering_event: Dict[str, Any] = {}
+        enforcement: Dict[str, Any] = {}
         try:
-            req = self._build_service_rpc_request(body)
-            result = self._execute_service_rpc(req)
+            if not authz.get("ok"):
+                denied_metering = self._normalize_rpc_metering(body if isinstance(body, dict) else {}, service_hint or "")
+                req = {
+                    "service": service_hint,
+                    "path": str((body or {}).get("path") or "/"),
+                    "method": str((body or {}).get("method") or "GET").upper(),
+                    "metering": denied_metering,
+                }
+                enforcement = self._evaluate_rpc_execution_gate(source, service_hint or "", denied_metering, authz)
+                denial_code = str(authz.get("error_code") or "signature_invalid")
+                denial_error = str(authz.get("error") or "access denied")
+                denial_status = 403
+                if enforcement.get("billable") and not enforcement.get("ok"):
+                    denial_code = str(enforcement.get("error_code") or denial_code)
+                    denial_error = str(enforcement.get("error") or denial_error)
+                    if denial_code in {"quote_missing", "credit_reservation_missing", "insufficient_credit_reservation"}:
+                        denial_status = 402
+                result = {
+                    "ok": False,
+                    "status": denial_status,
+                    "headers": {},
+                    "json": None,
+                    "body_b64": None,
+                    "error": denial_error,
+                    "error_code": denial_code,
+                    "auth": {
+                        "authorized": False,
+                        "kid": str(authz.get("kid") or ""),
+                        "scope": str(authz.get("scope") or ""),
+                        "audience": str(authz.get("audience") or ""),
+                        "ticket_fingerprint": str(authz.get("ticket_fingerprint") or ""),
+                    },
+                }
+            else:
+                req = self._build_service_rpc_request(body)
+                req_metering = req.get("metering") if isinstance(req.get("metering"), dict) else {}
+                enforcement = self._evaluate_rpc_execution_gate(
+                    source,
+                    str(req.get("service") or service_hint or ""),
+                    req_metering,
+                    authz,
+                )
+                if not enforcement.get("ok"):
+                    denial_code = str(enforcement.get("error_code") or "signature_invalid")
+                    denial_status = 402 if denial_code in {"quote_missing", "credit_reservation_missing", "insufficient_credit_reservation"} else 403
+                    result = {
+                        "ok": False,
+                        "status": denial_status,
+                        "headers": {},
+                        "json": None,
+                        "body_b64": None,
+                        "error": str(enforcement.get("error") or "rpc preflight denied"),
+                        "error_code": denial_code,
+                    }
+                else:
+                    result = self._execute_service_rpc(req)
+                result["auth"] = {
+                    "authorized": bool(enforcement.get("ok", True)),
+                    "kid": str(authz.get("kid") or ""),
+                    "scope": str(authz.get("scope") or ""),
+                    "audience": str(authz.get("audience") or ""),
+                    "ticket_fingerprint": str(authz.get("ticket_fingerprint") or ""),
+                    "unauthenticated": bool(authz.get("unauthenticated")),
+                }
         except Exception as exc:
+            rejected_metering = self._normalize_rpc_metering(body if isinstance(body, dict) else {}, service_hint or "")
             req = {
                 "service": self._canonical_router_service(body.get("service")),
                 "path": str(body.get("path") or "/"),
+                "method": str(body.get("method") or "GET").upper(),
+                "metering": rejected_metering,
             }
+            enforcement = self._evaluate_rpc_execution_gate(
+                source,
+                str(req.get("service") or service_hint or ""),
+                rejected_metering,
+                authz,
+            )
             result = {
                 "ok": False,
                 "status": 400,
@@ -7772,14 +9210,54 @@ class Router:
                 "json": None,
                 "body_b64": None,
                 "error": f"{type(exc).__name__}: {exc}",
+                "error_code": "invalid_request",
+            }
+        duration_ms = float(max(0.0, (time.time() - rpc_start_ts) * 1000.0))
+        metering_payload = req.get("metering") if isinstance(req.get("metering"), dict) else self._normalize_rpc_metering(body if isinstance(body, dict) else {}, service_hint or "")
+        metering_event = self._record_rpc_metering(source, req if isinstance(req, dict) else {}, result if isinstance(result, dict) else {}, metering_payload, duration_ms)
+        if isinstance(result, dict):
+            result["metering"] = {
+                "unit": str(metering_event.get("unit") or metering_payload.get("unit") or ""),
+                "requested_units": float(metering_event.get("requested_units") or metering_payload.get("requested_units") or 1.0),
+                "estimated_units": float(metering_event.get("estimated_units") or 0.0),
+                "price_per_unit_micros": int(metering_event.get("price_per_unit_micros") or metering_payload.get("price_per_unit_micros") or 0),
+                "estimated_micros": int(metering_event.get("estimated_micros") or 0),
+                "settled_micros": int(metering_event.get("settled_micros") or metering_payload.get("settled_micros") or 0),
+                "quote_id": str(metering_event.get("quote_id") or metering_payload.get("quote_id") or ""),
+                "charge_id": str(metering_event.get("charge_id") or metering_payload.get("charge_id") or ""),
+                "reservation_id": str(metering_event.get("reservation_id") or metering_payload.get("reservation_id") or ""),
+                "correlation_id": str(metering_event.get("correlation_id") or metering_payload.get("correlation_id") or ""),
+                "usage_label": str(metering_event.get("usage_label") or metering_payload.get("usage_label") or ""),
+                "transport_tag": str(metering_event.get("transport_tag") or metering_payload.get("transport_tag") or ""),
+                "duration_ms": int(max(0.0, duration_ms)),
+                "request_bytes": int(metering_payload.get("request_bytes") or 0),
+            }
+            result["enforcement"] = {
+                "ok": bool(enforcement.get("ok", True)),
+                "billable": bool(enforcement.get("billable")),
+                "enforced": bool(enforcement.get("enforced")),
+                "requirements": enforcement.get("requirements") if isinstance(enforcement.get("requirements"), dict) else {},
+                "pricing": enforcement.get("pricing") if isinstance(enforcement.get("pricing"), dict) else {},
+                "error_code": str(enforcement.get("error_code") or ""),
+                "error": str(enforcement.get("error") or ""),
             }
         reply = {
             "event": "service_rpc_result",
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "request_id": request_id,
             "source_address": node.current_address or "",
             "timestamp_ms": int(time.time() * 1000),
             "service": req.get("service"),
             "path": req.get("path"),
+            "duration_ms": int(max(0.0, duration_ms)),
+            "correlation_id": str(metering_event.get("correlation_id") or metering_payload.get("correlation_id") or ""),
+            "quote_id": str(metering_event.get("quote_id") or metering_payload.get("quote_id") or ""),
+            "charge_id": str(metering_event.get("charge_id") or metering_payload.get("charge_id") or ""),
+            "reservation_id": str(metering_event.get("reservation_id") or metering_payload.get("reservation_id") or ""),
         }
         reply.update(result)
         node.bridge.dm(source, reply, DM_OPTS_SINGLE)
@@ -7815,8 +9293,11 @@ class Router:
         return {
             "status": "ok",
             "service": "hydra_router",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "network": network_urls,
             "feature_flags": dict(getattr(self, "feature_flags", {}) or {}),
             "routes": {
@@ -7825,6 +9306,10 @@ class Router:
                 "services": "/services/snapshot",
                 "nkn_info": "/nkn/info",
                 "nkn_resolve": "/nkn/resolve",
+                "marketplace_catalog": "/marketplace/catalog",
+                "marketplace_catalog_overrides": "/marketplace/catalog/overrides",
+                "marketplace_sync": "/marketplace/sync",
+                "marketplace_publish": "/marketplace/catalog/publish",
                 "dashboard_data": "/dashboard/data",
             },
         }
@@ -7832,8 +9317,754 @@ class Router:
     def _current_node_addresses(self) -> List[str]:
         return sorted({node.current_address for node in self.nodes if node.current_address})
 
-    def _health_telemetry_totals(self) -> Dict[str, int]:
+    def _interop_contract_payload(self) -> Dict[str, str]:
+        payload = dict(INTEROP_CONTRACT)
+        payload["name"] = str(payload.get("name") or "hydra_noclip_interop")
+        payload["version"] = str(payload.get("version") or "1.0.0")
+        payload["compat_min_version"] = str(payload.get("compat_min_version") or payload.get("version") or "1.0.0")
+        payload["namespace"] = str(payload.get("namespace") or "hydra.noclip.marketplace.v1")
+        payload["schema"] = str(payload.get("schema") or "hydra_noclip_marketplace_contract_v1")
+        return payload
+
+    def _marketplace_provider_payload(self, snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        addresses = self._current_node_addresses()
+        market = self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {}
+        router_nkn = addresses[0] if addresses else ""
+        network_urls = self._router_network_urls()
+        return {
+            "provider_id": str(market.get("provider_id") or "hydra-router"),
+            "provider_label": str(market.get("provider_label") or "Hydra Router"),
+            "provider_network": str(market.get("provider_network") or "hydra"),
+            "provider_contact": str(market.get("provider_contact") or ""),
+            "router_nkn": router_nkn,
+            "router_nkn_addresses": addresses,
+            "provider_key_fingerprint": self._router_provider_fingerprint(addresses),
+            "network_urls": network_urls,
+            "api_base_url": str(network_urls.get("local") or ""),
+            "relay_count": len(addresses),
+            "snapshot_ts_ms": int((snapshot or {}).get("ts_ms") or 0),
+        }
+
+    def _catalog_candidate_map(
+        self,
+        resolved_entry: Dict[str, Any],
+        fallback: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        raw_candidates = resolved_entry.get("candidates") if isinstance(resolved_entry.get("candidates"), dict) else {}
+        fallback_map = fallback if isinstance(fallback, dict) else {}
+        out = {
+            "cloudflare": str((raw_candidates or {}).get("cloudflare") or str(fallback_map.get("cloudflare") or "")),
+            "nkn": str((raw_candidates or {}).get("nkn") or str(fallback_map.get("nkn") or "")),
+            "local": str((raw_candidates or {}).get("local") or str(fallback_map.get("local") or "")),
+            "upnp": str((raw_candidates or {}).get("upnp") or str(fallback_map.get("upnp") or "")),
+            "nats": str((raw_candidates or {}).get("nats") or str(fallback_map.get("nats") or "")),
+        }
+        for key, value in list(out.items()):
+            out[key] = str(value or "").strip()
+        return out
+
+    def _catalog_service_is_healthy(self, service_status: Dict[str, Any], service_payload: Dict[str, Any]) -> bool:
+        status_text = str(service_payload.get("status") or "").strip().lower()
+        running = bool(service_status.get("running"))
+        if status_text in {"ok", "healthy", "running", "success"}:
+            return True
+        if service_payload.get("health") and isinstance(service_payload.get("health"), dict):
+            health = service_payload.get("health") if isinstance(service_payload.get("health"), dict) else {}
+            if health.get("ok") is True:
+                return True
+            if str(health.get("status") or "").strip().lower() in {"ok", "healthy", "running", "success"}:
+                return True
+        return running
+
+    def _catalog_runtime_overrides_payload(self) -> Dict[str, Any]:
+        keys = sorted(self.catalog_runtime_overrides.keys()) if isinstance(self.catalog_runtime_overrides, dict) else []
+        return {
+            "active": bool(keys),
+            "service_count": len(keys),
+            "services": keys,
+        }
+
+    def _apply_catalog_overrides(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = payload if isinstance(payload, dict) else {}
+        raw_services = body.get("services") if isinstance(body.get("services"), dict) else {}
+        if not raw_services:
+            if self._as_bool(body.get("clear"), False):
+                self.catalog_runtime_overrides = {}
+            return self._catalog_runtime_overrides_payload()
+        next_overrides = dict(self.catalog_runtime_overrides)
+        for raw_service, raw_patch in raw_services.items():
+            service = self._canonical_router_service(raw_service)
+            if not service or service not in SERVICE_TARGETS:
+                continue
+            if raw_patch is None:
+                next_overrides.pop(service, None)
+                continue
+            base = self._effective_service_publication(service)
+            merged = self._deep_merge_obj(base, raw_patch if isinstance(raw_patch, dict) else {})
+            normalized = self._normalize_service_publication_entry(service, merged, marketplace_cfg=self.marketplace_cfg)
+            next_overrides[service] = normalized
+        self.catalog_runtime_overrides = next_overrides
+        return self._catalog_runtime_overrides_payload()
+
+    def _marketplace_catalog_payload(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        include_unhealthy: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        safe_snapshot = snapshot if isinstance(snapshot, dict) else {}
+        services_map = safe_snapshot.get("services") if isinstance(safe_snapshot.get("services"), dict) else {}
+        resolved_map = safe_snapshot.get("resolved") if isinstance(safe_snapshot.get("resolved"), dict) else {}
+        resolve_summary = self._resolved_discovery_summary(resolved_map)
+        market = self.marketplace_cfg if isinstance(self.marketplace_cfg, dict) else {}
+        provider = self._marketplace_provider_payload(safe_snapshot)
+        include_all = bool(market.get("include_unhealthy", True)) if include_unhealthy is None else bool(include_unhealthy)
+        services: List[Dict[str, Any]] = []
+        healthy_count = 0
+        published_count = 0
+        healthy_with_candidates = 0
+
+        for service_name in sorted(SERVICE_TARGETS.keys()):
+            service_payload = services_map.get(service_name) if isinstance(services_map.get(service_name), dict) else {}
+            resolved_entry = resolved_map.get(service_name) if isinstance(resolved_map.get(service_name), dict) else {}
+            if not service_payload and not resolved_entry:
+                continue
+
+            publication = self._effective_service_publication(service_name)
+            service_status = self.latest_service_status.get(service_name) if isinstance(self.latest_service_status.get(service_name), dict) else {}
+            healthy = self._catalog_service_is_healthy(service_status, service_payload)
+            if not include_all and not healthy:
+                continue
+
+            candidates = self._catalog_candidate_map(resolved_entry)
+            selected_transport = str(
+                resolved_entry.get("selected_transport")
+                or resolved_entry.get("transport")
+                or service_payload.get("transport")
+                or "local"
+            ).strip().lower() or "local"
+            selected_endpoint = str(
+                resolved_entry.get("base_url")
+                or resolved_entry.get("http_endpoint")
+                or service_payload.get("base_url")
+                or ""
+            ).strip()
+            if not selected_endpoint:
+                selected_endpoint = str(candidates.get(selected_transport) or candidates.get("local") or "")
+
+            tunnel_payload = service_payload.get("tunnel") if isinstance(service_payload.get("tunnel"), dict) else {}
+            fallback_payload = service_payload.get("fallback") if isinstance(service_payload.get("fallback"), dict) else {}
+            cloudflare_payload = fallback_payload.get("cloudflare") if isinstance(fallback_payload.get("cloudflare"), dict) else {}
+            stale_tunnel_url = str(
+                resolved_entry.get("stale_tunnel_url")
+                or tunnel_payload.get("stale_tunnel_url")
+                or cloudflare_payload.get("stale_tunnel_url")
+                or ""
+            ).strip()
+            tunnel_error = str(
+                resolved_entry.get("tunnel_error")
+                or tunnel_payload.get("error")
+                or cloudflare_payload.get("error")
+                or ""
+            ).strip()
+            stale_reason = str(resolved_entry.get("stale_reason") or service_payload.get("stale_reason") or "").strip()
+            stale_rejected = bool(resolved_entry.get("stale_rejected"))
+            has_candidate = any(bool(value) for value in candidates.values())
+            if healthy and has_candidate:
+                healthy_with_candidates += 1
+            if healthy:
+                healthy_count += 1
+            if publication.get("enabled"):
+                published_count += 1
+
+            candidate_reachability = {
+                "cloudflare": bool(candidates.get("cloudflare")) and str((cloudflare_payload or {}).get("state") or "").lower() in {"active", "running"},
+                "nkn": bool(candidates.get("nkn")),
+                "local": bool(candidates.get("local")) and healthy,
+                "upnp": bool(candidates.get("upnp")),
+                "nats": bool(candidates.get("nats")),
+            }
+
+            info = SERVICE_TARGETS.get(service_name) if isinstance(SERVICE_TARGETS.get(service_name), dict) else {}
+            repository = str(publication.get("repository") or "hydra")
+            services.append(
+                {
+                    "service_id": service_name,
+                    "service": service_name,
+                    "target": str((info or {}).get("target") or service_name),
+                    "aliases": list((info or {}).get("aliases") or []),
+                    "status": str(service_payload.get("status") or ("ok" if healthy else "degraded")),
+                    "healthy": healthy,
+                    "running": bool(service_status.get("running")),
+                    "enabled": bool(publication.get("enabled")),
+                    "visibility": str(publication.get("visibility") or "public"),
+                    "capacity_hint": int(publication.get("capacity_hint") or 0),
+                    "pricing": publication.get("pricing") if isinstance(publication.get("pricing"), dict) else {},
+                    "tags": list(publication.get("tags") or []),
+                    "selected_transport": selected_transport,
+                    "selection_reason": str(resolved_entry.get("selection_reason") or ""),
+                    "selected_endpoint": selected_endpoint,
+                    "base_url": selected_endpoint,
+                    "http_endpoint": str(resolved_entry.get("http_endpoint") or selected_endpoint),
+                    "ws_endpoint": str(resolved_entry.get("ws_endpoint") or ""),
+                    "endpoint_candidates": candidates,
+                    "candidate_reachability": candidate_reachability,
+                    "stale_rejected": stale_rejected,
+                    "stale_reason": stale_reason,
+                    "stale_tunnel_url": stale_tunnel_url,
+                    "tunnel_error": tunnel_error,
+                    "cloudflared": {
+                        "state": str((cloudflare_payload or {}).get("state") or (tunnel_payload or {}).get("state") or "inactive"),
+                        "running": bool((tunnel_payload or {}).get("running")),
+                        "tunnel_url": str((tunnel_payload or {}).get("tunnel_url") or (cloudflare_payload or {}).get("public_base_url") or ""),
+                        "stale_tunnel_url": stale_tunnel_url,
+                        "error": tunnel_error,
+                        "restarts": int((cloudflare_payload or {}).get("restarts") or (tunnel_payload or {}).get("restarts") or 0),
+                        "rate_limited": bool((cloudflare_payload or {}).get("rate_limited") or (tunnel_payload or {}).get("rate_limited")),
+                    },
+                    "health": service_payload.get("health") if isinstance(service_payload.get("health"), dict) else {},
+                    "provenance": {
+                        "parent_router": "hydra_router",
+                        "watchdog_service": service_name,
+                        "repository": repository,
+                        "scope": "parent" if repository in {"", "hydra"} else "subordinate",
+                        "discovery_source": str(safe_snapshot.get("discovery_source") or "local_snapshot"),
+                    },
+                    "updated_at_ms": int(safe_snapshot.get("ts_ms") or 0),
+                }
+            )
+
+        service_count = len(services)
+        catalog_ready = bool(service_count > 0)
+        return {
+            "status": "success",
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "provider": provider,
+            "generated_at_ms": int(time.time() * 1000),
+            "snapshot_ts_ms": int(safe_snapshot.get("ts_ms") or 0),
+            "discovery_source": str(safe_snapshot.get("discovery_source") or "local_snapshot"),
+            "services": services,
+            "summary": {
+                "service_count": service_count,
+                "published_count": published_count,
+                "healthy_count": healthy_count,
+                "healthy_with_candidate_count": healthy_with_candidates,
+                "catalog_ready": catalog_ready,
+                "include_unhealthy": include_all,
+            },
+            "resolve_summary": resolve_summary,
+            "runtime_overrides": self._catalog_runtime_overrides_payload(),
+        }
+
+    def _marketplace_sync_auth_token(self, *, token_override: Any = "", cfg_override: Optional[Dict[str, Any]] = None) -> str:
+        override = str(token_override or "").strip()
+        if override:
+            return override
+        cfg = cfg_override if isinstance(cfg_override, dict) else (
+            self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+        )
+        token = str(cfg.get("auth_token") or "").strip()
+        if token:
+            return token
+        env_name = str(cfg.get("auth_token_env") or "").strip()
+        if not env_name:
+            return ""
+        return str(os.environ.get(env_name) or "").strip()
+
+    def _marketplace_sync_backoff_seconds(self, consecutive_failures: int = 0) -> int:
+        cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+        base_interval = self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600)
+        max_backoff = self._as_int(cfg.get("max_backoff_seconds"), 300, minimum=5, maximum=7200)
+        failures = int(max(0, consecutive_failures))
+        if failures <= 0:
+            return base_interval
+        exponent = min(6, failures - 1)
+        backoff = base_interval * (2 ** exponent)
+        return int(min(max_backoff, max(base_interval, backoff)))
+
+    def _marketplace_sync_config_payload(self) -> Dict[str, Any]:
+        cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+        target_urls = _normalize_marketplace_sync_targets(
+            cfg.get("target_urls_list"),
+            fallback=_normalize_marketplace_sync_targets(cfg.get("target_urls")),
+        )
+        token_present = bool(self._marketplace_sync_auth_token(cfg_override=cfg))
+        return {
+            "enable_auto_publish": bool(cfg.get("enable_auto_publish")),
+            "target_urls": list(target_urls),
+            "target_count": len(target_urls),
+            "publish_interval_seconds": self._as_int(cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600),
+            "publish_timeout_seconds": self._as_float(cfg.get("publish_timeout_seconds"), 6.0, minimum=1.0, maximum=120.0),
+            "max_backoff_seconds": self._as_int(cfg.get("max_backoff_seconds"), 300, minimum=5, maximum=7200),
+            "include_unhealthy": self._as_bool(cfg.get("include_unhealthy"), True),
+            "auth_header": str(cfg.get("auth_header") or "Authorization"),
+            "auth_scheme": str(cfg.get("auth_scheme") or "Bearer"),
+            "auth_token_present": token_present,
+            "auth_token_env": str(cfg.get("auth_token_env") or ""),
+        }
+
+    def _marketplace_sync_state_payload(self) -> Dict[str, Any]:
+        cfg = self._marketplace_sync_config_payload()
+        with self.marketplace_sync_state_lock:
+            st = self.marketplace_sync_state if isinstance(self.marketplace_sync_state, dict) else {}
+            results = list(st.get("results", [])) if isinstance(st.get("results"), deque) else []
+            return {
+                "status": "success",
+                "config": cfg,
+                "state": {
+                    "in_flight": bool(st.get("in_flight")),
+                    "last_trigger": str(st.get("last_trigger") or ""),
+                    "last_attempt_ts_ms": int(st.get("last_attempt_ts_ms") or 0),
+                    "last_success_ts_ms": int(st.get("last_success_ts_ms") or 0),
+                    "last_failure_ts_ms": int(st.get("last_failure_ts_ms") or 0),
+                    "last_error": str(st.get("last_error") or ""),
+                    "last_status_code": int(st.get("last_status_code") or 0),
+                    "next_due_ts_ms": int(st.get("next_due_ts_ms") or 0),
+                    "success_count": int(st.get("success_count") or 0),
+                    "failure_count": int(st.get("failure_count") or 0),
+                    "consecutive_failures": int(st.get("consecutive_failures") or 0),
+                    "last_result": _json_clone(st.get("last_result")) if isinstance(st.get("last_result"), dict) else {},
+                    "recent_results": results[-10:],
+                },
+            }
+
+    def _build_marketplace_sync_event(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        include_unhealthy: Optional[bool] = None,
+        target_url: str = "",
+    ) -> Dict[str, Any]:
+        catalog = self._marketplace_catalog_payload(snapshot, include_unhealthy=include_unhealthy)
+        provider = catalog.get("provider") if isinstance(catalog.get("provider"), dict) else {}
+        summary = catalog.get("summary") if isinstance(catalog.get("summary"), dict) else {}
+        interop = self._interop_contract_payload()
+        addresses = self._current_node_addresses()
+        source_address = addresses[0] if addresses else ""
+        ts_ms = int(time.time() * 1000)
+        return {
+            "type": "market-service-catalog",
+            "event": "market.service.catalog",
+            "message_id": f"market-sync-{uuid.uuid4().hex[:16]}",
+            "ts": ts_ms,
+            "source_address": source_address,
+            "target_url": str(target_url or ""),
+            "interop_contract": interop,
+            "interop_contract_version": str(interop.get("version") or ""),
+            "interop_contract_compat_min_version": str(interop.get("compat_min_version") or ""),
+            "interop_contract_namespace": str(interop.get("namespace") or ""),
+            "provider": provider,
+            "summary": summary,
+            "catalog": catalog,
+            "payload": {
+                "provider": provider,
+                "summary": summary,
+                "catalog": catalog,
+            },
+        }
+
+    def _publish_marketplace_catalog_targets(
+        self,
+        *,
+        targets: Optional[List[str]] = None,
+        include_unhealthy: Optional[bool] = None,
+        timeout_s: Optional[float] = None,
+        auth_token: str = "",
+        trigger: str = "manual",
+        dry_run: bool = False,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        cfg_payload = self._marketplace_sync_config_payload()
+        cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+        normalized_targets = _normalize_marketplace_sync_targets(
+            targets,
+            fallback=cfg_payload.get("target_urls") if isinstance(cfg_payload.get("target_urls"), list) else [],
+        )
+        effective_timeout = self._as_float(
+            timeout_s,
+            cfg_payload.get("publish_timeout_seconds") if isinstance(cfg_payload, dict) else 6.0,
+            minimum=1.0,
+            maximum=120.0,
+        )
+        if not normalized_targets:
+            return {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "target_urls": [],
+                "duration_ms": 0,
+                "error": "no target URLs configured",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+
+        snapshot = self.get_service_snapshot(force_refresh=force_refresh)
+        include_unhealthy_value: Optional[bool] = include_unhealthy
+        if include_unhealthy_value is None:
+            include_unhealthy_value = self._as_bool(cfg.get("include_unhealthy"), True)
+        effective_token = self._marketplace_sync_auth_token(token_override=auth_token, cfg_override=cfg)
+        auth_header = str(cfg.get("auth_header") or "Authorization").strip() or "Authorization"
+        auth_scheme = str(cfg.get("auth_scheme") or "Bearer").strip()
+        started_at = time.time()
+
+        results: List[Dict[str, Any]] = []
+        sent = 0
+        for target_url in normalized_targets:
+            packet = self._build_marketplace_sync_event(
+                snapshot,
+                include_unhealthy=include_unhealthy_value,
+                target_url=target_url,
+            )
+            catalog_checksum = hashlib.sha256(
+                json.dumps(packet.get("catalog"), sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace")
+            ).hexdigest()
+            if dry_run:
+                results.append(
+                    {
+                        "url": target_url,
+                        "ok": True,
+                        "status": 0,
+                        "latency_ms": 0.0,
+                        "error": "",
+                        "catalog_checksum": catalog_checksum,
+                        "dry_run": True,
+                    }
+                )
+                sent += 1
+                continue
+
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Hydra-Interop-Event": "market.service.catalog",
+            }
+            if effective_token:
+                if auth_header.lower() == "authorization":
+                    prefix = f"{auth_scheme} " if auth_scheme else ""
+                    headers["Authorization"] = f"{prefix}{effective_token}".strip()
+                else:
+                    headers[auth_header] = effective_token
+
+            req_started = time.time()
+            try:
+                resp = requests.post(
+                    target_url,
+                    json=packet,
+                    timeout=effective_timeout,
+                    headers=headers,
+                )
+                latency_ms = round((time.time() - req_started) * 1000.0, 2)
+                status_code = int(resp.status_code or 0)
+                body_text = ""
+                payload_json: Any = None
+                try:
+                    payload_json = resp.json()
+                except Exception:
+                    payload_json = None
+                    body_text = resp.text[:240] if resp.text else ""
+                ok = 200 <= status_code < 300
+                error_text = ""
+                if not ok:
+                    if isinstance(payload_json, dict):
+                        error_text = str(
+                            payload_json.get("error")
+                            or payload_json.get("message")
+                            or f"http_{status_code}"
+                        )
+                    else:
+                        error_text = body_text or f"http_{status_code}"
+                result_entry: Dict[str, Any] = {
+                    "url": target_url,
+                    "ok": ok,
+                    "status": status_code,
+                    "latency_ms": latency_ms,
+                    "error": error_text,
+                    "catalog_checksum": catalog_checksum,
+                }
+                if isinstance(payload_json, dict):
+                    response_status = str(payload_json.get("status") or "").strip()
+                    if response_status:
+                        result_entry["response_status"] = response_status
+                elif body_text:
+                    result_entry["response_text"] = body_text
+                results.append(result_entry)
+                if ok:
+                    sent += 1
+            except Exception as exc:
+                latency_ms = round((time.time() - req_started) * 1000.0, 2)
+                results.append(
+                    {
+                        "url": target_url,
+                        "ok": False,
+                        "status": 0,
+                        "latency_ms": latency_ms,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "catalog_checksum": catalog_checksum,
+                    }
+                )
+
+        attempted = len(normalized_targets)
+        failed = max(0, attempted - sent)
+        ok = bool(attempted > 0 and failed == 0)
+        duration_ms = int(max(0.0, (time.time() - started_at) * 1000.0))
+        first_error = ""
+        for entry in results:
+            if not entry.get("ok"):
+                first_error = str(entry.get("error") or "")
+                if first_error:
+                    break
+        return {
+            "ok": ok,
+            "trigger": str(trigger or "manual"),
+            "attempted": attempted,
+            "sent": sent,
+            "failed": failed,
+            "target_urls": list(normalized_targets),
+            "duration_ms": duration_ms,
+            "error": first_error,
+            "results": results,
+            "dry_run": bool(dry_run),
+            "generated_at_ms": int(time.time() * 1000),
+        }
+
+    def _marketplace_sync_mark_started(self, trigger: str, targets: List[str]) -> bool:
+        with self.marketplace_sync_state_lock:
+            if bool(self.marketplace_sync_state.get("in_flight")):
+                return False
+            now_ms = int(time.time() * 1000)
+            self.marketplace_sync_state["in_flight"] = True
+            self.marketplace_sync_state["last_trigger"] = str(trigger or "")
+            self.marketplace_sync_state["last_attempt_ts_ms"] = now_ms
+            self.marketplace_sync_state["last_error"] = ""
+            self.marketplace_sync_state["last_status_code"] = 0
+            self.marketplace_sync_state["target_urls"] = list(targets)
+            return True
+
+    def _marketplace_sync_finalize(self, result: Dict[str, Any]) -> None:
+        safe_result = result if isinstance(result, dict) else {}
+        now_ms = int(time.time() * 1000)
+        cfg_payload = self._marketplace_sync_config_payload()
+        with self.marketplace_sync_state_lock:
+            self.marketplace_sync_state["in_flight"] = False
+            ok = bool(safe_result.get("ok"))
+            status_code = 200 if ok else 502
+            self.marketplace_sync_state["last_status_code"] = int(safe_result.get("status") or status_code)
+            if ok:
+                self.marketplace_sync_state["success_count"] = int(self.marketplace_sync_state.get("success_count") or 0) + 1
+                self.marketplace_sync_state["consecutive_failures"] = 0
+                self.marketplace_sync_state["last_success_ts_ms"] = now_ms
+                self.marketplace_sync_state["last_error"] = ""
+            else:
+                self.marketplace_sync_state["failure_count"] = int(self.marketplace_sync_state.get("failure_count") or 0) + 1
+                self.marketplace_sync_state["consecutive_failures"] = int(
+                    self.marketplace_sync_state.get("consecutive_failures") or 0
+                ) + 1
+                self.marketplace_sync_state["last_failure_ts_ms"] = now_ms
+                self.marketplace_sync_state["last_error"] = str(safe_result.get("error") or "publish failed")
+
+            result_record = {
+                "ts_ms": now_ms,
+                "trigger": str(safe_result.get("trigger") or ""),
+                "ok": ok,
+                "attempted": int(safe_result.get("attempted") or 0),
+                "sent": int(safe_result.get("sent") or 0),
+                "failed": int(safe_result.get("failed") or 0),
+                "duration_ms": int(safe_result.get("duration_ms") or 0),
+                "error": str(safe_result.get("error") or ""),
+                "dry_run": bool(safe_result.get("dry_run")),
+            }
+            results = self.marketplace_sync_state.get("results")
+            if not isinstance(results, deque):
+                results = deque(maxlen=24)
+                self.marketplace_sync_state["results"] = results
+            results.append(result_record)
+            self.marketplace_sync_state["last_result"] = _json_clone(safe_result)
+
+            if bool(cfg_payload.get("enable_auto_publish")) and int(cfg_payload.get("target_count") or 0) > 0:
+                failures = int(self.marketplace_sync_state.get("consecutive_failures") or 0)
+                delay_s = self._marketplace_sync_backoff_seconds(failures)
+                self.marketplace_sync_state["next_due_ts_ms"] = now_ms + int(delay_s * 1000)
+            else:
+                self.marketplace_sync_state["next_due_ts_ms"] = 0
+
+    def _run_marketplace_sync_job(
+        self,
+        *,
+        targets: Optional[List[str]] = None,
+        include_unhealthy: Optional[bool] = None,
+        timeout_s: Optional[float] = None,
+        auth_token: str = "",
+        trigger: str = "manual",
+        dry_run: bool = False,
+        force_refresh: bool = False,
+        prestarted: bool = False,
+    ) -> Dict[str, Any]:
+        normalized_targets = _normalize_marketplace_sync_targets(targets)
+        if not prestarted:
+            if not self._marketplace_sync_mark_started(trigger, normalized_targets):
+                return {
+                    "ok": False,
+                    "trigger": str(trigger or "manual"),
+                    "attempted": 0,
+                    "sent": 0,
+                    "failed": 0,
+                    "target_urls": normalized_targets,
+                    "duration_ms": 0,
+                    "error": "sync already in progress",
+                    "results": [],
+                    "dry_run": bool(dry_run),
+                }
+        try:
+            result = self._publish_marketplace_catalog_targets(
+                targets=normalized_targets,
+                include_unhealthy=include_unhealthy,
+                timeout_s=timeout_s,
+                auth_token=auth_token,
+                trigger=trigger,
+                dry_run=dry_run,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "trigger": str(trigger or "manual"),
+                "attempted": len(normalized_targets),
+                "sent": 0,
+                "failed": len(normalized_targets),
+                "target_urls": normalized_targets,
+                "duration_ms": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+                "results": [],
+                "dry_run": bool(dry_run),
+            }
+        self._marketplace_sync_finalize(result)
+        return result
+
+    def _run_marketplace_sync_worker(
+        self,
+        *,
+        targets: List[str],
+        include_unhealthy: Optional[bool],
+        timeout_s: Optional[float],
+        auth_token: str,
+    ) -> None:
+        try:
+            self._run_marketplace_sync_job(
+                targets=targets,
+                include_unhealthy=include_unhealthy,
+                timeout_s=timeout_s,
+                auth_token=auth_token,
+                trigger="auto",
+                dry_run=False,
+                force_refresh=False,
+                prestarted=True,
+            )
+        finally:
+            self.marketplace_sync_worker = None
+
+    def _maybe_start_marketplace_sync(self) -> None:
+        cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+        if not self._as_bool(cfg.get("enable_auto_publish"), False):
+            return
+        targets = _normalize_marketplace_sync_targets(cfg.get("target_urls_list"))
+        if not targets:
+            return
+        with self.marketplace_sync_state_lock:
+            if bool(self.marketplace_sync_state.get("in_flight")):
+                return
+            now_ms = int(time.time() * 1000)
+            due_ms = int(self.marketplace_sync_state.get("next_due_ts_ms") or 0)
+            if due_ms > 0 and now_ms < due_ms:
+                return
+        if not self._marketplace_sync_mark_started("auto", targets):
+            return
+
+        timeout_s = self._as_float(cfg.get("publish_timeout_seconds"), 6.0, minimum=1.0, maximum=120.0)
+        include_unhealthy = self._as_bool(cfg.get("include_unhealthy"), True)
+        token = self._marketplace_sync_auth_token(cfg_override=cfg)
+        worker = threading.Thread(
+            target=self._run_marketplace_sync_worker,
+            kwargs={
+                "targets": list(targets),
+                "include_unhealthy": include_unhealthy,
+                "timeout_s": timeout_s,
+                "auth_token": token,
+            },
+            daemon=True,
+            name="marketplace-sync",
+        )
+        self.marketplace_sync_worker = worker
+        try:
+            worker.start()
+        except Exception as exc:
+            self.marketplace_sync_worker = None
+            self._marketplace_sync_finalize(
+                {
+                    "ok": False,
+                    "trigger": "auto",
+                    "attempted": len(targets),
+                    "sent": 0,
+                    "failed": len(targets),
+                    "target_urls": list(targets),
+                    "duration_ms": 0,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "results": [],
+                    "dry_run": False,
+                }
+            )
+
+    def _interop_contract_status_from_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        expected = self._interop_contract_payload()
+        body = payload if isinstance(payload, dict) else {}
+        incoming_contract_raw = body.get("interop_contract") if isinstance(body.get("interop_contract"), dict) else {}
+        incoming_name = str(
+            incoming_contract_raw.get("name")
+            or body.get("interop_contract_name")
+            or ""
+        ).strip()
+        incoming_version = str(
+            body.get("interop_contract_version")
+            or incoming_contract_raw.get("version")
+            or ""
+        ).strip()
+        incoming_compat_min = str(
+            body.get("interop_contract_compat_min_version")
+            or incoming_contract_raw.get("compat_min_version")
+            or incoming_contract_raw.get("compatMinVersion")
+            or incoming_version
+            or "0.0.0"
+        ).strip()
+        if not incoming_name:
+            incoming_name = expected["name"]
+        if not incoming_version:
+            incoming_version = "0.0.0"
+
+        name_ok = incoming_name == expected["name"]
+        version_ok = _semver_gte(incoming_version, expected["compat_min_version"])
+        compat_ok = _semver_gte(expected["version"], incoming_compat_min)
+        ok = bool(name_ok and version_ok and compat_ok)
+        return {
+            "ok": ok,
+            "name_ok": name_ok,
+            "version_ok": version_ok,
+            "compat_ok": compat_ok,
+            "expected": expected,
+            "incoming": {
+                "name": incoming_name,
+                "version": incoming_version,
+                "compat_min_version": incoming_compat_min,
+            },
+        }
+
+    def _health_telemetry_totals(self) -> Dict[str, Any]:
         with self.telemetry_lock:
+            rpc_metering = self.telemetry_state.get("rpc_metering") if isinstance(self.telemetry_state.get("rpc_metering"), dict) else {}
+            rpc_enforcement = self.telemetry_state.get("rpc_enforcement") if isinstance(self.telemetry_state.get("rpc_enforcement"), dict) else {}
             return {
                 "inbound_messages": int(self.telemetry_state.get("inbound_messages", 0)),
                 "outbound_messages": int(self.telemetry_state.get("outbound_messages", 0)),
@@ -7847,6 +10078,15 @@ class Router:
                 "rpc_requests_out": int(self.telemetry_state.get("rpc_requests_out", 0)),
                 "rpc_success_out": int(self.telemetry_state.get("rpc_success_out", 0)),
                 "rpc_fail_out": int(self.telemetry_state.get("rpc_fail_out", 0)),
+                "rpc_metering_requests": int(rpc_metering.get("requests", 0)),
+                "rpc_metering_success": int(rpc_metering.get("success", 0)),
+                "rpc_metering_failure": int(rpc_metering.get("failure", 0)),
+                "rpc_metering_estimated_units_total": float(rpc_metering.get("estimated_units_total", 0.0)),
+                "rpc_metering_estimated_micros_total": int(rpc_metering.get("estimated_micros_total", 0)),
+                "rpc_metering_settled_micros_total": int(rpc_metering.get("settled_micros_total", 0)),
+                "rpc_enforcement_checks": int(rpc_enforcement.get("checks", 0)),
+                "rpc_enforcement_allow": int(rpc_enforcement.get("allow", 0)),
+                "rpc_enforcement_deny": int(rpc_enforcement.get("deny", 0)),
                 "active_peers": len(self.telemetry_state.get("peer_usage", {})),
             }
 
@@ -7865,23 +10105,44 @@ class Router:
         resolve_fail = int(telemetry.get("resolve_fail_out", 0))
         resolve_total = resolve_success + resolve_fail
         resolve_error_rate = float(resolve_fail / resolve_total) if resolve_total > 0 else 0.0
+        rpc_requests_out = int(telemetry.get("rpc_requests_out", 0))
+        rpc_metering_requests = int(telemetry.get("rpc_metering_requests", 0))
+        rpc_metering_coverage = float(rpc_metering_requests / rpc_requests_out) if rpc_requests_out > 0 else 1.0
+        rpc_metering_ready = bool(rpc_metering_coverage >= 0.8)
 
         addresses = self._current_node_addresses()
-        expected_contract = str(INTEROP_CONTRACT.get("version") or "")
-        reported_contract = str(safe_snapshot.get("interop_contract_version") or expected_contract)
-        contract_ok = bool(expected_contract and reported_contract == expected_contract)
+        contract_status = self._interop_contract_status_from_payload(safe_snapshot)
+        expected_contract = contract_status.get("expected", {}) if isinstance(contract_status, dict) else {}
+        incoming_contract = contract_status.get("incoming", {}) if isinstance(contract_status, dict) else {}
+        expected_version = str(expected_contract.get("version") or "")
+        reported_contract = str(incoming_contract.get("version") or expected_version)
+        contract_ok = bool(contract_status.get("ok"))
         nkn_ready = bool(self.nkn_settings.get("enable", True) and addresses)
         resolved_services = int(summary.get("service_count") or len(resolved_map))
         stale_count = int(summary.get("stale_rejection_count") or 0)
         pending_clear = int(max(0, pending_count)) == 0
         resolve_error_rate_ok = resolve_error_rate <= 0.30
-        ready = bool(contract_ok and nkn_ready and resolved_services > 0 and pending_clear and resolve_error_rate_ok)
+        ready = bool(
+            contract_ok
+            and nkn_ready
+            and resolved_services > 0
+            and pending_clear
+            and resolve_error_rate_ok
+            and rpc_metering_ready
+        )
 
         return {
             "ready": ready,
-            "contract_version_expected": expected_contract,
+            "contract_name_expected": str(expected_contract.get("name") or ""),
+            "contract_name_reported": str(incoming_contract.get("name") or ""),
+            "contract_name_ok": bool(contract_status.get("name_ok")),
+            "contract_version_expected": expected_version,
             "contract_version_reported": reported_contract,
-            "contract_version_ok": contract_ok,
+            "contract_version_ok": bool(contract_status.get("version_ok")),
+            "contract_compat_min_version_expected": str(expected_contract.get("compat_min_version") or ""),
+            "contract_compat_min_version_reported": str(incoming_contract.get("compat_min_version") or ""),
+            "contract_compat_ok": bool(contract_status.get("compat_ok")),
+            "contract_ok": contract_ok,
             "nkn_ready": nkn_ready,
             "resolved_services": resolved_services,
             "pending_resolves_clear": pending_clear,
@@ -7889,6 +10150,9 @@ class Router:
             "resolve_total": resolve_total,
             "resolve_error_rate": round(resolve_error_rate, 4),
             "resolve_error_rate_ok": resolve_error_rate_ok,
+            "rpc_metering_requests": rpc_metering_requests,
+            "rpc_metering_coverage": round(rpc_metering_coverage, 4),
+            "rpc_metering_ready": rpc_metering_ready,
         }
 
     def _health_payload(self, snapshot: Dict[str, Any], pending_count: int) -> Dict[str, Any]:
@@ -7896,11 +10160,19 @@ class Router:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         resolved_map = resolved if isinstance(resolved, dict) else {}
         resolve_summary = self._resolved_discovery_summary(resolved_map)
+        catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
+        telemetry = self._health_telemetry_totals()
+        rpc_out = int(telemetry.get("rpc_requests_out", 0))
+        rpc_metered = int(telemetry.get("rpc_metering_requests", 0))
+        metering_coverage = float(rpc_metered / rpc_out) if rpc_out > 0 else 1.0
         return {
             "status": "ok",
             "service": "hydra_router",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "uptime_seconds": round(time.time() - self.startup_time, 2),
             "requests_served": int(self.request_counter.get("value", 0)),
             "pending_resolves": int(max(0, pending_count)),
@@ -7910,8 +10182,21 @@ class Router:
                 "ready": bool(addresses),
                 "addresses": addresses,
             },
-            "telemetry": self._health_telemetry_totals(),
+            "telemetry": telemetry,
+            "metering": {
+                "requests": int(telemetry.get("rpc_metering_requests", 0)),
+                "success": int(telemetry.get("rpc_metering_success", 0)),
+                "failure": int(telemetry.get("rpc_metering_failure", 0)),
+                "estimated_units_total": float(telemetry.get("rpc_metering_estimated_units_total", 0.0)),
+                "estimated_micros_total": int(telemetry.get("rpc_metering_estimated_micros_total", 0)),
+                "settled_micros_total": int(telemetry.get("rpc_metering_settled_micros_total", 0)),
+                "coverage": round(metering_coverage, 4),
+                "ready": bool(metering_coverage >= 0.8),
+            },
             "resolve_summary": resolve_summary,
+            "catalog_summary": catalog.get("summary", {}) if isinstance(catalog, dict) else {},
+            "provider": catalog.get("provider", {}) if isinstance(catalog, dict) else {},
+            "marketplace_sync": self._marketplace_sync_state_payload(),
             "rollout_gates": self._rollout_gates(snapshot, pending_count, resolve_summary=resolve_summary),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
         }
@@ -7919,12 +10204,18 @@ class Router:
     def _services_snapshot_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
+        catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
         return {
             "status": "success",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
             "resolve_summary": summary,
+            "catalog": catalog,
+            "marketplace_sync": self._marketplace_sync_state_payload(),
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -7932,10 +10223,14 @@ class Router:
         addresses = self._current_node_addresses()
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         summary = self._resolved_discovery_summary(resolved if isinstance(resolved, dict) else {})
+        catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
         return {
             "status": "success",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "network": self._router_network_urls(),
             "nkn": {
                 "enabled": bool(self.nkn_settings.get("enable", True)),
@@ -7946,6 +10241,9 @@ class Router:
             },
             "snapshot": snapshot if isinstance(snapshot, dict) else {},
             "resolve_summary": summary,
+            "catalog_summary": catalog.get("summary", {}) if isinstance(catalog, dict) else {},
+            "provider": catalog.get("provider", {}) if isinstance(catalog, dict) else {},
+            "marketplace_sync": self._marketplace_sync_state_payload(),
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -7954,10 +10252,14 @@ class Router:
         resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
         resolved_map = resolved if isinstance(resolved, dict) else {}
         summary = self._resolved_discovery_summary(resolved_map)
+        catalog = self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
         return {
             "status": "success",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "mode": "local",
             "discovery_source": "local_snapshot",
             "target_address": str(target_address or (addresses[0] if addresses else "")),
@@ -7967,6 +10269,8 @@ class Router:
             "endpoint_candidates": summary.get("candidates", {}),
             "stale_rejections": summary.get("stale_rejections", []),
             "stale_rejection_count": int(summary.get("stale_rejection_count", 0)),
+            "catalog": catalog,
+            "marketplace_sync": self._marketplace_sync_state_payload(),
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -7981,10 +10285,16 @@ class Router:
     ) -> Dict[str, Any]:
         resolved_map = resolved if isinstance(resolved, dict) else {}
         summary = self._resolved_discovery_summary(resolved_map)
+        reply_catalog = response_payload.get("catalog") if isinstance(response_payload.get("catalog"), dict) else {}
+        catalog = reply_catalog if reply_catalog else self._marketplace_catalog_payload(snapshot if isinstance(snapshot, dict) else {})
+        remote_auth = response_payload.get("auth_capabilities") if isinstance(response_payload.get("auth_capabilities"), dict) else {}
         return {
             "status": "success",
-            "interop_contract": dict(INTEROP_CONTRACT),
-            "interop_contract_version": str(INTEROP_CONTRACT.get("version") or ""),
+            "interop_contract": self._interop_contract_payload(),
+            "interop_contract_version": str(self._interop_contract_payload().get("version") or ""),
+            "interop_contract_compat_min_version": str(self._interop_contract_payload().get("compat_min_version") or ""),
+            "interop_contract_namespace": str(self._interop_contract_payload().get("namespace") or ""),
+            "auth_capabilities": self._auth_capabilities_payload(),
             "mode": "remote",
             "discovery_source": str(response_payload.get("discovery_source") or "nkn_dm"),
             "request_id": str(request_id or ""),
@@ -7997,6 +10307,9 @@ class Router:
             "endpoint_candidates": summary.get("candidates", {}),
             "stale_rejections": summary.get("stale_rejections", []),
             "stale_rejection_count": int(summary.get("stale_rejection_count", 0)),
+            "catalog": catalog,
+            "remote_auth_capabilities": remote_auth,
+            "marketplace_sync": self._marketplace_sync_state_payload(),
             "rollout_gates": self._rollout_gates(snapshot, pending_count=0, resolve_summary=summary),
         }
 
@@ -8005,6 +10318,10 @@ class Router:
             history = list(self.telemetry_state.get("history", []))
             peer_usage = dict(self.telemetry_state.get("peer_usage", {}))
             endpoint_hits = dict(self.telemetry_state.get("endpoint_hits", {}))
+            rpc_metering = self.telemetry_state.get("rpc_metering") if isinstance(self.telemetry_state.get("rpc_metering"), dict) else {}
+            rpc_metering_events = list(rpc_metering.get("events", [])) if isinstance(rpc_metering.get("events"), deque) else []
+            rpc_metering_by_service = _json_clone(rpc_metering.get("by_service")) if isinstance(rpc_metering.get("by_service"), dict) else {}
+            rpc_enforcement = self.telemetry_state.get("rpc_enforcement") if isinstance(self.telemetry_state.get("rpc_enforcement"), dict) else {}
             telemetry = {
                 "inbound_messages": int(self.telemetry_state.get("inbound_messages", 0)),
                 "outbound_messages": int(self.telemetry_state.get("outbound_messages", 0)),
@@ -8018,6 +10335,15 @@ class Router:
                 "rpc_requests_out": int(self.telemetry_state.get("rpc_requests_out", 0)),
                 "rpc_success_out": int(self.telemetry_state.get("rpc_success_out", 0)),
                 "rpc_fail_out": int(self.telemetry_state.get("rpc_fail_out", 0)),
+                "rpc_metering_requests": int(rpc_metering.get("requests", 0)),
+                "rpc_metering_success": int(rpc_metering.get("success", 0)),
+                "rpc_metering_failure": int(rpc_metering.get("failure", 0)),
+                "rpc_metering_estimated_units_total": float(rpc_metering.get("estimated_units_total", 0.0)),
+                "rpc_metering_estimated_micros_total": int(rpc_metering.get("estimated_micros_total", 0)),
+                "rpc_metering_settled_micros_total": int(rpc_metering.get("settled_micros_total", 0)),
+                "rpc_enforcement_checks": int(rpc_enforcement.get("checks", 0)),
+                "rpc_enforcement_allow": int(rpc_enforcement.get("allow", 0)),
+                "rpc_enforcement_deny": int(rpc_enforcement.get("deny", 0)),
             }
         logs = list(self.activity_log)
         hist_limit = self._as_int(history_limit, 240, minimum=20, maximum=2000)
@@ -8033,6 +10359,25 @@ class Router:
             "activity": logs[-logs_limit:],
             "peers": [{**(entry or {}), "peer": peer} for peer, entry in peers_sorted[:peers_limit]],
             "endpoint_hits": endpoint_hits,
+            "rpc_metering": {
+                "requests": int(rpc_metering.get("requests", 0)),
+                "success": int(rpc_metering.get("success", 0)),
+                "failure": int(rpc_metering.get("failure", 0)),
+                "estimated_units_total": float(rpc_metering.get("estimated_units_total", 0.0)),
+                "estimated_micros_total": int(rpc_metering.get("estimated_micros_total", 0)),
+                "settled_micros_total": int(rpc_metering.get("settled_micros_total", 0)),
+                "by_service": rpc_metering_by_service,
+                "events": rpc_metering_events[-100:],
+            },
+            "rpc_enforcement": {
+                "checks": int(rpc_enforcement.get("checks", 0)),
+                "allow": int(rpc_enforcement.get("allow", 0)),
+                "deny": int(rpc_enforcement.get("deny", 0)),
+                "denied_codes": _json_clone(rpc_enforcement.get("denied_codes")) if isinstance(rpc_enforcement.get("denied_codes"), dict) else {},
+                "by_service": _json_clone(rpc_enforcement.get("by_service")) if isinstance(rpc_enforcement.get("by_service"), dict) else {},
+                "last_event": _json_clone(rpc_enforcement.get("last_event")) if isinstance(rpc_enforcement.get("last_event"), dict) else {},
+            },
+            "marketplace_sync": self._marketplace_sync_state_payload(),
         }
 
     def _build_control_plane_app(self):
@@ -8151,6 +10496,120 @@ class Router:
                     resolved if isinstance(resolved, dict) else {},
                 )
             )
+
+        @app.route("/marketplace/catalog", methods=["GET"])
+        def _marketplace_catalog():
+            market_enabled = self._as_bool((self.marketplace_cfg or {}).get("enable_catalog"), True)
+            if not market_enabled:
+                return _public_json(
+                    {
+                        "status": "disabled",
+                        "message": "Marketplace catalog publishing is disabled",
+                        "runtime_overrides": self._catalog_runtime_overrides_payload(),
+                    },
+                    status_code=503,
+                )
+            force = self._as_bool(request.args.get("refresh"), default=False)
+            include_unhealthy = request.args.get("include_unhealthy")
+            include_arg: Optional[bool] = None
+            if include_unhealthy is not None:
+                include_arg = self._as_bool(include_unhealthy, default=True)
+            snapshot = self.get_service_snapshot(force_refresh=force)
+            payload = self._marketplace_catalog_payload(snapshot, include_unhealthy=include_arg)
+            return _public_json(payload)
+
+        @app.route("/marketplace/sync", methods=["GET"])
+        def _marketplace_sync():
+            return _public_json(self._marketplace_sync_state_payload())
+
+        @app.route("/marketplace/catalog/publish", methods=["POST"])
+        def _marketplace_publish():
+            body = request.get_json(silent=True) or {}
+            market_enabled = self._as_bool((self.marketplace_cfg or {}).get("enable_catalog"), True)
+            if not market_enabled:
+                return _public_json(
+                    {
+                        "status": "disabled",
+                        "message": "Marketplace catalog publishing is disabled",
+                        "marketplace_sync": self._marketplace_sync_state_payload(),
+                    },
+                    status_code=503,
+                )
+
+            include_unhealthy_raw = body.get("include_unhealthy")
+            include_unhealthy: Optional[bool] = None
+            if include_unhealthy_raw is not None:
+                include_unhealthy = self._as_bool(include_unhealthy_raw, True)
+
+            cfg = self.marketplace_sync_cfg if isinstance(self.marketplace_sync_cfg, dict) else {}
+            default_timeout = self._as_float(cfg.get("publish_timeout_seconds"), 6.0, minimum=1.0, maximum=120.0)
+            timeout_seconds = self._as_float(body.get("timeout_seconds"), default_timeout, minimum=1.0, maximum=120.0)
+            dry_run = self._as_bool(body.get("dry_run"), False)
+            force_refresh = self._as_bool(body.get("force_refresh"), False) or self._as_bool(body.get("force"), False)
+            auth_token = str(body.get("auth_token") or "").strip()
+            requested_targets = _normalize_marketplace_sync_targets(
+                body.get("target_urls"),
+                fallback=_normalize_marketplace_sync_targets(cfg.get("target_urls_list")),
+            )
+            if not requested_targets:
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "no target URLs configured",
+                        "marketplace_sync": self._marketplace_sync_state_payload(),
+                    },
+                    status_code=400,
+                )
+
+            if not self._marketplace_sync_mark_started("manual", requested_targets):
+                return _public_json(
+                    {
+                        "status": "error",
+                        "error": "sync already in progress",
+                        "marketplace_sync": self._marketplace_sync_state_payload(),
+                    },
+                    status_code=409,
+                )
+
+            result = self._run_marketplace_sync_job(
+                targets=requested_targets,
+                include_unhealthy=include_unhealthy,
+                timeout_s=timeout_seconds,
+                auth_token=auth_token,
+                trigger="manual",
+                dry_run=dry_run,
+                force_refresh=force_refresh,
+                prestarted=True,
+            )
+            payload = {
+                "status": "success" if bool(result.get("ok")) else "error",
+                "result": result,
+                "marketplace_sync": self._marketplace_sync_state_payload(),
+            }
+            status_code = 200 if bool(result.get("ok")) else 502
+            if dry_run and bool(result.get("ok")):
+                status_code = 200
+            return _public_json(payload, status_code=status_code)
+
+        @app.route("/marketplace/catalog/overrides", methods=["POST", "DELETE"])
+        def _marketplace_catalog_overrides():
+            if request.method == "DELETE":
+                svc_hint = str(request.args.get("service") or "").strip()
+                if svc_hint:
+                    canonical = self._canonical_router_service(svc_hint)
+                    if canonical in self.catalog_runtime_overrides:
+                        self.catalog_runtime_overrides.pop(canonical, None)
+                else:
+                    self.catalog_runtime_overrides = {}
+                return _public_json(
+                    {
+                        "status": "success",
+                        "runtime_overrides": self._catalog_runtime_overrides_payload(),
+                    }
+                )
+            body = request.get_json(silent=True) or {}
+            runtime_overrides = self._apply_catalog_overrides(body if isinstance(body, dict) else {})
+            return _public_json({"status": "success", "runtime_overrides": runtime_overrides})
 
         @app.route("/dashboard/data", methods=["GET"])
         def _dashboard_data():
@@ -8349,6 +10808,8 @@ class Router:
             self.api_thread.join(timeout=3)
         for node in self.nodes:
             node.stop()
+        if self.marketplace_sync_worker and self.marketplace_sync_worker.is_alive():
+            self.marketplace_sync_worker.join(timeout=5)
         if self.cloudflared_manager:
             self.cloudflared_manager.shutdown(timeout=3.0)
         self.watchdog.shutdown()
@@ -8582,6 +11043,7 @@ class Router:
                     self._update_service_ports()
                     port_detection_counter = 0
                 self._sync_cloudflared_tunnels()
+                self._maybe_start_marketplace_sync()
                 self._sample_telemetry()
             except Exception as exc:
                 LOGGER.debug("Status monitor error: %s", exc)

@@ -367,13 +367,27 @@ const GraphTypes = {
     inputs: [{ name: 'input', label: 'Ingress' }, { name: 'control', label: 'Control' }],
     outputs: [{ name: 'output', label: 'Egress' }, { name: 'events', label: 'Events' }],
     schema: [
-      { key: 'mode', label: 'Mode', type: 'select', options: ['seller', 'buyer', 'both'], def: 'seller' },
+      { key: 'mode', label: 'Mode', type: 'select', options: ['credit-ledger', 'wallet-transfer'], def: 'credit-ledger' },
+      { key: 'transferRole', label: 'Transfer Role', type: 'select', options: ['seller', 'buyer', 'both'], def: 'seller' },
       { key: 'amount', label: 'Amount', type: 'text', placeholder: '1.0', def: '1.0' },
       { key: 'asset', label: 'Asset (ERC-20)', type: 'text', placeholder: '0x8335...' },
       { key: 'chainId', label: 'Chain ID', type: 'number', def: 8453 },
       { key: 'receiver', label: 'Receiver Address', type: 'text', placeholder: '0x...' },
       { key: 'memo', label: 'Memo', type: 'text', placeholder: 'Access description' },
-      { key: 'unlockTTL', label: 'Unlock TTL (s)', type: 'number', def: 900 }
+      { key: 'unlockTTL', label: 'Unlock TTL (s)', type: 'number', def: 900 },
+      { key: 'creditApiBase', label: 'Credit API Base', type: 'text', placeholder: 'https://api.noclip.local' },
+      { key: 'creditAuthToken', label: 'Credit Auth Token', type: 'text', placeholder: 'Bearer token' },
+      { key: 'creditAmount', label: 'Credit Amount (USDC)', type: 'text', placeholder: '0.1', def: '0.1' },
+      { key: 'creditAmountMicros', label: 'Credit Amount Micros', type: 'text', placeholder: '100000' },
+      { key: 'creditScope', label: 'Credit Scope', type: 'text', placeholder: 'infer', def: 'infer' },
+      { key: 'creditReservationTtlSec', label: 'Credit Reservation TTL (s)', type: 'number', def: 90 },
+      { key: 'creditApplyEntitlements', label: 'Apply Entitlements', type: 'select', options: ['true', 'false'], def: 'true' },
+      { key: 'creditForceRefreshOnReserve', label: 'Force Refresh Before Reserve', type: 'select', options: ['false', 'true'], def: 'false' },
+      { key: 'marketplaceOfferId', label: 'Marketplace Offer ID', type: 'text', placeholder: 'uuid' },
+      { key: 'marketplaceServiceId', label: 'Marketplace Service ID', type: 'text', placeholder: 'llm' },
+      { key: 'marketplaceMaxChargeMicros', label: 'Marketplace Max Charge Micros', type: 'text', placeholder: '250000' },
+      { key: 'marketplaceTransportTag', label: 'Marketplace Transport Tag', type: 'text', placeholder: 'nkn', def: 'nkn' },
+      { key: 'requestedUnits', label: 'Requested Units', type: 'number', def: 1 }
     ]
   },
   MediaStream: {

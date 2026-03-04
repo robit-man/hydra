@@ -47,14 +47,20 @@ def _http_json(
     url: str,
     *,
     payload: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     body: Optional[bytes] = None
-    headers = {"Accept": "application/json"}
+    request_headers: Dict[str, str] = {"Accept": "application/json"}
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, method=method.upper(), data=body, headers=headers)
+        request_headers["Content-Type"] = "application/json"
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if not key:
+                continue
+            request_headers[str(key)] = str(value)
+    req = urllib.request.Request(url, method=method.upper(), data=body, headers=request_headers)
     started = _now_ms()
     try:
         with urllib.request.urlopen(req, timeout=max(1.0, float(timeout_seconds))) as resp:
@@ -86,6 +92,13 @@ def _http_json(
     except Exception as exc:
         latency_ms = _now_ms() - started
         return {"ok": False, "status": 0, "json": {}, "latency_ms": latency_ms, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _auth_headers(token: str) -> Dict[str, str]:
+    clean = str(token or "").strip()
+    if not clean:
+        return {}
+    return {"Authorization": f"Bearer {clean}"}
 
 
 def _slo_gate(duration_ms: int, max_stage_ms: int) -> Tuple[bool, str]:
@@ -484,6 +497,189 @@ def _stage_media_roundtrip(
     )
 
 
+def _materialize_settle_url(template: str, quote_id: str) -> str:
+    source = str(template or "").strip()
+    if not source:
+        return source
+    if "{quote_id}" in source:
+        return source.replace("{quote_id}", quote_id)
+    if source.endswith("/settle"):
+        return source
+    return f"{source.rstrip('/')}/{quote_id}/settle"
+
+
+def _stage_marketplace_quote_settlement(
+    *,
+    marketplace_quote_url: str,
+    marketplace_settle_url: str,
+    marketplace_gate_url: str,
+    marketplace_auth_token: str,
+    timeout_seconds: float,
+    simulate: bool,
+    max_stage_ms: int,
+    strict_live: bool,
+) -> StageResult:
+    started = _now_ms()
+    name = "marketplace_quote_settlement_integrity"
+    if simulate:
+        duration_ms = _now_ms() - started
+        slo_ok, slo_error = _slo_gate(duration_ms, max_stage_ms)
+        return StageResult(
+            name=name,
+            ok=slo_ok,
+            mode="simulated",
+            duration_ms=duration_ms,
+            detail={
+                "quote_created": True,
+                "settlement_committed": True,
+                "credit_ledger_invariants_ok": True,
+                "ticket_replay_defense_ok": True,
+            },
+            error=slo_error,
+        )
+
+    auth_headers = _auth_headers(marketplace_auth_token)
+    quote_url = str(marketplace_quote_url or "").strip()
+    settle_url_template = str(marketplace_settle_url or "").strip()
+    gate_url = str(marketplace_gate_url or "").strip()
+
+    if quote_url and settle_url_template and auth_headers:
+        quote_payload = {
+            "requestId": f"smoke-quote-{_now_ms()}",
+            "requestedUnits": 1,
+            "transportHint": "nkn",
+            "metadata": {"source": "hydra_noclip_interop_smoke"},
+        }
+        quote_probe = _http_json(
+            "POST",
+            quote_url,
+            payload=quote_payload,
+            headers=auth_headers,
+            timeout_seconds=timeout_seconds,
+        )
+        quote_resp = quote_probe.get("json") if isinstance(quote_probe.get("json"), dict) else {}
+        quote_obj = quote_resp.get("quote") if isinstance(quote_resp.get("quote"), dict) else quote_resp
+        quote_id = str(quote_obj.get("quoteId") or quote_obj.get("quote_id") or "").strip()
+        if quote_id:
+            settle_url = _materialize_settle_url(settle_url_template, quote_id)
+            settle_payload = {
+                "requestId": quote_payload["requestId"],
+                "actualUnits": 1,
+                "transportTag": "nkn",
+                "metadata": {"source": "hydra_noclip_interop_smoke"},
+            }
+            settle_probe = _http_json(
+                "POST",
+                settle_url,
+                payload=settle_payload,
+                headers=auth_headers,
+                timeout_seconds=timeout_seconds,
+            )
+            settle_resp = settle_probe.get("json") if isinstance(settle_probe.get("json"), dict) else {}
+            settlement_obj = settle_resp.get("settlement") if isinstance(settle_resp.get("settlement"), dict) else settle_resp
+            committed = str(
+                settlement_obj.get("settlementStatus")
+                or settlement_obj.get("settlement_status")
+                or settlement_obj.get("status")
+                or ""
+            ).strip().lower() in {"committed", "ok", "success", "settled"}
+            duration_ms = _now_ms() - started
+            slo_ok, slo_error = _slo_gate(duration_ms, max_stage_ms)
+            stage_ok = bool(
+                quote_probe.get("ok")
+                and int(quote_probe.get("status") or 0) in {200, 201}
+                and quote_id
+                and settle_probe.get("ok")
+                and int(settle_probe.get("status") or 0) in {200, 201}
+                and committed
+                and slo_ok
+            )
+            error = ""
+            if not stage_ok:
+                error = (
+                    quote_probe.get("error")
+                    or settle_probe.get("error")
+                    or "quote->settlement integrity probe failed"
+                )
+            if slo_error:
+                error = slo_error
+            return StageResult(
+                name=name,
+                ok=stage_ok,
+                mode="live",
+                duration_ms=duration_ms,
+                detail={
+                    "quote_url": quote_url,
+                    "settle_url": settle_url,
+                    "quote_http_status": int(quote_probe.get("status") or 0),
+                    "settle_http_status": int(settle_probe.get("status") or 0),
+                    "quote_id": quote_id,
+                    "settlement_committed": committed,
+                },
+                error=error,
+            )
+
+    if gate_url:
+        gate_probe = _http_json("GET", gate_url, headers=auth_headers, timeout_seconds=timeout_seconds)
+        gate_payload = gate_probe.get("json") if isinstance(gate_probe.get("json"), dict) else {}
+        gates = gate_payload.get("rollout_gates") if isinstance(gate_payload.get("rollout_gates"), dict) else {}
+        quote_ok = bool(gates.get("quote_settlement_integrity_ok"))
+        ledger_ok = bool(gates.get("credit_ledger_invariants_ok"))
+        ticket_ok = bool(gates.get("ticket_replay_defense_ok"))
+        fraud_ready = bool(gates.get("fraud_controls_ready"))
+        duration_ms = _now_ms() - started
+        slo_ok, slo_error = _slo_gate(duration_ms, max_stage_ms)
+        stage_ok = bool(
+            gate_probe.get("ok")
+            and int(gate_probe.get("status") or 0) == 200
+            and quote_ok
+            and ledger_ok
+            and ticket_ok
+            and fraud_ready
+            and slo_ok
+        )
+        error = ""
+        if not stage_ok:
+            error = gate_probe.get("error") or "marketplace rollout gates are not ready"
+        if slo_error:
+            error = slo_error
+        return StageResult(
+            name=name,
+            ok=stage_ok,
+            mode="live",
+            duration_ms=duration_ms,
+            detail={
+                "gate_url": gate_url,
+                "http_status": int(gate_probe.get("status") or 0),
+                "quote_settlement_integrity_ok": quote_ok,
+                "credit_ledger_invariants_ok": ledger_ok,
+                "ticket_replay_defense_ok": ticket_ok,
+                "fraud_controls_ready": fraud_ready,
+            },
+            error=error,
+        )
+
+    duration_ms = _now_ms() - started
+    if strict_live:
+        return StageResult(
+            name=name,
+            ok=False,
+            mode="live",
+            duration_ms=duration_ms,
+            detail={},
+            error="missing live marketplace quote/settlement probe URLs and gate URL",
+        )
+    slo_ok, slo_error = _slo_gate(duration_ms, max_stage_ms)
+    return StageResult(
+        name=name,
+        ok=slo_ok,
+        mode="simulated-fallback",
+        duration_ms=duration_ms,
+        detail={"reason": "marketplace live URLs not provided"},
+        error=slo_error,
+    )
+
+
 def _write_artifact(payload: Dict[str, Any], artifact_path: str) -> str:
     if artifact_path:
         path = Path(artifact_path).expanduser().resolve()
@@ -524,6 +720,16 @@ def run_smoke(args: argparse.Namespace) -> Dict[str, Any]:
             max_stage_ms=args.max_stage_ms,
             strict_live=args.strict_live,
         ),
+        _stage_marketplace_quote_settlement(
+            marketplace_quote_url=args.marketplace_quote_url,
+            marketplace_settle_url=args.marketplace_settle_url,
+            marketplace_gate_url=args.marketplace_gate_url,
+            marketplace_auth_token=args.marketplace_auth_token,
+            timeout_seconds=args.timeout_seconds,
+            simulate=args.simulate,
+            max_stage_ms=args.max_stage_ms,
+            strict_live=args.strict_live,
+        ),
     ]
     stage_failures = [stage for stage in stages if not stage.ok]
     elapsed_ms = _now_ms() - started
@@ -556,6 +762,26 @@ def _main() -> int:
         "--media-echo-url",
         default="",
         help="Optional live media echo endpoint for round-trip stage",
+    )
+    parser.add_argument(
+        "--marketplace-quote-url",
+        default="",
+        help="Optional live quote endpoint (for example /marketplace/offers/{offerId}/quote)",
+    )
+    parser.add_argument(
+        "--marketplace-settle-url",
+        default="",
+        help="Optional live settlement endpoint template (supports {quote_id})",
+    )
+    parser.add_argument(
+        "--marketplace-gate-url",
+        default="",
+        help="Optional live rollout gate endpoint (for example /marketplace/gates)",
+    )
+    parser.add_argument(
+        "--marketplace-auth-token",
+        default="",
+        help="Optional bearer token used for live marketplace quote/settlement probes",
     )
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout per request")
     parser.add_argument("--max-stage-ms", type=int, default=DEFAULT_MAX_STAGE_MS, help="Per-stage latency SLO threshold")

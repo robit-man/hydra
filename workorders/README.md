@@ -60,6 +60,13 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-10.8-runtime-enforcement-for-router-rpc-and-overlay-ingress.md`
   - `WO-10.9-cross-frontend-marketplace-ui-and-badge-unification.md`
   - `WO-10.10-rollout-security-audit-and-failure-recovery.md`
+- `phase-11`
+  - `WO-11.1-marketplace-catalog-federation-sync.md`
+  - `WO-11.2-noclip-catalog-ingest-provider-directory.md`
+  - `WO-11.3-hydra-frontend-federated-provider-directory.md`
+  - `WO-11.4-marketplace-directory-peer-ingress.md`
+  - `WO-11.5-peer-modal-bridge-target-orchestration.md`
+  - `WO-11.6-url-invite-bridge-autotarget-and-context-hydration.md`
 
 ## Completion Rule
 

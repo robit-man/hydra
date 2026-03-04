@@ -65,6 +65,26 @@
                             </div>
                             <div id="routerResolveMessage" class="router-status-message">Router discovery idle</div>
                         </div>
+                        <div id="marketplaceSummaryCard" class="marketplace-summary-card" aria-live="polite">
+                            <div class="marketplace-summary-head">
+                                <span class="marketplace-summary-title">Marketplace</span>
+                                <span id="marketplaceFreshness" class="marketplace-summary-freshness">stale</span>
+                            </div>
+                            <div class="marketplace-summary-row">
+                                <span id="marketplaceProviderLabel" class="marketplace-summary-provider">No provider catalog</span>
+                                <span id="marketplaceHealthBadge" class="market-state-badge state-offline">offline</span>
+                                <span id="marketplaceTransportBadge" class="market-transport-badge">transport: --</span>
+                            </div>
+                            <div class="marketplace-summary-row compact">
+                                <span id="marketplaceCreditPreview" class="market-credit-preview">Credits: --</span>
+                                <span id="marketplaceQuotePreview" class="market-quote-preview">Estimate: --</span>
+                            </div>
+                            <div class="marketplace-summary-row compact">
+                                <span id="marketplaceDirectoryPreview" class="market-directory-preview">Directory: --</span>
+                                <button id="marketplaceDirectoryRefreshBtn" class="ghost market-directory-refresh" title="Refresh NoClip provider directory">Dir Refresh</button>
+                            </div>
+                            <div id="marketplaceServiceBadges" class="marketplace-service-badges"></div>
+                        </div>
                         <a class="router-download" href="/router.py" download="router.py">
                             <button><img src="img/code.svg" alt="" class="icon"></button>
                         </a>
@@ -291,6 +311,9 @@
                             spellcheck="false">
                         <button type="button" class="secondary" id="peerManualAddBtn">Add</button>
                         <button type="button" class="ghost" id="peerManualScanBtn">Scan</button>
+                    </div>
+                    <div class="peer-ingress-hint muted" id="peerIngressHint">
+                        Manual or QR ingress supports prefixed and raw keys. NKN is primary; NATS is fallback.
                     </div>
                     <div class="peer-list" id="peerList"></div>
                 </div>

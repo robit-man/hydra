@@ -1,3 +1,9 @@
+import {
+  DEFAULT_INTEROP_CONTRACT,
+  normalizeInteropContract,
+  isInteropContractCompatible
+} from './interopContract.js';
+
 function normalizeRouterAddress(raw) {
   const text = String(raw || '').trim();
   if (!text) return '';
@@ -59,7 +65,7 @@ function firstEndpoint(...values) {
 }
 
 function extractInteropContract(reply) {
-  const fallback = { name: '', version: '' };
+  const fallback = normalizeInteropContract(DEFAULT_INTEROP_CONTRACT);
   if (!isObject(reply)) return fallback;
   const candidates = [
     reply.interop_contract,
@@ -69,18 +75,58 @@ function extractInteropContract(reply) {
   ];
   for (const candidate of candidates) {
     if (!isObject(candidate)) continue;
-    const name = String(candidate.name || '').trim();
-    const version = String(candidate.version || '').trim();
-    if (name || version) return { name, version };
+    const normalized = normalizeInteropContract(candidate, fallback);
+    if (normalized.name || normalized.version) return normalized;
   }
-  const version = String(
+  return normalizeInteropContract({
+    name: reply.interop_contract_name || reply.snapshot?.interop_contract_name || fallback.name,
+    version: String(
+      reply.interop_contract_version ||
+      reply.snapshot?.interop_contract_version ||
+      reply.reply?.interop_contract_version ||
+      reply.rawReply?.interop_contract_version ||
+      ''
+    ).trim(),
+    compat_min_version:
+      reply.interop_contract_compat_min_version ||
+      reply.snapshot?.interop_contract_compat_min_version ||
+      reply.reply?.interop_contract_compat_min_version ||
+      reply.rawReply?.interop_contract_compat_min_version ||
+      fallback.compatMinVersion,
+    namespace:
+      reply.interop_contract_namespace ||
+      reply.snapshot?.interop_contract_namespace ||
+      reply.reply?.interop_contract_namespace ||
+      reply.rawReply?.interop_contract_namespace ||
+      fallback.namespace
+  }, fallback);
+}
+
+function interopContractError(contractStatus) {
+  const incoming = contractStatus?.incoming || {};
+  const expected = contractStatus?.expected || {};
+  return [
+    'Interop contract mismatch',
+    `expected ${expected.name || '?'}@${expected.version || '?'}`,
+    `compat>=${expected.compatMinVersion || '?'}`,
+    `got ${incoming.name || '?'}@${incoming.version || '?'}`,
+    `compat>=${incoming.compatMinVersion || '?'}`
+  ].join(' | ');
+}
+
+function extractInteropContractStatus(reply) {
+  const incoming = extractInteropContract(reply);
+  return isInteropContractCompatible(incoming, DEFAULT_INTEROP_CONTRACT);
+}
+
+function extractInteropContractVersion(reply) {
+  return String(
     reply.interop_contract_version ||
     reply.snapshot?.interop_contract_version ||
     reply.reply?.interop_contract_version ||
     reply.rawReply?.interop_contract_version ||
     ''
-  ).trim();
-  return { name: '', version };
+  ).trim() || String(extractInteropContract(reply).version || '');
 }
 
 function normalizeResolvedEndpoints(reply) {
@@ -88,7 +134,7 @@ function normalizeResolvedEndpoints(reply) {
     ? (isObject(reply.resolved) ? reply.resolved : (isObject(reply.snapshot) ? reply.snapshot.resolved : null))
     : null;
   if (!isObject(source)) return {};
-  const contract = extractInteropContract(reply);
+  const contractVersion = extractInteropContractVersion(reply);
 
   const normalized = {};
   for (const [service, entryRaw] of Object.entries(source)) {
@@ -101,7 +147,7 @@ function normalizeResolvedEndpoints(reply) {
     const entryContractVersion = String(
       entry.interop_contract_version ||
       entry.interopContractVersion ||
-      contract.version ||
+      contractVersion ||
       ''
     ).trim();
     normalized[service] = {
@@ -127,6 +173,90 @@ function normalizeResolvedEndpoints(reply) {
     };
   }
   return normalized;
+}
+
+function normalizeCatalog(reply) {
+  const source = isObject(reply) ? reply : {};
+  const rawCatalogCandidates = [
+    source.catalog,
+    source.snapshot?.catalog,
+    source.reply?.catalog,
+    source.rawReply?.catalog
+  ];
+  let rawCatalog = null;
+  for (const candidate of rawCatalogCandidates) {
+    if (!isObject(candidate)) continue;
+    if (Array.isArray(candidate.services)) {
+      rawCatalog = candidate;
+      break;
+    }
+  }
+  if (!isObject(rawCatalog)) {
+    return {
+      generatedAtMs: 0,
+      provider: {},
+      summary: {},
+      services: {},
+      raw: null
+    };
+  }
+  const services = {};
+  const rawServices = Array.isArray(rawCatalog.services) ? rawCatalog.services : [];
+  for (const entryRaw of rawServices) {
+    if (!isObject(entryRaw)) continue;
+    const service = String(
+      entryRaw.service_id ||
+      entryRaw.service ||
+      entryRaw.watchdog_service ||
+      ''
+    ).trim();
+    if (!service) continue;
+    const selectedTransport = String(
+      entryRaw.selected_transport ||
+      entryRaw.selectedTransport ||
+      entryRaw.transport ||
+      ''
+    ).trim().toLowerCase();
+    const candidatesRaw = isObject(entryRaw.endpoint_candidates)
+      ? entryRaw.endpoint_candidates
+      : (isObject(entryRaw.candidates) ? entryRaw.candidates : {});
+    const candidates = {
+      cloudflare: firstEndpoint(candidatesRaw.cloudflare),
+      upnp: firstEndpoint(candidatesRaw.upnp),
+      nats: firstEndpoint(candidatesRaw.nats),
+      nkn: firstEndpoint(candidatesRaw.nkn),
+      local: firstEndpoint(candidatesRaw.local)
+    };
+    services[service] = {
+      service,
+      status: String(entryRaw.status || '').trim(),
+      healthy: !!entryRaw.healthy,
+      enabled: entryRaw.enabled !== false,
+      visibility: String(entryRaw.visibility || '').trim().toLowerCase() || 'public',
+      selectedTransport,
+      selectedEndpoint: firstEndpoint(
+        entryRaw.selected_endpoint,
+        entryRaw.base_url,
+        entryRaw.http_endpoint
+      ),
+      staleRejected: !!entryRaw.stale_rejected,
+      staleReason: String(entryRaw.stale_reason || '').trim(),
+      staleTunnelUrl: firstEndpoint(entryRaw.stale_tunnel_url),
+      tunnelError: String(entryRaw.tunnel_error || '').trim(),
+      pricing: isObject(entryRaw.pricing) ? { ...entryRaw.pricing } : {},
+      candidateReachability: isObject(entryRaw.candidate_reachability) ? { ...entryRaw.candidate_reachability } : {},
+      candidates,
+      raw: entryRaw
+    };
+  }
+  const generatedAtMs = Number(rawCatalog.generated_at_ms || rawCatalog.generatedAtMs || 0);
+  return {
+    generatedAtMs: Number.isFinite(generatedAtMs) ? generatedAtMs : 0,
+    provider: isObject(rawCatalog.provider) ? { ...rawCatalog.provider } : {},
+    summary: isObject(rawCatalog.summary) ? { ...rawCatalog.summary } : {},
+    services,
+    raw: rawCatalog
+  };
 }
 
 function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved }) {
@@ -203,34 +333,74 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
       try {
         const reply = await Net.nknResolveTunnels(target, timeoutMs);
         const ts = Number(reply?.timestamp_ms || Date.now());
+        const normalizedCatalog = normalizeCatalog(reply);
+        const catalogTs = Number(normalizedCatalog.generatedAtMs || 0);
         const staleBySeq = seq < state.appliedSeq;
         const staleByTs = ts > 0 && state.latestResolvedAt > 0 && ts < state.latestResolvedAt;
-        if (staleBySeq || staleByTs) {
-          log?.(`[router.resolve] stale response discarded target=${target} seq=${seq} ts=${ts}`);
+        const staleByCatalogTs = catalogTs > 0 && state.latestResolvedAt > 0 && catalogTs < state.latestResolvedAt;
+        if (staleBySeq || staleByTs || staleByCatalogTs) {
+          log?.(`[router.resolve] stale response discarded target=${target} seq=${seq} ts=${ts} catalogTs=${catalogTs}`);
           emit({ stale: true, reply, target });
           return { stale: true, reply };
         }
 
         state.appliedSeq = seq;
-        state.latestResolvedAt = ts;
+        state.latestResolvedAt = Math.max(ts || 0, catalogTs || 0);
         state.autoFailures = 0;
         const interopContract = extractInteropContract(reply);
+        const interopContractStatus = extractInteropContractStatus(reply);
+        if (!interopContractStatus.ok) {
+          const mismatch = interopContractError(interopContractStatus);
+          const coded = `UNSUPPORTED_CONTRACT_VERSION:${mismatch}`;
+          setStatus('error', { error: coded, interopContractVersion: String(interopContract.version || '') });
+          setBadge(`Router resolve failed: ${coded}`, false);
+          throw new Error(coded);
+        }
         const normalizedResolved = normalizeResolvedEndpoints(reply);
+        for (const [service, catalogEntry] of Object.entries(normalizedCatalog.services || {})) {
+          if (normalizedResolved[service]) continue;
+          normalizedResolved[service] = {
+            service,
+            transport: String(catalogEntry.selectedTransport || ''),
+            selectedTransport: String(catalogEntry.selectedTransport || ''),
+            selectionReason: String(catalogEntry.staleReason || ''),
+            interopContractVersion: String(interopContract.version || ''),
+            baseUrl: firstEndpoint(catalogEntry.selectedEndpoint, catalogEntry.candidates?.local),
+            httpEndpoint: firstEndpoint(catalogEntry.selectedEndpoint, catalogEntry.candidates?.local),
+            wsEndpoint: '',
+            remoteRoutable: false,
+            loopbackOnly: false,
+            isPublic: false,
+            candidates: {
+              cloudflare: firstEndpoint(catalogEntry.candidates?.cloudflare),
+              upnp: firstEndpoint(catalogEntry.candidates?.upnp),
+              nats: firstEndpoint(catalogEntry.candidates?.nats),
+              nkn: firstEndpoint(catalogEntry.candidates?.nkn),
+              local: firstEndpoint(catalogEntry.candidates?.local)
+            },
+            raw: isObject(catalogEntry.raw) ? catalogEntry.raw : {}
+          };
+        }
         const resolvedPayload = {
           target,
           requestId: String(reply?.request_id || ''),
           sourceAddress: String(reply?.source_address || ''),
-          timestampMs: ts,
+          timestampMs: Math.max(ts || 0, catalogTs || 0),
           interopContract,
           interopContractVersion: String(interopContract.version || ''),
+          interopContractCompatMinVersion: String(interopContract.compatMinVersion || ''),
+          interopContractNamespace: String(interopContract.namespace || ''),
+          interopContractOk: true,
           resolved: normalizedResolved,
+          catalog: normalizedCatalog,
           rawReply: reply
         };
         CFG.routerLastResolveResult = reply;
-        CFG.routerLastResolvedAt = ts;
+        CFG.routerLastResolvedAt = Math.max(ts || 0, catalogTs || 0);
         CFG.routerLastResolveError = '';
         CFG.routerLastResolveStatus = 'ok';
         CFG.routerLastInteropContractVersion = String(interopContract.version || '');
+        CFG.routerLastCatalog = normalizedCatalog.raw;
         saveCFG();
         if (typeof onResolved === 'function') {
           try { onResolved(resolvedPayload); } catch (_) { /* ignore */ }
@@ -238,10 +408,12 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
         log?.(`[router.resolve] target=${target} services=${Object.keys(normalizedResolved).length}`);
         setBadge('Router resolve complete');
         setStatus('ok', {
-          resolvedAt: ts,
+          resolvedAt: Math.max(ts || 0, catalogTs || 0),
           interopContractVersion: String(interopContract.version || ''),
+          interopContractOk: true,
           reply,
           resolved: normalizedResolved,
+          catalog: normalizedCatalog,
           target
         });
         return resolvedPayload;
@@ -312,5 +484,6 @@ export {
   createRouterDiscovery,
   normalizeRouterAddress,
   validateRouterAddress,
-  normalizeResolvedEndpoints
+  normalizeResolvedEndpoints,
+  normalizeCatalog
 };

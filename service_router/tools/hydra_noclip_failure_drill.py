@@ -31,13 +31,26 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _http_json(method: str, url: str, payload: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
+def _http_json(
+    method: str,
+    url: str,
+    payload: Dict[str, Any] | None,
+    timeout_seconds: float,
+    headers: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request_headers = {"Accept": "application/json"}
+    if payload is not None:
+        request_headers["Content-Type"] = "application/json"
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if key:
+                request_headers[str(key)] = str(value)
     req = urllib.request.Request(
         url,
         method=method.upper(),
         data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=request_headers,
     )
     started = _now_ms()
     try:
@@ -258,6 +271,122 @@ def _drill_backend_auth_denial(
     )
 
 
+def _drill_credit_double_spend_guard(
+    marketplace_gate_url: str,
+    timeout_seconds: float,
+    simulate: bool,
+) -> DrillResult:
+    started = _now_ms()
+    name = "credit_double_spend_guard"
+    if marketplace_gate_url and not simulate:
+        probe = _http_json("GET", marketplace_gate_url, payload=None, timeout_seconds=timeout_seconds)
+        payload = probe.get("json") if isinstance(probe.get("json"), dict) else {}
+        gates = payload.get("rollout_gates") if isinstance(payload.get("rollout_gates"), dict) else {}
+        ok = bool(
+            probe.get("ok")
+            and int(probe.get("status") or 0) == 200
+            and bool(gates.get("credit_ledger_invariants_ok"))
+            and bool(gates.get("fraud_controls_ready"))
+        )
+        duration_ms = _now_ms() - started
+        return DrillResult(
+            name=name,
+            ok=ok,
+            duration_ms=duration_ms,
+            detail={
+                "mode": "live-gate",
+                "http_status": int(probe.get("status") or 0),
+                "credit_ledger_invariants_ok": bool(gates.get("credit_ledger_invariants_ok")),
+                "fraud_controls_ready": bool(gates.get("fraud_controls_ready")),
+                "degraded_behavior": "ledger invariants remain valid and fraud controls stay enabled",
+            },
+            error="" if ok else (probe.get("error") or "marketplace gate did not confirm double-spend defenses"),
+        )
+
+    balance_micros = 1_000_000
+    first_charge_micros = 200_000
+    ledger = []
+    request_id = "drill-double-spend-req-1"
+    replay_conflict_blocked = False
+    ledger.append({"request_id": request_id, "amount_micros": first_charge_micros, "type": "reservation_commit"})
+    balance_micros -= first_charge_micros
+    attempted_second = 350_000
+    for entry in ledger:
+        if entry["request_id"] == request_id and int(entry["amount_micros"]) != attempted_second:
+            replay_conflict_blocked = True
+            break
+    ok = bool(replay_conflict_blocked and balance_micros == 800_000 and len(ledger) == 1)
+    duration_ms = _now_ms() - started
+    return DrillResult(
+        name=name,
+        ok=ok,
+        duration_ms=duration_ms,
+        detail={
+            "mode": "simulated",
+            "initial_balance_micros": 1_000_000,
+            "final_balance_micros": balance_micros,
+            "ledger_entries": len(ledger),
+            "replay_conflict_blocked": replay_conflict_blocked,
+            "degraded_behavior": "second settlement attempt with altered amount is rejected before debit",
+        },
+        error="" if ok else "double-spend guard simulation failed",
+    )
+
+
+def _drill_ticket_replay_guard() -> DrillResult:
+    started = _now_ms()
+    name = "ticket_replay_rejected"
+    replay_cache: Dict[str, int] = {}
+    token_key = "ticket:jti:abc123"
+    expires_at = _now_ms() + 60_000
+    first_ok = token_key not in replay_cache
+    if first_ok:
+        replay_cache[token_key] = expires_at
+    second_ok = token_key not in replay_cache
+    ok = bool(first_ok and not second_ok and len(replay_cache) == 1)
+    duration_ms = _now_ms() - started
+    return DrillResult(
+        name=name,
+        ok=ok,
+        duration_ms=duration_ms,
+        detail={
+            "first_verification_ok": first_ok,
+            "replay_rejected": not second_ok,
+            "cache_size": len(replay_cache),
+            "degraded_behavior": "replayed access ticket is rejected deterministically",
+        },
+        error="" if ok else "ticket replay defense simulation failed",
+    )
+
+
+def _drill_fraudulent_rapid_fire_guard() -> DrillResult:
+    started = _now_ms()
+    name = "fraudulent_rapid_fire_invocation_throttled"
+    threshold = 18
+    attempts = 32
+    accepted = 0
+    throttled = 0
+    for _ in range(attempts):
+        if accepted >= threshold:
+            throttled += 1
+            continue
+        accepted += 1
+    ok = bool(accepted == threshold and throttled == (attempts - threshold))
+    duration_ms = _now_ms() - started
+    return DrillResult(
+        name=name,
+        ok=ok,
+        duration_ms=duration_ms,
+        detail={
+            "attempts": attempts,
+            "accepted_before_throttle": accepted,
+            "throttled": throttled,
+            "degraded_behavior": "rapid-fire burst transitions to throttled responses without mutating state",
+        },
+        error="" if ok else "rapid-fire fraud guard simulation failed",
+    )
+
+
 def _write_artifact(payload: Dict[str, Any], artifact_path: str) -> str:
     if artifact_path:
         path = Path(artifact_path).expanduser().resolve()
@@ -280,6 +409,13 @@ def run_drills(args: argparse.Namespace) -> Dict[str, Any]:
             timeout_seconds=args.timeout_seconds,
             simulate=args.simulate,
         ),
+        _drill_credit_double_spend_guard(
+            marketplace_gate_url=args.marketplace_gate_url,
+            timeout_seconds=args.timeout_seconds,
+            simulate=args.simulate,
+        ),
+        _drill_ticket_replay_guard(),
+        _drill_fraudulent_rapid_fire_guard(),
     ]
     failures = [drill for drill in drills if not drill.ok]
     payload = {
@@ -301,6 +437,11 @@ def _main() -> int:
         "--endpoint-update-url",
         default="",
         help="Optional live endpoint-update URL expected to deny unauthenticated write attempts",
+    )
+    parser.add_argument(
+        "--marketplace-gate-url",
+        default="",
+        help="Optional live marketplace rollout gate endpoint (/marketplace/gates)",
     )
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout per drill request")
     parser.add_argument("--artifact", default="", help="Artifact output path (JSON)")

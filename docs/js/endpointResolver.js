@@ -1,3 +1,9 @@
+import {
+  DEFAULT_INTEROP_CONTRACT,
+  normalizeInteropContract,
+  isInteropContractCompatible
+} from './interopContract.js';
+
 const TRANSPORT_PREFERENCE = Object.freeze(['cloudflare', 'upnp', 'nats', 'nkn', 'local']);
 const MEDIA_TRANSPORT_PREFERENCE = Object.freeze(['cloudflare', 'upnp', 'nats', 'nkn', 'local']);
 
@@ -159,7 +165,7 @@ function extractEndpointAny(...values) {
   return '';
 }
 
-function normalizeResolvedEntry(service, rawEntry) {
+function normalizeResolvedEntry(service, rawEntry, contractMeta = null) {
   const raw = typeof rawEntry === 'string' ? { base_url: rawEntry } : asObject(rawEntry);
   const fallback = asObject(raw.fallback);
   const fallbackCloudflare = asObject(fallback.cloudflare);
@@ -182,8 +188,15 @@ function normalizeResolvedEntry(service, rawEntry) {
   const interopContractVersion = asString(
     raw.interopContractVersion ||
     raw.interop_contract_version ||
-    fallback.interop_contract_version
+    fallback.interop_contract_version ||
+    contractMeta?.version ||
+    ''
   );
+  const interopContract = normalizeInteropContract(
+    raw.interop_contract || raw.interopContract || fallback.interop_contract || contractMeta || {},
+    contractMeta || DEFAULT_INTEROP_CONTRACT
+  );
+  const interopContractStatus = isInteropContractCompatible(interopContract, DEFAULT_INTEROP_CONTRACT);
 
   const candidates = {
     cloudflare: stripTrailingSlash(extractEndpointAny(
@@ -244,6 +257,8 @@ function normalizeResolvedEntry(service, rawEntry) {
     selectedTransport: selectedTransport || normalizeTransport(raw.transport),
     selectionReason: asString(raw.selectionReason || raw.selection_reason),
     interopContractVersion,
+    interopContract,
+    interopContractOk: !!interopContractStatus.ok,
     baseUrl,
     httpEndpoint,
     wsEndpoint,
@@ -266,6 +281,8 @@ function mergeEntries(existing, incoming) {
     selectedTransport: incoming.selectedTransport || existing.selectedTransport,
     selectionReason: incoming.selectionReason || existing.selectionReason,
     interopContractVersion: incoming.interopContractVersion || existing.interopContractVersion || '',
+    interopContract: incoming.interopContract || existing.interopContract || normalizeInteropContract(DEFAULT_INTEROP_CONTRACT),
+    interopContractOk: typeof incoming.interopContractOk === 'boolean' ? incoming.interopContractOk : !!existing.interopContractOk,
     baseUrl: incoming.baseUrl || existing.baseUrl,
     httpEndpoint: incoming.httpEndpoint || existing.httpEndpoint,
     wsEndpoint: incoming.wsEndpoint || existing.wsEndpoint,
@@ -332,14 +349,66 @@ function extractResolvedMap(payload) {
   return {};
 }
 
+function extractInteropContract(payload) {
+  const source = asObject(payload);
+  const snapshot = asObject(source.snapshot);
+  const reply = asObject(source.reply);
+  const replySnapshot = asObject(reply.snapshot);
+  const rawReply = asObject(source.rawReply);
+  const rawReplySnapshot = asObject(rawReply.snapshot);
+
+  const candidates = [
+    source.interop_contract,
+    snapshot.interop_contract,
+    reply.interop_contract,
+    replySnapshot.interop_contract,
+    rawReply.interop_contract,
+    rawReplySnapshot.interop_contract,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      return normalizeInteropContract(candidate, DEFAULT_INTEROP_CONTRACT);
+    }
+  }
+  return normalizeInteropContract({
+    name:
+      source.interop_contract_name ||
+      snapshot.interop_contract_name ||
+      reply.interop_contract_name ||
+      rawReply.interop_contract_name ||
+      DEFAULT_INTEROP_CONTRACT.name,
+    version:
+      source.interop_contract_version ||
+      snapshot.interop_contract_version ||
+      reply.interop_contract_version ||
+      rawReply.interop_contract_version ||
+      DEFAULT_INTEROP_CONTRACT.version,
+    compat_min_version:
+      source.interop_contract_compat_min_version ||
+      snapshot.interop_contract_compat_min_version ||
+      reply.interop_contract_compat_min_version ||
+      rawReply.interop_contract_compat_min_version ||
+      DEFAULT_INTEROP_CONTRACT.compatMinVersion,
+    namespace:
+      source.interop_contract_namespace ||
+      snapshot.interop_contract_namespace ||
+      reply.interop_contract_namespace ||
+      rawReply.interop_contract_namespace ||
+      DEFAULT_INTEROP_CONTRACT.namespace
+  }, DEFAULT_INTEROP_CONTRACT);
+}
+
 function normalizeResolvedMap(payload) {
+  const contract = extractInteropContract(payload);
+  const contractStatus = isInteropContractCompatible(contract, DEFAULT_INTEROP_CONTRACT);
+  if (!contractStatus.ok) return {};
   const rawMap = extractResolvedMap(payload);
   const out = {};
 
   for (const [serviceName, rawEntry] of Object.entries(rawMap)) {
     const canonical = normalizeServiceName(serviceName);
     if (!canonical) continue;
-    const normalized = normalizeResolvedEntry(canonical, rawEntry);
+    const normalized = normalizeResolvedEntry(canonical, rawEntry, contractStatus.incoming);
     out[canonical] = mergeEntries(out[canonical], normalized);
   }
 

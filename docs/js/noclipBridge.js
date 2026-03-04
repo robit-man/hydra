@@ -1,4 +1,10 @@
 import { createDiscovery as createNatsDiscovery } from './nats.js';
+import {
+  DEFAULT_INTEROP_CONTRACT,
+  INTEROP_ERROR_CODES,
+  normalizeInteropEnvelope,
+  withInteropContractFields
+} from './interopContract.js';
 
 const DEFAULT_SERVERS = ['wss://demo.nats.io:8443'];
 const CONNECT_TIMEOUT_MS = 12000;
@@ -9,11 +15,8 @@ const MESSAGE_ID_TTL_MS = 2 * 60 * 1000;
 const CHUNK_ASSEMBLY_TTL_MS = 90 * 1000;
 const MAX_MESSAGE_CACHE = 1024;
 const MAX_CHUNK_ASSEMBLIES = 64;
-const INTEROP_CONTRACT = Object.freeze({
-  name: 'hydra_noclip_interop',
-  version: '1.0.0'
-});
 const EVENT_BY_TYPE = Object.freeze({
+  'interop-contract-get': 'interop.contract.get',
   'hybrid-bridge-state': 'interop.bridge.state',
   'hybrid-bridge-handshake': 'interop.bridge.handshake',
   'hybrid-bridge-handshake-ack': 'interop.bridge.handshake_ack',
@@ -26,9 +29,18 @@ const EVENT_BY_TYPE = Object.freeze({
   'smart-object-audio': 'interop.asset.media',
   'hybrid-chat': 'interop.chat.message',
   'hybrid-friend-request': 'interop.social.friend_request',
-  'hybrid-friend-response': 'interop.social.friend_response'
+  'hybrid-friend-response': 'interop.social.friend_response',
+  'market-service-catalog': 'market.service.catalog',
+  'market-service-status': 'market.service.status',
+  'market-quote-request': 'market.quote.request',
+  'market-quote-result': 'market.quote.result',
+  'market-credit-balance': 'market.credit.balance',
+  'market-access-ticket-issue': 'market.access.ticket.issue',
+  'market-access-ticket-verify': 'market.access.ticket.verify',
+  'market-usage-record': 'market.usage.record'
 });
 const TYPE_BY_EVENT = Object.freeze({
+  'interop.contract.get': 'interop-contract-get',
   'interop.bridge.state': 'hybrid-bridge-state',
   'interop.bridge.handshake': 'hybrid-bridge-handshake',
   'interop.bridge.handshake_ack': 'hybrid-bridge-handshake-ack',
@@ -40,10 +52,19 @@ const TYPE_BY_EVENT = Object.freeze({
   'interop.asset.media': 'smart-object-audio',
   'interop.chat.message': 'hybrid-chat',
   'interop.social.friend_request': 'hybrid-friend-request',
-  'interop.social.friend_response': 'hybrid-friend-response'
+  'interop.social.friend_response': 'hybrid-friend-response',
+  'market.service.catalog': 'market-service-catalog',
+  'market.service.status': 'market-service-status',
+  'market.quote.request': 'market-quote-request',
+  'market.quote.result': 'market-quote-result',
+  'market.credit.balance': 'market-credit-balance',
+  'market.access.ticket.issue': 'market-access-ticket-issue',
+  'market.access.ticket.verify': 'market-access-ticket-verify',
+  'market.usage.record': 'market-usage-record'
 });
 const GEOMETRY_TYPE_HINTS = new Set(['pointcloud', 'geometry', 'mesh', 'glb', 'gltf', 'model']);
 const MEDIA_TYPE_HINTS = new Set(['audio', 'video', 'image', 'media']);
+const MUTATION_FAMILIES = new Set(['pose', 'geometry', 'media', 'resource']);
 
 const toRadians = (deg) => (deg * Math.PI) / 180;
 
@@ -170,6 +191,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   let sharedPeerDiscovery = null;
   let sharedPeerUnsub = null;
   let sharedDmRegistered = false;
+  let latestRouterCatalog = null;
+  let latestCatalogChecksum = '';
 
   const nowMs = () => Date.now();
 
@@ -184,6 +207,59 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return '';
   };
 
+  const endpointFromValue = (value) => {
+    if (!value) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value !== 'object') return '';
+    return String(
+      value.endpoint ||
+      value.base_url ||
+      value.baseUrl ||
+      value.http_endpoint ||
+      value.httpEndpoint ||
+      value.nkn_address ||
+      value.address ||
+      ''
+    ).trim();
+  };
+
+  const candidateTimestampMs = (value, fallback = 0) => {
+    if (!value || typeof value !== 'object') return Number(fallback || 0);
+    const direct = Number(
+      value.last_verified_ms ||
+      value.lastVerifiedMs ||
+      value.updated_at_ms ||
+      value.updatedAtMs ||
+      value.last_seen_ms ||
+      value.lastSeenMs ||
+      0
+    );
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    const iso = String(value.last_verified || value.lastVerified || value.updated_at || value.updatedAt || '').trim();
+    if (iso) {
+      const parsed = Date.parse(iso);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    return Number(fallback || 0);
+  };
+
+  const normalizePeerCandidates = (rawValue, fallbackMs = 0) => {
+    const src = rawValue && typeof rawValue === 'object' ? rawValue : {};
+    const out = {};
+    const assign = (key, value) => {
+      const transport = normalizeTransportLabel(key || value?.transport || value?.selected_transport || value?.selectedTransport);
+      if (!transport) return;
+      const endpoint = endpointFromValue(value);
+      if (!endpoint) return;
+      out[transport] = {
+        endpoint,
+        lastVerifiedMs: candidateTimestampMs(value, fallbackMs)
+      };
+    };
+    Object.entries(src).forEach(([key, value]) => assign(key, value));
+    return out;
+  };
+
   const selectedTransportForPacket = (state, packet = {}) => {
     const fromPacket = normalizeTransportLabel(packet.selected_transport || packet.selectedTransport || packet.transport || packet.mode);
     if (fromPacket) return fromPacket;
@@ -192,6 +268,12 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const fromGlobal = normalizeTransportLabel(CFG?.transport);
     if (fromGlobal) return fromGlobal;
     return 'nkn';
+  };
+
+  const toNonNegativeInt = (value, fallback = 0) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.floor(n));
   };
 
   const pruneMessageCache = (state) => {
@@ -248,6 +330,231 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     // Use noclip. prefix for NoClip peers (changed from web.)
     if (/^[0-9a-f]{64}$/i.test(text)) return `noclip.${text.toLowerCase()}`;
     return '';
+  };
+
+  const normalizeCatalogSummary = (value = {}) => {
+    const src = value && typeof value === 'object' ? value : {};
+    return {
+      serviceCount: toNonNegativeInt(src.serviceCount ?? src.service_count, 0),
+      publishedCount: toNonNegativeInt(src.publishedCount ?? src.published_count, 0),
+      healthyCount: toNonNegativeInt(src.healthyCount ?? src.healthy_count, 0),
+      catalogReady: src.catalogReady === true || src.catalog_ready === true
+    };
+  };
+
+  const normalizeCatalogProvider = (value = {}) => {
+    const src = value && typeof value === 'object' ? value : {};
+    const addressesRaw = Array.isArray(src.router_nkn_addresses)
+      ? src.router_nkn_addresses
+      : (Array.isArray(src.routerNknAddresses) ? src.routerNknAddresses : []);
+    const routerNknAddresses = addressesRaw
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean)
+      .slice(0, 16);
+    const routerNkn = String(src.router_nkn || src.routerNkn || '').trim() || routerNknAddresses[0] || '';
+    return {
+      providerId: String(src.provider_id || src.providerId || '').trim(),
+      providerLabel: String(src.provider_label || src.providerLabel || '').trim(),
+      providerNetwork: String(src.provider_network || src.providerNetwork || '').trim().toLowerCase() || 'hydra',
+      providerContact: String(src.provider_contact || src.providerContact || '').trim(),
+      providerKeyFingerprint: String(
+        src.provider_key_fingerprint ||
+        src.providerKeyFingerprint ||
+        ''
+      ).trim().toLowerCase(),
+      routerNkn,
+      routerNknAddresses
+    };
+  };
+
+  const normalizeCatalogService = (value = {}) => {
+    const src = value && typeof value === 'object' ? value : {};
+    const serviceId = String(src.service_id || src.serviceId || src.service || '').trim();
+    if (!serviceId) return null;
+    const pricing = src.pricing && typeof src.pricing === 'object' ? src.pricing : {};
+    const endpointCandidates = src.endpoint_candidates && typeof src.endpoint_candidates === 'object'
+      ? src.endpoint_candidates
+      : (src.endpointCandidates && typeof src.endpointCandidates === 'object' ? src.endpointCandidates : {});
+    const readEndpoint = (entry) => {
+      if (!entry) return '';
+      if (typeof entry === 'string') return entry.trim();
+      if (typeof entry === 'object') {
+        return String(
+          entry.base_url ||
+          entry.baseUrl ||
+          entry.http_endpoint ||
+          entry.httpEndpoint ||
+          entry.nkn_address ||
+          entry.address ||
+          ''
+        ).trim();
+      }
+      return '';
+    };
+    return {
+      serviceId,
+      status: String(src.status || '').trim(),
+      healthy: src.healthy === true,
+      enabled: src.enabled !== false,
+      visibility: String(src.visibility || '').trim().toLowerCase() || 'public',
+      selectedTransport: normalizeTransportLabel(src.selected_transport || src.selectedTransport || src.transport),
+      selectedEndpoint: String(src.selected_endpoint || src.selectedEndpoint || src.base_url || src.http_endpoint || '').trim(),
+      endpointCandidates: {
+        cloudflare: readEndpoint(endpointCandidates.cloudflare),
+        nkn: readEndpoint(endpointCandidates.nkn),
+        local: readEndpoint(endpointCandidates.local),
+        upnp: readEndpoint(endpointCandidates.upnp),
+        nats: readEndpoint(endpointCandidates.nats)
+      },
+      pricing: {
+        currency: String(pricing.currency || '').trim().toUpperCase(),
+        unit: String(pricing.unit || '').trim().toLowerCase(),
+        basePrice: Number.isFinite(Number(pricing.base_price))
+          ? Math.max(0, Number(pricing.base_price))
+          : (Number.isFinite(Number(pricing.basePrice)) ? Math.max(0, Number(pricing.basePrice)) : 0)
+      }
+    };
+  };
+
+  const normalizeMarketplaceCatalog = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const src = value;
+    const servicesRaw = Array.isArray(src.services) ? src.services : [];
+    const services = servicesRaw
+      .map((entry) => normalizeCatalogService(entry))
+      .filter(Boolean)
+      .slice(0, 128);
+    return {
+      generatedAtMs: toNonNegativeInt(src.generated_at_ms ?? src.generatedAtMs, nowMs()),
+      provider: normalizeCatalogProvider(src.provider || {}),
+      summary: normalizeCatalogSummary(src.summary || {}),
+      services
+    };
+  };
+
+  const normalizeMarketStatusEntry = (value = {}) => {
+    const src = value && typeof value === 'object' ? value : {};
+    const serviceId = String(src.service_id || src.serviceId || src.service || '').trim();
+    if (!serviceId) return null;
+    const status = String(src.status || '').trim().toLowerCase();
+    return {
+      serviceId,
+      status: status || 'unknown',
+      healthy: src.healthy === true || status === 'online',
+      visibility: String(src.visibility || '').trim().toLowerCase() || 'public',
+      selectedTransport: normalizeTransportLabel(src.selected_transport || src.selectedTransport || src.transport),
+      selectedEndpoint: String(src.selected_endpoint || src.selectedEndpoint || src.endpoint || '').trim(),
+      staleRejected: src.stale_rejected === true || src.staleRejected === true,
+      ts: toNonNegativeInt(src.ts || src.timestamp || nowMs(), nowMs())
+    };
+  };
+
+  const mergeMarketServiceStatus = (existing = {}, updates = []) => {
+    const base = existing && typeof existing === 'object' ? { ...existing } : {};
+    ensureArray(updates).forEach((entry) => {
+      const normalized = normalizeMarketStatusEntry(entry);
+      if (!normalized?.serviceId) return;
+      base[normalized.serviceId] = normalized;
+    });
+    return base;
+  };
+
+  if (!latestRouterCatalog && CFG?.routerMarketplaceCatalog && typeof CFG.routerMarketplaceCatalog === 'object') {
+    const seeded = normalizeMarketplaceCatalog(CFG.routerMarketplaceCatalog);
+    if (seeded) {
+      latestRouterCatalog = seeded;
+      latestCatalogChecksum = checksumHex(seeded);
+    }
+  }
+
+  const getCatalogProviderMeta = (catalog = latestRouterCatalog) => {
+    const normalized = normalizeMarketplaceCatalog(catalog);
+    if (!normalized) return {};
+    const provider = normalized.provider || {};
+    const summary = normalized.summary || {};
+    return {
+      providerId: provider.providerId || '',
+      providerLabel: provider.providerLabel || '',
+      providerNetwork: provider.providerNetwork || 'hydra',
+      providerFingerprint: provider.providerKeyFingerprint || '',
+      routerNkn: provider.routerNkn || '',
+      routerNknAddresses: Array.isArray(provider.routerNknAddresses) ? provider.routerNknAddresses.slice(0, 8) : [],
+      marketplaceCatalogSummary: {
+        serviceCount: toNonNegativeInt(summary.serviceCount, 0),
+        publishedCount: toNonNegativeInt(summary.publishedCount, 0),
+        healthyCount: toNonNegativeInt(summary.healthyCount, 0),
+        generatedAtMs: toNonNegativeInt(normalized.generatedAtMs, nowMs())
+      }
+    };
+  };
+
+  const buildDiscoveryMeta = (extra = {}) => {
+    const providerMeta = getCatalogProviderMeta();
+    const base = {
+      ids: ['hydra', 'graph', 'bridge', 'marketplace'],
+      kind: 'hydra',
+      network: 'hydra',
+      graphId: CFG?.graphId || ''
+    };
+    return {
+      ...base,
+      ...(providerMeta.providerId ? { providerId: providerMeta.providerId } : {}),
+      ...(providerMeta.providerLabel ? { providerLabel: providerMeta.providerLabel } : {}),
+      ...(providerMeta.providerNetwork ? { providerNetwork: providerMeta.providerNetwork } : {}),
+      ...(providerMeta.providerFingerprint ? { providerFingerprint: providerMeta.providerFingerprint } : {}),
+      ...(providerMeta.routerNkn ? { routerNkn: providerMeta.routerNkn } : {}),
+      ...(providerMeta.routerNknAddresses?.length ? { routerNknAddresses: providerMeta.routerNknAddresses } : {}),
+      ...(providerMeta.marketplaceCatalogSummary ? { marketplaceCatalogSummary: providerMeta.marketplaceCatalogSummary } : {}),
+      ...extra
+    };
+  };
+
+  const emitMarketUiEvent = (eventName, detail = {}) => {
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    try {
+      window.dispatchEvent(new CustomEvent(eventName, {
+        detail: {
+          ...(detail && typeof detail === 'object' ? detail : {}),
+          ts: Number(detail?.ts || nowMs()) || nowMs()
+        }
+      }));
+    } catch (_) {
+      // ignore DOM dispatch failures
+    }
+  };
+
+  const formatUsdMicros = (rawMicros) => {
+    const numeric = Number(rawMicros);
+    if (!Number.isFinite(numeric) || numeric < 0) return '';
+    return (numeric / 1_000_000).toFixed(4).replace(/\.?0+$/, '');
+  };
+
+  const creditPreviewText = (balance = {}) => {
+    const available = String(balance.available ?? balance.balance ?? '').trim();
+    if (available) return `Credits: ${available} USDC`;
+    const availableMicros = String(balance.available_micros ?? balance.availableMicros ?? '').trim();
+    if (availableMicros) {
+      const usd = formatUsdMicros(availableMicros);
+      if (usd) return `Credits: ${usd} USDC`;
+    }
+    return 'Credits: --';
+  };
+
+  const quotePreviewText = (quote = {}) => {
+    const amount = String(quote.estimatedCharge || quote.amount || '').trim();
+    if (amount) return `Estimate: ${amount} USDC`;
+    const amountMicros = String(
+      quote.estimatedChargeMicros ||
+      quote.estimated_charge_micros ||
+      quote.amountMicros ||
+      quote.amount_micros ||
+      ''
+    ).trim();
+    if (amountMicros) {
+      const usd = formatUsdMicros(amountMicros);
+      if (usd) return `Estimate: ${usd} USDC`;
+    }
+    return 'Estimate: --';
   };
 
   const sanitizeRoomName = (value) => {
@@ -310,9 +617,26 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   };
 
   const normalizeIncomingMessage = (rawMsg = {}) => {
-    if (!rawMsg || typeof rawMsg !== 'object') return { type: '', event: '', message: {} };
-    const payload = rawMsg.payload && typeof rawMsg.payload === 'object' ? rawMsg.payload : null;
-    const message = payload ? { ...payload, ...rawMsg } : { ...rawMsg };
+    if (!rawMsg || typeof rawMsg !== 'object') {
+      return {
+        ok: false,
+        type: '',
+        event: '',
+        message: {},
+        errorCode: INTEROP_ERROR_CODES.INVALID_ENVELOPE,
+        error: 'payload must be an object',
+        contractStatus: null
+      };
+    }
+    const parsed = normalizeInteropEnvelope(rawMsg, {
+      expectedContract: DEFAULT_INTEROP_CONTRACT,
+      requireTypeOrEvent: true
+    });
+    const base = parsed.envelope && typeof parsed.envelope === 'object'
+      ? parsed.envelope
+      : rawMsg;
+    const payload = base.payload && typeof base.payload === 'object' ? base.payload : null;
+    const message = payload ? { ...payload, ...base } : { ...base };
     const type = normalizeMessageType(message.type || rawMsg.type, message.event || rawMsg.event);
     const event = normalizeMessageEvent(message.event || rawMsg.event, type);
     if (type && !message.type) message.type = type;
@@ -324,9 +648,13 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       message.selected_transport = message.selectedTransport;
     }
     return {
+      ok: !!parsed.ok,
       type,
       event,
-      message
+      message,
+      errorCode: parsed.errorCode || '',
+      error: parsed.error || '',
+      contractStatus: parsed.contractStatus || null
     };
   };
 
@@ -434,19 +762,61 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     snapshot.forEach((peer) => {
       const pub = sanitizePubKey(peer?.nknPub || peer?.pub || peer?.addr || '');
       if (!pub) return;
+      const peerLast = Number(peer?.last || nowMs()) || nowMs();
+      const selectedTransport = normalizeTransportLabel(
+        peer?.selectedTransport ||
+        peer?.selected_transport ||
+        peer?.transport ||
+        peer?.meta?.selectedTransport ||
+        peer?.meta?.selected_transport
+      );
+      const endpointCandidates = normalizePeerCandidates(
+        peer?.endpointCandidates ||
+        peer?.endpoint_candidates ||
+        peer?.candidates ||
+        peer?.meta?.endpointCandidates ||
+        peer?.meta?.endpoint_candidates ||
+        {},
+        peerLast > 1e12 ? peerLast : (peerLast * 1000)
+      );
+      const discoverySource = String(
+        peer?.discoverySource ||
+        peer?.discovery_source ||
+        peer?.meta?.discoverySource ||
+        peer?.meta?.discovery_source ||
+        'peerDiscovery.shared'
+      ).trim();
       staleKeys.delete(pub);
       NOCLIP_PEERS.set(pub, {
         pub,
         addr: peer.addr || `noclip.${pub}`,
-        meta: peer.meta || {},
-        last: peer.last || nowMs()
+        meta: {
+          ...(peer.meta || {}),
+          selectedTransport: selectedTransport || '',
+          endpointCandidates,
+          discoverySource
+        },
+        selectedTransport: selectedTransport || '',
+        endpointCandidates,
+        discoverySource,
+        last: peerLast
       });
       const watchers = TARGET_INDEX.get(pub);
       if (watchers && watchers.size) {
         const updates = {
           addr: peer.addr || '',
-          meta: peer.meta || {},
-          lastTs: peer.last || nowMs()
+          meta: {
+            ...(peer.meta || {}),
+            selectedTransport: selectedTransport || '',
+            endpointCandidates,
+            discoverySource
+          },
+          state: {
+            selectedTransport: selectedTransport || '',
+            endpointCandidates,
+            discoverySource
+          },
+          lastTs: peerLast
         };
         watchers.forEach((nodeId) => {
           const st = ensureNodeState(nodeId);
@@ -600,6 +970,15 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     return Array.from(state.remotePeers.values()).map((entry) => ({
       nknPub: entry.pub,
       addr: entry.addr || `noclip.${entry.pub}`,
+      selectedTransport: String(
+        entry?.state?.selectedTransport ||
+        entry?.state?.selected_transport ||
+        entry?.meta?.selectedTransport ||
+        entry?.meta?.selected_transport ||
+        ''
+      ).trim().toLowerCase(),
+      endpointCandidates: entry?.state?.endpointCandidates || entry?.state?.endpoint_candidates || entry?.meta?.endpointCandidates || {},
+      discoverySource: String(entry?.state?.discoverySource || entry?.state?.discovery_source || entry?.meta?.discoverySource || '').trim(),
       meta: entry.meta || {},
       geo: entry.geo || null,
       pose: entry.pose || null,
@@ -811,8 +1190,24 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
 
   async function ensureDiscovery() {
     if (sharedPeerDiscovery?.sendDm) {
+      const dm = (pub, payload) => sharedPeerDiscovery.sendDm(pub, payload);
+      const handshake = async (pub, meta = {}, { wantAck = true } = {}) => {
+        const packet = withInteropContractFields({
+          type: 'hybrid-bridge-handshake',
+          event: 'interop.bridge.handshake',
+          pub,
+          capabilities: ['graph', 'resources', 'commands', 'audio', 'marketplace'],
+          clientType: 'hydra',
+          graphId: CFG?.graphId || '',
+          meta: buildDiscoveryMeta(meta || {}),
+          wantAck: wantAck !== false,
+          ts: nowMs()
+        }, DEFAULT_INTEROP_CONTRACT);
+        return dm(pub, packet);
+      };
       return {
-        dm: (pub, payload) => sharedPeerDiscovery.sendDm(pub, payload)
+        dm,
+        handshake
       };
     }
     if (discovery) return discovery;
@@ -838,13 +1233,37 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         me: {
           nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
           addr: addr || '',
-          meta: { ids: ['hydra', 'graph'], kind: 'hydra' }
+          meta: buildDiscoveryMeta()
         }
       });
       discoveryClient.on('dm', handleDiscoveryDm);
       discoveryClient.on('peer', (peer) => {
         const normalized = sanitizePubKey(peer?.nknPub);
         if (!normalized) return;
+        const peerLast = Number(peer?.last || nowMs()) || nowMs();
+        const selectedTransport = normalizeTransportLabel(
+          peer?.selectedTransport ||
+          peer?.selected_transport ||
+          peer?.transport ||
+          peer?.meta?.selectedTransport ||
+          peer?.meta?.selected_transport
+        );
+        const endpointCandidates = normalizePeerCandidates(
+          peer?.endpointCandidates ||
+          peer?.endpoint_candidates ||
+          peer?.candidates ||
+          peer?.meta?.endpointCandidates ||
+          peer?.meta?.endpoint_candidates ||
+          {},
+          peerLast > 1e12 ? peerLast : (peerLast * 1000)
+        );
+        const discoverySource = String(
+          peer?.discoverySource ||
+          peer?.discovery_source ||
+          peer?.meta?.discoverySource ||
+          peer?.meta?.discovery_source ||
+          'nats.peer'
+        ).trim();
 
         // Track NoClip peers (identified by network: 'noclip' in metadata)
         const addr = (peer.addr || peer.nknPub || '').toLowerCase();
@@ -853,8 +1272,16 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           NOCLIP_PEERS.set(normalized, {
             pub: normalized,
             addr: peer.addr || `noclip.${normalized}`,
-            meta: peer.meta || {},
-            last: peer.last || nowMs()
+            meta: {
+              ...(peer.meta || {}),
+              selectedTransport: selectedTransport || '',
+              endpointCandidates,
+              discoverySource
+            },
+            selectedTransport: selectedTransport || '',
+            endpointCandidates,
+            discoverySource,
+            last: peerLast
           });
           updateNoclipBadge();
         }
@@ -863,8 +1290,18 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         if (!watchers || !watchers.size) return;
         const updates = {
           addr: peer.addr || '',
-          meta: peer.meta || {},
-          lastTs: peer.last || nowMs()
+          meta: {
+            ...(peer.meta || {}),
+            selectedTransport: selectedTransport || '',
+            endpointCandidates,
+            discoverySource
+          },
+          state: {
+            selectedTransport: selectedTransport || '',
+            endpointCandidates,
+            discoverySource
+          },
+          lastTs: peerLast
         };
         for (const nodeId of watchers) {
           const st = ensureNodeState(nodeId);
@@ -903,7 +1340,6 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     const msg = normalized.message || {};
     const type = normalized.type || normalizeMessageType(msg.type, msg.event);
     const event = normalized.event || normalizeMessageEvent(msg.event, type);
-    if (!type && !event) return;
 
     if (type && !msg.type) msg.type = type;
     if (event && !msg.event) msg.event = event;
@@ -916,7 +1352,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     if (!watcherIds.length) return;
     const primaryNodeId = watcherIds[0];
 
-    const sendAck = (status = 'ok', detail = 'received') => {
+    const sendAck = (status = 'ok', detail = 'received', errorCode = '') => {
       const inReplyTo = String(msg.messageId || msg.message_id || '').trim();
       if (!inReplyTo) return;
       const st = ensureNodeState(primaryNodeId);
@@ -927,10 +1363,41 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         inReplyTo,
         status,
         detail,
+        error_code: status === 'ok' ? '' : String(errorCode || INTEROP_ERROR_CODES.INVALID_ENVELOPE),
         sessionId: msg.sessionId || msg.session_id || '',
         ts: nowMs()
       }, { targets: [from] });
     };
+
+    if (!normalized.ok) {
+      const errorCode = String(normalized.errorCode || INTEROP_ERROR_CODES.INVALID_ENVELOPE);
+      const detail = String(normalized.error || 'invalid interop payload');
+      for (const nodeId of watcherIds) {
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type: 'interop.error',
+          payload: {
+            event: 'interop.error',
+            error_code: errorCode,
+            error: detail,
+            contract_status: normalized.contractStatus || null,
+            raw: msg
+          }
+        });
+      }
+      sendAck('error', `${errorCode}:${detail}`, errorCode);
+      return;
+    }
+
+    if (!type && !event) {
+      sendAck(
+        'error',
+        `${INTEROP_ERROR_CODES.MISSING_REQUIRED_FIELDS}:missing type/event`,
+        INTEROP_ERROR_CODES.MISSING_REQUIRED_FIELDS
+      );
+      return;
+    }
 
     const messageId = String(msg.messageId || msg.message_id || '').trim();
     if (messageId) {
@@ -1069,6 +1536,239 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
           payload: msg
         });
       }
+      return;
+    }
+
+    if (type === 'market-service-catalog' || event === 'market.service.catalog') {
+      const catalogRaw = msg.catalog || msg.marketplaceCatalog || msg.marketplace_catalog || msg.payload || msg;
+      const catalog = normalizeMarketplaceCatalog(catalogRaw);
+      const summary = normalizeCatalogSummary(
+        msg.catalog_summary || msg.catalogSummary || msg.summary || catalog?.summary || {}
+      );
+      const provider = normalizeCatalogProvider(
+        msg.provider || catalog?.provider || {}
+      );
+      const catalogChecksum = String(
+        msg.catalogChecksum ||
+        msg.catalog_checksum ||
+        (catalog ? checksumHex(catalog) : '')
+      ).trim();
+
+      for (const nodeId of watcherIds) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+        const catalogState = catalog
+          ? {
+              generatedAtMs: catalog.generatedAtMs,
+              provider: catalog.provider,
+              summary: catalog.summary,
+              services: catalog.services
+            }
+          : null;
+        upsertRemotePeer(st, from, {
+          meta: {
+            providerId: provider.providerId || '',
+            providerLabel: provider.providerLabel || '',
+            providerNetwork: provider.providerNetwork || '',
+            providerFingerprint: provider.providerKeyFingerprint || '',
+            routerNkn: provider.routerNkn || '',
+            routerNknAddresses: provider.routerNknAddresses || [],
+            marketplaceCatalogSummary: summary,
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          state: {
+            marketplaceCatalog: catalogState,
+            marketplaceCatalogSummary: summary,
+            provider,
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          lastTs: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'marketCatalog', {
+          nodeId,
+          peer: from,
+          catalog: catalogState,
+          summary,
+          provider,
+          catalogChecksum: catalogChecksum || '',
+          ts: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type: 'market-service-catalog',
+          payload: {
+            ...msg,
+            catalog: catalogState,
+            summary,
+            provider,
+            catalogChecksum: catalogChecksum || ''
+          }
+        });
+        Router.sendFrom(nodeId, 'peers', {
+          nodeId,
+          peer: from,
+          peers: peersForOutput(st)
+        });
+      }
+      emitMarketUiEvent('hydra-market-catalog', {
+        peer: from,
+        catalog: catalog
+          ? {
+              generated_at_ms: catalog.generatedAtMs,
+              provider: catalog.provider,
+              summary: catalog.summary,
+              services: catalog.services
+            }
+          : null,
+        summary,
+        provider,
+        catalogChecksum: catalogChecksum || '',
+        ts: msg.ts || nowMs()
+      });
+      if (msg.expectAck === true) sendAck('ok', 'catalog-received');
+      return;
+    }
+
+    if (type === 'market-service-status' || event === 'market.service.status') {
+      const summary = normalizeCatalogSummary(
+        msg.catalog_summary || msg.catalogSummary || msg.summary || {}
+      );
+      const provider = normalizeCatalogProvider(msg.provider || {});
+      const services = ensureArray(msg.services || msg.statuses || msg.entries)
+        .map((entry) => normalizeMarketStatusEntry(entry))
+        .filter(Boolean);
+      const statusMap = mergeMarketServiceStatus({}, services);
+      const catalogChecksum = String(msg.catalogChecksum || msg.catalog_checksum || '').trim();
+
+      for (const nodeId of watcherIds) {
+        const st = ensureNodeState(nodeId);
+        if (!st) continue;
+        const existingPeer = st.remotePeers?.get?.(from) || {};
+        const priorStatus = existingPeer?.state?.marketServiceStatus || {};
+        upsertRemotePeer(st, from, {
+          meta: {
+            providerId: provider.providerId || '',
+            providerLabel: provider.providerLabel || '',
+            providerNetwork: provider.providerNetwork || '',
+            providerFingerprint: provider.providerKeyFingerprint || '',
+            routerNkn: provider.routerNkn || '',
+            routerNknAddresses: provider.routerNknAddresses || [],
+            marketplaceCatalogSummary: summary,
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          state: {
+            marketplaceCatalogSummary: summary,
+            provider,
+            marketServiceStatus: mergeMarketServiceStatus(
+              priorStatus,
+              services
+            ),
+            ...(catalogChecksum ? { catalogChecksum } : {})
+          },
+          lastTs: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'marketStatus', {
+          nodeId,
+          peer: from,
+          summary,
+          provider,
+          services,
+          serviceStatusMap: statusMap,
+          catalogChecksum: catalogChecksum || '',
+          ts: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type: 'market-service-status',
+          payload: {
+            ...msg,
+            summary,
+            provider,
+            services,
+            serviceStatusMap: statusMap,
+            catalogChecksum: catalogChecksum || ''
+          }
+        });
+        Router.sendFrom(nodeId, 'peers', {
+          nodeId,
+          peer: from,
+          peers: peersForOutput(st)
+        });
+      }
+      emitMarketUiEvent('hydra-market-status', {
+        peer: from,
+        summary,
+        provider,
+        services,
+        serviceStatusMap: statusMap,
+        catalogChecksum: catalogChecksum || '',
+        ts: msg.ts || nowMs()
+      });
+      if (msg.expectAck === true) sendAck('ok', 'status-received');
+      return;
+    }
+
+    if (type === 'market-quote-result' || event === 'market.quote.result') {
+      const quote = msg.quote && typeof msg.quote === 'object' ? msg.quote : msg;
+      const label = quotePreviewText(quote);
+      for (const nodeId of watcherIds) {
+        Router.sendFrom(nodeId, 'marketQuote', {
+          nodeId,
+          peer: from,
+          quote,
+          text: label,
+          ts: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type: 'market-quote-result',
+          payload: {
+            ...msg,
+            quote
+          }
+        });
+      }
+      emitMarketUiEvent('hydra-market-quote-preview', {
+        peer: from,
+        quote,
+        text: label,
+        ts: msg.ts || nowMs()
+      });
+      if (msg.expectAck === true) sendAck('ok', 'quote-received');
+      return;
+    }
+
+    if (type === 'market-credit-balance' || event === 'market.credit.balance') {
+      const balance = msg.balance && typeof msg.balance === 'object' ? msg.balance : msg;
+      const text = creditPreviewText(balance);
+      for (const nodeId of watcherIds) {
+        Router.sendFrom(nodeId, 'marketCredit', {
+          nodeId,
+          peer: from,
+          balance,
+          text,
+          ts: msg.ts || nowMs()
+        });
+        Router.sendFrom(nodeId, 'events', {
+          nodeId,
+          peer: from,
+          type: 'market-credit-balance',
+          payload: {
+            ...msg,
+            balance
+          }
+        });
+      }
+      emitMarketUiEvent('hydra-market-credit-preview', {
+        peer: from,
+        balance,
+        text,
+        ts: msg.ts || nowMs()
+      });
+      if (msg.expectAck === true) sendAck('ok', 'credit-balance-received');
       return;
     }
 
@@ -1280,15 +1980,29 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
   const ensureHandshake = async (nodeId, state) => {
     if (!state || !state.targetPub) return;
     try {
-      const disco = await ensureDiscovery();
-      if (!disco) return;
-      const meta = { ids: ['hydra', 'bridge'], nodeId };
-      try {
-        await disco.handshake(state.targetPub, meta, { wantAck: true });
-      } catch (err) {
-        log?.(`[noclip] handshake error: ${err?.message || err}`);
+      await ensureDiscovery();
+      const provider = getCatalogProviderMeta();
+      const handshakeMeta = buildDiscoveryMeta({
+        nodeId,
+        catalogChecksum: latestCatalogChecksum || '',
+      });
+      const packet = {
+        type: 'hybrid-bridge-handshake',
+        event: 'interop.bridge.handshake',
+        capabilities: ['graph', 'resources', 'commands', 'audio', 'marketplace'],
+        clientType: 'hydra',
+        graphId: CFG?.graphId || '',
+        nodeId,
+        provider,
+        catalog_summary: provider.marketplaceCatalogSummary || {},
+        catalogChecksum: latestCatalogChecksum || '',
+        meta: handshakeMeta,
+        ts: nowMs()
+      };
+      const ok = await sendBridgePayload(nodeId, state, packet, { targets: [state.targetPub] });
+      if (ok) {
+        state.lastHandshakeAt = nowMs();
       }
-      state.lastHandshakeAt = nowMs();
     } catch (err) {
       log?.(`[noclip] ensureHandshake failed: ${err?.message || err}`);
     }
@@ -1325,6 +2039,296 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       return null;
     }
     return out;
+  };
+
+  const resolvePacketFamily = (packetType, packetEvent, packet = {}) => {
+    const type = String(packetType || '').trim().toLowerCase();
+    const event = String(packetEvent || '').trim().toLowerCase();
+    if (type === 'hybrid-bridge-update' || event === 'interop.asset.pose') return 'pose';
+    if (type === 'hybrid-bridge-geometry' || event === 'interop.asset.geometry') return 'geometry';
+    if (type === 'hybrid-bridge-command' || event === 'interop.asset.command') return 'command';
+    if (
+      type === 'smart-object-audio'
+      || type === 'smart-object-audio-output'
+      || event === 'interop.asset.media'
+      || packet?.audioPacket
+      || packet?.videoPacket
+    ) return 'media';
+    if (type === 'hybrid-bridge-resource' || event === 'interop.asset.resource') {
+      return inferResourceFamily(
+        packet?.resource && typeof packet.resource === 'object' ? packet.resource : {},
+        packet
+      );
+    }
+    return inferResourceFamily(
+      packet?.resource && typeof packet.resource === 'object' ? packet.resource : {},
+      packet
+    );
+  };
+
+  const normalizePacketMetering = (packet = {}) => {
+    const src = packet?.metering && typeof packet.metering === 'object' ? packet.metering : {};
+    const readInt = (...values) => {
+      for (const value of values) {
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0) return Math.round(n);
+      }
+      return 0;
+    };
+    const readFloat = (...values) => {
+      for (const value of values) {
+        const n = Number(value);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return 1;
+    };
+    return {
+      quote_id: String(src.quote_id || src.quoteId || packet.quote_id || packet.quoteId || '').trim(),
+      charge_id: String(src.charge_id || src.chargeId || packet.charge_id || packet.chargeId || '').trim(),
+      reservation_id: String(
+        src.reservation_id
+        || src.reservationId
+        || src.credit_reservation_id
+        || packet.reservation_id
+        || packet.reservationId
+        || packet.credit_reservation_id
+        || ''
+      ).trim(),
+      requested_units: readFloat(src.requested_units, src.requestedUnits, packet.requested_units, packet.requestedUnits, 1),
+      price_per_unit_micros: readInt(src.price_per_unit_micros, src.pricePerUnitMicros, packet.price_per_unit_micros, packet.pricePerUnitMicros),
+      max_charge_micros: readInt(src.max_charge_micros, src.maxChargeMicros, packet.max_charge_micros, packet.maxChargeMicros),
+      settled_micros: readInt(src.settled_micros, src.settledMicros, packet.settled_micros, packet.settledMicros),
+      correlation_id: String(src.correlation_id || src.correlationId || packet.correlation_id || packet.correlationId || '').trim(),
+      usage_label: String(src.usage_label || src.usageLabel || packet.usage_label || packet.usageLabel || '').trim().toLowerCase(),
+      transport_tag: String(src.transport_tag || src.transportTag || packet.transport_tag || packet.transportTag || '').trim().toLowerCase()
+    };
+  };
+
+  const applyPacketMarketplaceAuth = (packet = {}) => {
+    const auth = packet?.auth && typeof packet.auth === 'object' ? { ...packet.auth } : {};
+    const accessTicket = String(
+      packet.access_ticket
+      || packet.accessTicket
+      || packet.ticket
+      || auth.ticket
+      || auth.access_ticket
+      || ''
+    ).trim();
+    if (accessTicket) {
+      packet.access_ticket = accessTicket;
+      packet.accessTicket = accessTicket;
+      packet.ticket = accessTicket;
+      auth.ticket = accessTicket;
+      auth.access_ticket = accessTicket;
+    }
+    const metering = normalizePacketMetering(packet);
+    packet.metering = {
+      ...(packet.metering && typeof packet.metering === 'object' ? packet.metering : {}),
+      ...metering
+    };
+    if (metering.quote_id) packet.quote_id = metering.quote_id;
+    if (metering.charge_id) packet.charge_id = metering.charge_id;
+    if (metering.reservation_id) packet.reservation_id = metering.reservation_id;
+    if (metering.correlation_id) packet.correlation_id = metering.correlation_id;
+    if (metering.transport_tag) packet.transport_tag = metering.transport_tag;
+    if (metering.usage_label) packet.usage_label = metering.usage_label;
+    if (!auth.scope && packet.scope) auth.scope = String(packet.scope);
+    if (!auth.audience && packet.audience) auth.audience = String(packet.audience);
+    if (Object.keys(auth).length) {
+      packet.auth = auth;
+    }
+    return { accessTicket, metering };
+  };
+
+  const evaluateOutboundMutationPreflight = (packet = {}, packetType = '', packetEvent = '') => {
+    const family = resolvePacketFamily(packetType, packetEvent, packet);
+    const isMutation = MUTATION_FAMILIES.has(family);
+    const requireAuth = isMutation && packet.requireAuth !== false && packet.authOptional !== true;
+    if (isMutation && packet.requireAuth === undefined && packet.authOptional !== true) {
+      packet.requireAuth = true;
+    }
+    const { accessTicket, metering } = applyPacketMarketplaceAuth(packet);
+    const billable = packet.billable === true
+      || packet.requireMarketplaceAuth === true
+      || packet.requireBillingPreflight === true
+      || Number(metering.price_per_unit_micros || 0) > 0
+      || Number(metering.max_charge_micros || 0) > 0
+      || Number(metering.settled_micros || 0) > 0
+      || !!String(metering.quote_id || '').trim()
+      || !!String(metering.charge_id || '').trim()
+      || !!String(metering.reservation_id || '').trim();
+    const requireBilling = isMutation && packet.requireBillingPreflight !== false;
+    if (requireAuth && !accessTicket) {
+      return {
+        ok: false,
+        error_code: 'ticket_missing',
+        error: 'overlay mutation requires access_ticket',
+        status: 403,
+        family,
+        billable,
+        metering
+      };
+    }
+    if (requireBilling && billable) {
+      if (!String(metering.quote_id || '').trim()) {
+        return {
+          ok: false,
+          error_code: 'quote_missing',
+          error: 'billable mutation requires quote_id',
+          status: 402,
+          family,
+          billable,
+          metering
+        };
+      }
+      const reservationMicros = Number(metering.settled_micros || 0) > 0
+        ? Number(metering.settled_micros || 0)
+        : Number(metering.max_charge_micros || 0);
+      const hasReservation = !!String(metering.charge_id || metering.reservation_id || '').trim() || reservationMicros > 0;
+      if (!hasReservation) {
+        return {
+          ok: false,
+          error_code: 'credit_reservation_missing',
+          error: 'billable mutation requires charge/reservation',
+          status: 402,
+          family,
+          billable,
+          metering
+        };
+      }
+      const requestedUnits = Math.max(1, Number(metering.requested_units || 1) || 1);
+      const estimatedMicros = Math.max(0, Math.round(requestedUnits * Math.max(0, Number(metering.price_per_unit_micros || 0) || 0)));
+      if (reservationMicros > 0 && estimatedMicros > 0 && estimatedMicros > reservationMicros) {
+        return {
+          ok: false,
+          error_code: 'insufficient_credit_reservation',
+          error: `estimated charge ${estimatedMicros} exceeds reservation ${reservationMicros}`,
+          status: 402,
+          family,
+          billable,
+          metering
+        };
+      }
+    }
+    return {
+      ok: true,
+      error_code: '',
+      error: '',
+      status: 200,
+      family,
+      billable,
+      metering
+    };
+  };
+
+  const injectAuthAndMeteringHints = (packet = {}, source = {}) => {
+    const src = source && typeof source === 'object' ? source : {};
+    const authSrc = src.auth && typeof src.auth === 'object' ? src.auth : {};
+    const authOut = packet.auth && typeof packet.auth === 'object' ? { ...packet.auth } : {};
+    const accessTicket = String(
+      src.access_ticket
+      || src.accessTicket
+      || src.ticket
+      || authSrc.ticket
+      || authSrc.access_ticket
+      || ''
+    ).trim();
+    if (accessTicket) {
+      packet.access_ticket = accessTicket;
+      packet.accessTicket = accessTicket;
+      packet.ticket = accessTicket;
+      authOut.ticket = accessTicket;
+      authOut.access_ticket = accessTicket;
+    }
+    if (src.scope || authSrc.scope) authOut.scope = String(src.scope || authSrc.scope || '').trim();
+    if (src.audience || authSrc.audience) authOut.audience = String(src.audience || authSrc.audience || '').trim();
+    if (src.nonce || authSrc.nonce) authOut.nonce = String(src.nonce || authSrc.nonce || '').trim();
+    if (Object.keys(authOut).length) packet.auth = authOut;
+
+    const meteringSource = src.metering && typeof src.metering === 'object' ? src.metering : {};
+    packet.quote_id = String(
+      src.quote_id
+      || src.quoteId
+      || meteringSource.quote_id
+      || meteringSource.quoteId
+      || packet.quote_id
+      || ''
+    ).trim();
+    packet.charge_id = String(
+      src.charge_id
+      || src.chargeId
+      || meteringSource.charge_id
+      || meteringSource.chargeId
+      || packet.charge_id
+      || ''
+    ).trim();
+    packet.reservation_id = String(
+      src.reservation_id
+      || src.reservationId
+      || src.credit_reservation_id
+      || src.creditReservationId
+      || meteringSource.reservation_id
+      || meteringSource.reservationId
+      || meteringSource.credit_reservation_id
+      || packet.reservation_id
+      || ''
+    ).trim();
+    packet.correlation_id = String(
+      src.correlation_id
+      || src.correlationId
+      || meteringSource.correlation_id
+      || meteringSource.correlationId
+      || packet.correlation_id
+      || ''
+    ).trim();
+    packet.usage_label = String(
+      src.usage_label
+      || src.usageLabel
+      || meteringSource.usage_label
+      || meteringSource.usageLabel
+      || packet.usage_label
+      || ''
+    ).trim().toLowerCase();
+    packet.transport_tag = String(
+      src.transport_tag
+      || src.transportTag
+      || meteringSource.transport_tag
+      || meteringSource.transportTag
+      || packet.transport_tag
+      || ''
+    ).trim().toLowerCase();
+    const readNum = (value, fallback = 0) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return Number(fallback) || 0;
+      return Math.max(0, Math.round(n));
+    };
+    packet.price_per_unit_micros = readNum(
+      src.price_per_unit_micros ?? src.pricePerUnitMicros ?? meteringSource.price_per_unit_micros ?? meteringSource.pricePerUnitMicros ?? packet.price_per_unit_micros,
+      packet.price_per_unit_micros || 0
+    );
+    packet.max_charge_micros = readNum(
+      src.max_charge_micros ?? src.maxChargeMicros ?? meteringSource.max_charge_micros ?? meteringSource.maxChargeMicros ?? packet.max_charge_micros,
+      packet.max_charge_micros || 0
+    );
+    packet.settled_micros = readNum(
+      src.settled_micros ?? src.settledMicros ?? meteringSource.settled_micros ?? meteringSource.settledMicros ?? packet.settled_micros,
+      packet.settled_micros || 0
+    );
+    const requestedUnits = Number(
+      src.requested_units
+      ?? src.requestedUnits
+      ?? meteringSource.requested_units
+      ?? meteringSource.requestedUnits
+      ?? packet.requested_units
+      ?? 1
+    );
+    packet.requested_units = Number.isFinite(requestedUnits) && requestedUnits > 0 ? requestedUnits : 1;
+    if (src.requireAuth !== undefined) packet.requireAuth = src.requireAuth;
+    if (src.authOptional !== undefined) packet.authOptional = src.authOptional;
+    if (src.requireBillingPreflight !== undefined) packet.requireBillingPreflight = src.requireBillingPreflight;
+    if (src.requireMarketplaceAuth !== undefined) packet.requireMarketplaceAuth = src.requireMarketplaceAuth;
+    if (src.billable !== undefined) packet.billable = src.billable;
+    return packet;
   };
 
   async function sendBridgePayload(nodeId, state, payload, { targets } = {}) {
@@ -1366,10 +2370,25 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const packetEvent = normalizeMessageEvent(packet.event, packetType);
       if (packetType && !packet.type) packet.type = packetType;
       if (packetEvent && !packet.event) packet.event = packetEvent;
+      const enforcement = evaluateOutboundMutationPreflight(packet, packetType, packetEvent);
+      if (!enforcement.ok) {
+        const code = String(enforcement.error_code || INTEROP_ERROR_CODES.INVALID_ENVELOPE);
+        const detail = String(enforcement.error || 'bridge preflight denied');
+        maybeBadge(state, `Bridge preflight denied (${code})`, false);
+        if (nodeId) {
+          logToNode(nodeId, `⚠️ ${detail} (${code})`, 'error');
+        }
+        continue;
+      }
+      packet.enforcement = {
+        ok: true,
+        family: enforcement.family || '',
+        billable: !!enforcement.billable,
+        metering: enforcement.metering && typeof enforcement.metering === 'object' ? { ...enforcement.metering } : {}
+      };
       if (!packet.messageId) packet.messageId = newMessageId('hb');
       if (!packet.ts) packet.ts = nowMs();
-      packet.interop_contract = { ...INTEROP_CONTRACT };
-      packet.interop_contract_version = INTEROP_CONTRACT.version;
+      Object.assign(packet, withInteropContractFields(packet, DEFAULT_INTEROP_CONTRACT));
       if (!packet.source_network) packet.source_network = 'hydra';
       if (!packet.target_network) packet.target_network = 'noclip';
       if (!packet.source_address && sourceAddress) packet.source_address = sourceAddress;
@@ -1445,14 +2464,13 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       hydraGraphId: CFG?.graphId || '',
       bridgeNodeId: nodeId,
       discoveryRoom: resolvedRoom,
-      interop_contract: { ...INTEROP_CONTRACT },
-      interop_contract_version: INTEROP_CONTRACT.version,
       source_network: 'hydra',
       target_network: 'noclip',
       selected_transport: selectedTransport,
       transport: selectedTransport,
       timestamp: Date.now()
     };
+    Object.assign(payload, withInteropContractFields(payload, DEFAULT_INTEROP_CONTRACT));
     if (options.objectId) payload.objectId = options.objectId;
     if (options.objectLabel) payload.objectLabel = options.objectLabel;
     if (options.objectConfig && typeof options.objectConfig === 'object') {
@@ -1561,11 +2579,15 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     state.pendingAcks.delete(messageId);
     const status = ack.status || 'ok';
     const detail = ack.detail || ack.error || '';
+    const errorCode = String(ack.error_code || ack.errorCode || '').trim();
+    const statusCode = Number(ack.status_code || ack.statusCode || 0) || 0;
     if (entry.nodeId) {
       const prefix = status === 'ok' ? '✅' : '⚠️';
       const logType = status === 'ok' ? 'success' : 'error';
       const label = entry.type || 'message';
-      const logMessage = `${prefix} ${label} ${status}${detail ? ` • ${detail}` : ''}`;
+      const codeSuffix = errorCode ? ` • ${errorCode}` : '';
+      const httpSuffix = statusCode > 0 ? ` • ${statusCode}` : '';
+      const logMessage = `${prefix} ${label} ${status}${httpSuffix}${codeSuffix}${detail ? ` • ${detail}` : ''}`;
       logToNode(entry.nodeId, logMessage, logType);
     }
   };
@@ -1667,7 +2689,14 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
       const alias = peer.meta?.username || peer.meta?.name || peer.meta?.alias || `NoClip ${cleanPub.slice(0, 6)}…`;
       const shortPub = `${cleanPub.slice(0, 6)}…${cleanPub.slice(-4)}`;
       const lastSeen = formatLastSeen(peer.last);
+      const selectedTransport = normalizeTransportLabel(
+        peer?.selectedTransport ||
+        peer?.selected_transport ||
+        peer?.meta?.selectedTransport ||
+        peer?.meta?.selected_transport
+      );
       const parts = [alias, shortPub];
+      if (selectedTransport) parts.push(selectedTransport);
       if (lastSeen) parts.push(lastSeen);
       if (peer.geo && Number.isFinite(peer.geo.lat) && Number.isFinite(peer.geo.lon)) {
         parts.push(`${Number(peer.geo.lat).toFixed(2)}, ${Number(peer.geo.lon).toFixed(2)}`);
@@ -1855,6 +2884,176 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     }
   };
 
+  const refreshDiscoveryMetadata = async () => {
+    if (!discovery) return;
+    try {
+      if (discovery.me && typeof discovery.me === 'object') {
+        discovery.me.meta = buildDiscoveryMeta(discovery.me.meta || {});
+      }
+      if (typeof discovery.presence === 'function') {
+        await discovery.presence(discovery.me?.meta || buildDiscoveryMeta());
+      }
+    } catch (err) {
+      log?.(`[noclip] discovery presence update failed: ${err?.message || err}`);
+    }
+  };
+
+  const publishMarketplaceCatalog = async (options = {}) => {
+    const opts = options && typeof options === 'object' ? options : {};
+    const targetPubFilter = sanitizePubKey(opts.targetPub || opts.target || '');
+    const includeStatus = opts.includeStatus !== false;
+    const force = opts.force === true;
+    const catalog = normalizeMarketplaceCatalog(latestRouterCatalog);
+    if (!catalog) {
+      return { ok: false, reason: 'no_catalog', attempted: 0, sent: 0 };
+    }
+    const checksum = String(opts.catalogChecksum || latestCatalogChecksum || checksumHex(catalog)).trim();
+    const ts = nowMs();
+    const catalogPayloadBase = {
+      type: 'market-service-catalog',
+      event: 'market.service.catalog',
+      provider: catalog.provider,
+      summary: catalog.summary,
+      catalog,
+      catalogChecksum: checksum,
+      generated_at_ms: catalog.generatedAtMs,
+      ts
+    };
+    const statusEntries = ensureArray(catalog.services).map((entry) => ({
+      service_id: entry.serviceId,
+      status: entry.status,
+      healthy: entry.healthy === true,
+      visibility: entry.visibility || 'public',
+      selected_transport: entry.selectedTransport || '',
+      selected_endpoint: entry.selectedEndpoint || '',
+      stale_rejected: entry.staleRejected === true,
+      ts
+    }));
+    const statusPayloadBase = {
+      type: 'market-service-status',
+      event: 'market.service.status',
+      provider: catalog.provider,
+      summary: catalog.summary,
+      services: statusEntries,
+      catalogChecksum: checksum,
+      ts
+    };
+
+    let attempted = 0;
+    let sent = 0;
+    const nodeEntries = Array.from(NODE_STATE.entries());
+    for (const [nodeId, st] of nodeEntries) {
+      if (!st?.targetPub) continue;
+      if (targetPubFilter && st.targetPub !== targetPubFilter) continue;
+      attempted += 1;
+      const selectedTransport = selectedTransportForPacket(st, {});
+      const catalogPayload = {
+        ...catalogPayloadBase,
+        selected_transport: selectedTransport,
+        transport: selectedTransport
+      };
+      const catalogOk = await sendBridgePayload(nodeId, st, catalogPayload, {
+        targets: [st.targetPub]
+      });
+      if (!catalogOk) continue;
+      sent += 1;
+      if (includeStatus) {
+        const statusPayload = {
+          ...statusPayloadBase,
+          selected_transport: selectedTransport,
+          transport: selectedTransport
+        };
+        await sendBridgePayload(nodeId, st, statusPayload, {
+          targets: [st.targetPub]
+        });
+      }
+    }
+
+    if (attempted === 0 || sent > 0 || force) {
+      await refreshDiscoveryMetadata();
+    }
+
+    if (sent > 0 && opts.silent !== true) {
+      setBadge?.(`Marketplace catalog published to ${sent}/${attempted} peer${attempted === 1 ? '' : 's'}`);
+    } else if (attempted > 0 && sent === 0 && opts.silent !== true) {
+      setBadge?.('Marketplace catalog publish failed', false);
+    }
+
+    return { ok: sent > 0, attempted, sent, checksum };
+  };
+
+  const onRouterCatalog = (catalogValue, options = {}) => {
+    const opts = options && typeof options === 'object' ? options : {};
+    const normalized = normalizeMarketplaceCatalog(catalogValue);
+    if (!normalized) {
+      return { ok: false, reason: 'invalid_catalog' };
+    }
+    const incomingTs = toNonNegativeInt(
+      normalized.generatedAtMs || catalogValue?.generated_at_ms || catalogValue?.generatedAtMs,
+      0
+    );
+    const currentTs = toNonNegativeInt(latestRouterCatalog?.generatedAtMs, 0);
+    if (!opts.force && incomingTs > 0 && currentTs > 0 && incomingTs < currentTs) {
+      return { ok: false, reason: 'stale_catalog', generatedAtMs: incomingTs, currentGeneratedAtMs: currentTs };
+    }
+    const checksum = checksumHex(normalized);
+    const changed = checksum !== latestCatalogChecksum;
+    if (!changed && !opts.force) {
+      return { ok: true, changed: false, checksum };
+    }
+    latestRouterCatalog = normalized;
+    latestCatalogChecksum = checksum;
+    emitMarketUiEvent('hydra-market-catalog', {
+      peer: '',
+      catalog: {
+        generated_at_ms: normalized.generatedAtMs,
+        provider: normalized.provider,
+        summary: normalized.summary,
+        services: normalized.services
+      },
+      summary: normalized.summary,
+      provider: normalized.provider,
+      catalogChecksum: checksum,
+      ts: incomingTs || normalized.generatedAtMs || nowMs()
+    });
+    emitMarketUiEvent('hydra-market-status', {
+      peer: '',
+      summary: normalized.summary,
+      provider: normalized.provider,
+      services: normalized.services.map((entry) => ({
+        service_id: entry.serviceId,
+        status: entry.status,
+        healthy: entry.healthy === true,
+        visibility: entry.visibility || 'public',
+        selected_transport: entry.selectedTransport || ''
+      })),
+      catalogChecksum: checksum,
+      ts: incomingTs || normalized.generatedAtMs || nowMs()
+    });
+    if (CFG && typeof CFG === 'object') {
+      CFG.routerMarketplaceCatalog = catalogValue;
+      if (incomingTs > 0) CFG.routerLastCatalogAt = incomingTs;
+    }
+    if (opts.broadcast !== false) {
+      void publishMarketplaceCatalog({
+        catalogChecksum: checksum,
+        includeStatus: opts.includeStatus !== false,
+        silent: opts.silent === true,
+        force: opts.force === true,
+        targetPub: opts.targetPub || ''
+      });
+    } else {
+      void refreshDiscoveryMetadata();
+    }
+    return {
+      ok: true,
+      changed: true,
+      checksum,
+      generatedAtMs: incomingTs || normalized.generatedAtMs || nowMs(),
+      serviceCount: ensureArray(normalized.services).length
+    };
+  };
+
   return {
     init(nodeId) {
       const st = ensureNodeState(nodeId);
@@ -1939,6 +3138,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         transport: selectedTransport,
         ts: nowMs()
       };
+      injectAuthAndMeteringHints(packet, payload || {});
       if (targetCtx.hasTarget) {
         packet.sessionId = targetCtx.sessionId || '';
         packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
@@ -2062,6 +3262,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
             transport: selectedTransport,
             expectAck: true
           };
+          injectAuthAndMeteringHints(chunkPacket, request || {});
           const result = await sendTypedBridgeMessage(nodeId, st, chunkPacket, {
             expectAck: true,
             targets,
@@ -2127,6 +3328,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         filters: filters || null,
         ts: nowMs()
       };
+      injectAuthAndMeteringHints(packet, request || {});
       if (targetCtx.hasTarget) {
         packet.sessionId = packet.sessionId || targetCtx.sessionId || '';
         packet.objectUuid = packet.objectUuid || targetCtx.objectUuid || targetCtx.itemId || '';
@@ -2186,6 +3388,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         transport: selectedTransport,
         ts: nowMs()
       };
+      injectAuthAndMeteringHints(packet, payload || {});
       if (targetCtx.hasTarget) {
         packet.sessionId = targetCtx.sessionId || '';
         packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
@@ -2229,6 +3432,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         transport: selectedTransport,
         ts: nowMs()
       };
+      injectAuthAndMeteringHints(packet, payload || {});
       if (targetCtx.hasTarget) {
         packet.sessionId = targetCtx.sessionId || '';
         packet.objectUuid = targetCtx.objectUuid || targetCtx.itemId || '';
@@ -2326,6 +3530,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         selected_transport: selectedTransport,
         transport: selectedTransport
       };
+      injectAuthAndMeteringHints(packet, data || {});
       if (targetCtx.hasTarget) {
         packet.target = {
           overlayId: targetCtx.overlayId || '',
@@ -2363,6 +3568,7 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
         selected_transport: selectedTransport,
         transport: selectedTransport
       };
+      injectAuthAndMeteringHints(packet, data || {});
       if (targetCtx.hasTarget) {
         packet.target = {
           overlayId: targetCtx.overlayId || '',
@@ -2468,6 +3674,8 @@ function createNoClipBridge({ NodeStore, Router, Net, CFG, setBadge, log }) {
     setTargetPeer,
     getDiscoveredNoClipPeers,
     listSessions,
+    onRouterCatalog,
+    publishMarketplaceCatalog,
     resolveRoomName
   };
 }

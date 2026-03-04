@@ -13,6 +13,18 @@ const DISCOVERY_ROOM_DEFAULT = 'nexus';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
+const nowMs = () => Date.now();
+
+const KNOWN_PREFIX_RE = /^(graph|hydra|noclip)\./i;
+const PEER_KEY_RE = /^[a-z0-9][a-z0-9._-]{7,255}$/i;
+const TRANSPORT_ORDER = Object.freeze(['nkn', 'cloudflare', 'nats', 'upnp', 'local']);
+const TRANSPORT_WEIGHT = Object.freeze({
+  nkn: 60,
+  cloudflare: 50,
+  nats: 40,
+  upnp: 30,
+  local: 20
+});
 
 const normalizeKey = (value) => {
   if (value == null) return '';
@@ -25,12 +37,12 @@ const normalizeKey = (value) => {
   return text.trim().toLowerCase();
 };
 
-const stripGraphPrefix = (value) => {
+const stripKnownPrefix = (value) => {
   if (!value) return '';
-  return String(value).replace(/^graph\./i, '');
+  return String(value).replace(KNOWN_PREFIX_RE, '');
 };
 
-const normalizePubKey = (value) => normalizeKey(stripGraphPrefix(value));
+const normalizePubKey = (value) => normalizeKey(stripKnownPrefix(value));
 
 const normalizeNetwork = (value) => {
   const key = String(value || '').trim().toLowerCase();
@@ -44,6 +56,159 @@ const inferNetworkFromAddress = (value) => {
   if (text.startsWith('noclip.')) return 'noclip';
   if (text.startsWith('hydra.') || text.startsWith('graph.')) return 'hydra';
   return '';
+};
+
+const normalizeTransport = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  if (!key) return '';
+  if (key === 'cloudflared' || key === 'cf') return 'cloudflare';
+  if (key === 'localhost' || key === 'lan') return 'local';
+  if (TRANSPORT_ORDER.includes(key)) return key;
+  return '';
+};
+
+const isValidPeerKey = (value) => PEER_KEY_RE.test(String(value || '').trim());
+
+const normalizeAddressCandidate = (raw, fallbackNetwork = '') => {
+  let text = String(raw || '').trim();
+  if (!text) return '';
+  text = text.replace(/^graph\./i, 'hydra.');
+  const inferredNetwork = inferNetworkFromAddress(text);
+  if (!inferredNetwork) {
+    const fallback = normalizeNetwork(fallbackNetwork) || 'hydra';
+    const pub = normalizePubKey(text);
+    if (!pub || !isValidPeerKey(pub)) return '';
+    return `${fallback}.${pub}`;
+  }
+  const stripped = normalizePubKey(text);
+  if (!stripped || !isValidPeerKey(stripped)) return '';
+  return `${inferredNetwork}.${stripped}`;
+};
+
+const transportFromCandidateEntry = (raw) => {
+  if (!raw || typeof raw !== 'object') return '';
+  const src = raw;
+  return normalizeTransport(
+    src.selected_transport ||
+    src.selectedTransport ||
+    src.transport ||
+    src.mode
+  );
+};
+
+const endpointFromCandidateEntry = (raw) => {
+  if (!raw) return '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw !== 'object') return '';
+  return String(
+    raw.endpoint ||
+    raw.base_url ||
+    raw.baseUrl ||
+    raw.http_endpoint ||
+    raw.httpEndpoint ||
+    raw.nkn_address ||
+    raw.address ||
+    ''
+  ).trim();
+};
+
+const timestampFromCandidateEntry = (raw, fallbackMs = 0) => {
+  if (!raw || typeof raw !== 'object') return Number(fallbackMs || 0);
+  const direct =
+    Number(raw.last_verified_ms || raw.lastVerifiedMs || raw.last_seen_ms || raw.lastSeenMs || raw.updated_at_ms || raw.updatedAtMs || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const iso = String(raw.last_verified || raw.lastVerified || raw.updated_at || raw.updatedAt || '').trim();
+  if (iso) {
+    const parsed = Date.parse(iso);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return Number(fallbackMs || 0);
+};
+
+const normalizeEndpointCandidates = (rawValue, fallbackTsMs = 0) => {
+  const src = rawValue && typeof rawValue === 'object' ? rawValue : {};
+  const out = {};
+  const assign = (transportKey, candidate) => {
+    const transport = normalizeTransport(transportKey || transportFromCandidateEntry(candidate));
+    if (!transport) return;
+    const endpoint = endpointFromCandidateEntry(candidate);
+    if (!endpoint) return;
+    const lastVerifiedMs = timestampFromCandidateEntry(candidate, fallbackTsMs);
+    out[transport] = {
+      endpoint,
+      lastVerifiedMs: Number.isFinite(lastVerifiedMs) && lastVerifiedMs > 0 ? lastVerifiedMs : Number(fallbackTsMs || 0)
+    };
+  };
+  Object.entries(src).forEach(([transport, candidate]) => assign(transport, candidate));
+  return out;
+};
+
+const mergeEndpointCandidates = (base, next) => {
+  const out = {};
+  [base, next].forEach((src) => {
+    if (!src || typeof src !== 'object') return;
+    Object.entries(src).forEach(([transport, candidate]) => {
+      const key = normalizeTransport(transport);
+      if (!key || !candidate || typeof candidate !== 'object') return;
+      const endpoint = endpointFromCandidateEntry(candidate);
+      if (!endpoint) return;
+      const lastVerifiedMs = timestampFromCandidateEntry(candidate, 0);
+      out[key] = {
+        endpoint,
+        lastVerifiedMs: Number.isFinite(lastVerifiedMs) && lastVerifiedMs > 0
+          ? lastVerifiedMs
+          : Number(out[key]?.lastVerifiedMs || 0)
+      };
+    });
+  });
+  return out;
+};
+
+const selectBestCandidate = ({
+  selectedTransport = '',
+  endpointCandidates = {},
+  staleRejectionCount = 0,
+  fallbackTsMs = 0
+} = {}) => {
+  const normalizedSelected = normalizeTransport(selectedTransport);
+  const normalizedCandidates = normalizeEndpointCandidates(endpointCandidates, fallbackTsMs);
+  const transports = Object.keys(normalizedCandidates);
+  if (!transports.length) {
+    return {
+      selectedTransport: normalizedSelected || '',
+      selectedEndpoint: '',
+      endpointCandidates: {},
+      candidateFreshnessMs: {},
+      staleRejectionCount: Math.max(0, Number(staleRejectionCount || 0) || 0)
+    };
+  }
+  const freshness = {};
+  const now = nowMs();
+  let bestTransport = '';
+  let bestScore = Number.NEGATIVE_INFINITY;
+  transports.forEach((transport) => {
+    const candidate = normalizedCandidates[transport];
+    const verifiedMs = Number(candidate?.lastVerifiedMs || 0);
+    const ageMs = verifiedMs > 0 ? Math.max(0, now - verifiedMs) : Number.MAX_SAFE_INTEGER;
+    freshness[transport] = Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : Number.MAX_SAFE_INTEGER;
+    const weight = Number(TRANSPORT_WEIGHT[transport] || 0);
+    const freshBonus = ageMs === Number.MAX_SAFE_INTEGER ? -35 : Math.max(-30, 30 - Math.floor(ageMs / 10000));
+    const selectedBonus = normalizedSelected && normalizedSelected === transport ? 12 : 0;
+    const stalePenalty = Math.max(0, Number(staleRejectionCount || 0)) * 6;
+    const score = weight + freshBonus + selectedBonus - stalePenalty;
+    if (score > bestScore) {
+      bestScore = score;
+      bestTransport = transport;
+    }
+  });
+  const effective = bestTransport || normalizedSelected || transports[0];
+  return {
+    selectedTransport: effective,
+    selectedEndpoint: normalizedCandidates[effective]?.endpoint || '',
+    endpointCandidates: normalizedCandidates,
+    candidateFreshnessMs: freshness,
+    staleRejectionCount: Math.max(0, Math.floor(Number(staleRejectionCount || 0) || 0))
+  };
 };
 
 const canonicalAddressForNetwork = (network, addr, fallbackKey) => {
@@ -65,6 +230,10 @@ const readQrAddressValue = (raw) => {
 
   const directNetwork = inferNetworkFromAddress(text);
   if (directNetwork) return text;
+  if (/^nkn:\/\//i.test(text)) {
+    const candidate = String(text.replace(/^nkn:\/\//i, '')).trim();
+    if (candidate) return candidate;
+  }
 
   try {
     const url = new URL(text);
@@ -491,6 +660,8 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       peers: new Map(),
       status: { state: 'idle', detail: '' }
     },
+    recentMessages: new Map(),
+    outboundSeq: 0,
     pokeNoticeTimer: null,
     nknListenerAttached: false,
     nknMessageHandler: null,
@@ -634,6 +805,62 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     }
   }
 
+  function newMessageId(prefix = 'msg') {
+    const cryptoId =
+      (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : '';
+    if (cryptoId) return `${prefix}-${cryptoId}`;
+    state.outboundSeq += 1;
+    return `${prefix}-${Date.now().toString(36)}-${state.outboundSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function stableMessageFingerprint(payload, senderKey, transport) {
+    const type = String(payload?.type || payload?.event || '').trim();
+    const ts = Number(payload?.ts || 0) || 0;
+    const text = String(payload?.text || payload?.note || '').slice(0, 200);
+    return `${transport}:${senderKey}:${type}:${ts}:${text}`;
+  }
+
+  function cleanupRecentMessages(now = Date.now()) {
+    if (!state.recentMessages.size) return;
+    state.recentMessages.forEach((expiresAt, key) => {
+      if (!key || !Number.isFinite(expiresAt) || expiresAt <= now) {
+        state.recentMessages.delete(key);
+      }
+    });
+    while (state.recentMessages.size > 2048) {
+      const first = state.recentMessages.keys().next();
+      if (!first?.value) break;
+      state.recentMessages.delete(first.value);
+    }
+  }
+
+  function inboundMessageId(payload, senderKey, transport) {
+    const direct = String(
+      payload?.messageId ||
+      payload?.message_id ||
+      payload?.id ||
+      payload?.mid ||
+      payload?.requestId ||
+      payload?.request_id ||
+      ''
+    ).trim();
+    if (direct) return direct;
+    return stableMessageFingerprint(payload, senderKey, transport);
+  }
+
+  function isDuplicateInbound(payload, senderKey, transport) {
+    const id = inboundMessageId(payload, senderKey, transport);
+    if (!id) return false;
+    const now = Date.now();
+    cleanupRecentMessages(now);
+    const seenUntil = Number(state.recentMessages.get(id) || 0);
+    if (seenUntil > now) return true;
+    state.recentMessages.set(id, now + (2 * 60 * 1000));
+    return false;
+  }
+
   function ensurePeerOrder(key) {
     const normalized = normalizePubKey(key);
     if (!normalized) return;
@@ -655,159 +882,6 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       return null;
     }
   }
-
-  // --- ADD (top-level inside createPeerDiscovery, not nested) ---
-function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
-  if (!payload || typeof payload !== 'object') return false;
-  const type = payload.type;
-  if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
-
-  const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
-  const senderKey = normalizePubKey(payload.pub || payload.from || senderAddr);
-  if (!senderKey) return false;
-  try {
-    console.debug('[peers] recv', { type, from: senderAddr, via: transport, normalizedKey: senderKey });
-  } catch (_) {
-    // ignore logging issues
-  }
-
-  const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
-  const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
-
-  const upsertResult = upsertPeer(
-    {
-      nknPub: senderKey,
-      addr: senderAddr || senderKey,
-      originalPub: payload.pub || senderAddr || senderKey,
-      meta,
-      last: timestamp
-    },
-    { online: true, probing: false }
-  );
-  const peer = upsertResult.entry;
-  if (peer) {
-    peer.online = true;
-    peer.probing = false;
-    peer.last = timestamp;
-    peer.lastSeenAt = timestamp * 1000;
-    state.peers.set(senderKey, peer);
-  }
-
-  switch (type) {
-    case 'peer-ping': {
-      state.pendingPings.delete(senderKey);
-      sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
-      refreshStatus();
-      scheduleRender();
-      return true;
-    }
-    case 'peer-pong': {
-      state.pendingPings.delete(senderKey);
-      refreshStatus();
-      scheduleRender();
-      return true;
-    }
-    case 'peer-meta': {
-      refreshStatus();
-      scheduleRender();
-      return true;
-    }
-    case 'peer-poke': {
-      if (els.button) {
-        els.button.classList.add('poke-notice');
-        clearTimeout(state.pokeNoticeTimer);
-        state.pokeNoticeTimer = setTimeout(() => {
-          els.button?.classList?.remove('poke-notice');
-        }, 8000);
-      }
-      if (peer) {
-        peer.online = true;
-        state.peers.set(senderKey, peer);
-        refreshStatus();
-      }
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      setBadge?.(`Poke from ${label}`);
-      scheduleRender();
-      return true;
-    }
-    case 'chat-request': {
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
-      setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
-      setActiveChat(senderKey);
-      if (isMobileView()) setActivePane('chat');
-      setBadge?.(`Chat request from ${label}`);
-      showInlineChatDecision(senderKey);
-      renderChat();
-      scheduleRender();
-      return true;
-    }
-    case 'chat-response': {
-      const accepted = !!payload.accepted;
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
-      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-      setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
-      clearInlineChatDecision();
-      if (state.chat.activePeer === senderKey) renderChat();
-      scheduleRender();
-      return true;
-    }
-    case 'chat-typing': {
-      if (payload.isTyping) {
-        state.chat.typingPeers.set(senderKey, Date.now());
-        clearTimeout(state.chat.typingTimers.get(senderKey));
-        if (state.chat.activePeer === senderKey && els.chatTyping) {
-          els.chatTyping.classList.remove('hidden');
-        }
-        const timeout = setTimeout(() => {
-          state.chat.typingPeers.delete(senderKey);
-          if (state.chat.activePeer === senderKey && els.chatTyping) {
-            els.chatTyping.classList.add('hidden');
-          }
-          state.chat.typingTimers.delete(senderKey);
-        }, 1500);
-        state.chat.typingTimers.set(senderKey, timeout);
-      } else {
-        state.chat.typingPeers.delete(senderKey);
-        const existingTimer = state.chat.typingTimers.get(senderKey);
-        if (existingTimer) clearTimeout(existingTimer);
-        state.chat.typingTimers.delete(senderKey);
-        if (state.chat.activePeer === senderKey && els.chatTyping) {
-          els.chatTyping.classList.add('hidden');
-        }
-      }
-      return true;
-    }
-    case 'chat-message': {
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      appendHistory(senderKey, {
-        id:
-          typeof payload.id === 'string'
-            ? payload.id
-            : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
-        dir: 'in',
-        text: typeof payload.text === 'string' ? payload.text : '',
-        ts: payload.ts || nowSeconds()
-      });
-      state.chat.typingPeers.delete(senderKey);
-      const timer = state.chat.typingTimers.get(senderKey);
-      if (timer) clearTimeout(timer);
-      state.chat.typingTimers.delete(senderKey);
-      setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
-      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-      if (state.chat.activePeer === senderKey) {
-        renderChat();
-      } else {
-        setBadge?.(`New message from ${label}`);
-      }
-      scheduleRender();
-      return true;
-    }
-    default:
-      return false;
-  }
-}
 
   function attachNknMessageHandler(client) {
     if (!client) return;
@@ -882,6 +956,9 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       }
     }
     if (!message.ts) message.ts = nowSeconds();
+    if (!message.messageId && !message.message_id && !message.id) {
+      message.messageId = newMessageId('peer');
+    }
     let fromAddr = state.meAddr || Net.nkn?.addr || '';
     if (!fromAddr) {
       try {
@@ -897,6 +974,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
             if (!natsTarget) throw new Error('invalid nats target');
             message.transport = 'nats';
             message.discovery_source = 'nats';
+            message.fallback_from = 'nkn';
             state.discovery.dm(natsTarget, message);
             state.telemetry.discoveryFallbacks += 1;
             recordDiscoveryEvent('send', { via: 'nats', source: 'fallback_no_local_addr', target: destination });
@@ -949,6 +1027,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
           if (!natsTarget) throw new Error('invalid nats target');
           message.transport = 'nats';
           message.discovery_source = 'nats';
+          message.fallback_from = 'nkn';
           state.discovery.dm(natsTarget, message);
           state.telemetry.discoveryFallbacks += 1;
           recordDiscoveryEvent('send', { via: 'nats', source: 'fallback_after_nkn_error', target: destination, reason: err?.message || String(err || '') });
@@ -993,155 +1072,237 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     'chat-message'
   ]);
 
-  // === HOISTED: shared peer-message dispatcher (used by both NKN and Discovery/NATS) ===
-function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
-  if (!payload || typeof payload !== 'object') return false;
-  const type = payload.type;
-  if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
+  // shared peer-message dispatcher (used by both NKN and Discovery/NATS)
+  function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}) {
+    if (!payload || typeof payload !== 'object') return false;
+    const type = payload.type;
+    if (!type || !PEER_MESSAGE_TYPES.has(type)) return false;
 
-  const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
-  const senderKey = normalizePubKey(payload.pub || payload.from || senderAddr);
-  if (!senderKey) return false;
-  try {
-    console.debug('[peers] recv', { type, from: senderAddr, via: transport, normalizedKey: senderKey });
-  } catch (_) {}
+    const senderAddr = normalizeAddressForSend(sourceAddr || payload.addr || payload.pub || payload.from);
+    const senderKey = normalizePubKey(payload.pub || payload.from || senderAddr);
+    if (!senderKey) return false;
 
-  const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
-  const meta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : undefined;
+    const inboundTransport = normalizeTransport(
+      transport ||
+      payload.transport ||
+      payload.selected_transport ||
+      payload.selectedTransport ||
+      payload?.meta?.transport ||
+      payload?.meta?.selected_transport ||
+      payload?.meta?.selectedTransport
+    ) || (String(transport || '').trim().toLowerCase() === 'nats' ? 'nats' : 'nkn');
 
-  const upsertResult = upsertPeer(
-    {
-      nknPub: senderKey,
-      addr: senderAddr || senderKey,
-      originalPub: payload.pub || senderAddr || senderKey,
-      meta,
-      last: timestamp
-    },
-    { online: true, probing: false }
-  );
-  const peer = upsertResult.entry;
-  if (peer) {
-    peer.online = true;
-    peer.probing = false;
-    peer.last = timestamp;
-    peer.lastSeenAt = timestamp * 1000;
-    state.peers.set(senderKey, peer);
-  }
-
-  switch (type) {
-    case 'peer-ping': {
-      state.pendingPings.delete(senderKey);
-      sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
-      refreshStatus();
-      scheduleRender();
+    if (isDuplicateInbound(payload, senderKey, inboundTransport)) {
+      recordDiscoveryEvent('recv-duplicate', {
+        source: inboundTransport,
+        target: senderAddr || senderKey
+      });
       return true;
     }
-    case 'peer-pong': {
-      state.pendingPings.delete(senderKey);
-      refreshStatus();
-      scheduleRender();
-      return true;
+
+    try {
+      console.debug('[peers] recv', { type, from: senderAddr, via: inboundTransport, normalizedKey: senderKey });
+    } catch (_) {
+      // ignore console failures
     }
-    case 'peer-meta': {
-      refreshStatus();
-      scheduleRender();
-      return true;
+
+    const timestamp = typeof payload.ts === 'number' ? payload.ts : nowSeconds();
+    const fallbackTsMs = timestamp * 1000;
+    const payloadMeta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : {};
+    const rawCandidates =
+      payload.endpointCandidates ||
+      payload.endpoint_candidates ||
+      payload.candidates ||
+      payloadMeta.endpointCandidates ||
+      payloadMeta.endpoint_candidates ||
+      payloadMeta.candidates ||
+      {};
+    const staleRejectionCount = Number.isFinite(payload.staleRejectionCount)
+      ? Number(payload.staleRejectionCount)
+      : (
+          Number.isFinite(payload.stale_rejection_count)
+            ? Number(payload.stale_rejection_count)
+            : (
+                Number.isFinite(payloadMeta.staleRejectionCount)
+                  ? Number(payloadMeta.staleRejectionCount)
+                  : (Number.isFinite(payloadMeta.stale_rejection_count) ? Number(payloadMeta.stale_rejection_count) : 0)
+              )
+        );
+    const selectedTransport = normalizeTransport(
+      payload.selected_transport ||
+      payload.selectedTransport ||
+      payload.transport ||
+      payloadMeta.selected_transport ||
+      payloadMeta.selectedTransport ||
+      payloadMeta.transport ||
+      inboundTransport
+    );
+    const selected = selectBestCandidate({
+      selectedTransport,
+      endpointCandidates: rawCandidates,
+      staleRejectionCount,
+      fallbackTsMs
+    });
+    const payloadNetwork = normalizeNetwork(
+      payload.network ||
+      payloadMeta.network ||
+      inferNetworkFromAddress(senderAddr || payload.addr || payload.pub || senderKey)
+    );
+    const discoverySource = String(
+      payload.discovery_source ||
+      payload.discoverySource ||
+      payloadMeta.discovery_source ||
+      payloadMeta.discoverySource ||
+      `peer.${inboundTransport}`
+    ).trim();
+    if (payloadNetwork) payloadMeta.network = payloadNetwork;
+    if (selected.selectedTransport) payloadMeta.selectedTransport = selected.selectedTransport;
+    if (selected.selectedEndpoint) payloadMeta.selectedEndpoint = selected.selectedEndpoint;
+    payloadMeta.endpointCandidates = selected.endpointCandidates;
+    payloadMeta.candidateFreshnessMs = selected.candidateFreshnessMs;
+    payloadMeta.discoverySource = discoverySource;
+
+    const upsertResult = upsertPeer(
+      {
+        nknPub: senderKey,
+        addr: senderAddr || senderKey,
+        originalPub: payload.pub || senderAddr || senderKey,
+        meta: payloadMeta,
+        network: payloadNetwork || '',
+        selectedTransport: selected.selectedTransport || inboundTransport,
+        selectedEndpoint: selected.selectedEndpoint || '',
+        endpointCandidates: selected.endpointCandidates,
+        candidateFreshnessMs: selected.candidateFreshnessMs,
+        staleRejectionCount: selected.staleRejectionCount,
+        discoverySource,
+        source: inboundTransport === 'nats' ? 'noclip' : 'hydra',
+        last: timestamp
+      },
+      { online: true, probing: false }
+    );
+    const peer = upsertResult.entry;
+    if (peer) {
+      peer.online = true;
+      peer.probing = false;
+      peer.last = timestamp;
+      peer.lastSeenAt = timestamp * 1000;
+      state.peers.set(senderKey, peer);
     }
-    case 'peer-poke': {
-      if (els.button) {
-        els.button.classList.add('poke-notice');
-        clearTimeout(state.pokeNoticeTimer);
-        state.pokeNoticeTimer = setTimeout(() => {
-          els.button?.classList?.remove('poke-notice');
-        }, 8000);
-      }
-      if (peer) {
-        peer.online = true;
-        state.peers.set(senderKey, peer);
+
+    switch (type) {
+      case 'peer-ping': {
+        state.pendingPings.delete(senderKey);
+        sendPeerPayload(senderAddr || senderKey, { type: 'peer-pong' }, { attachMeta: true }).catch(() => {});
         refreshStatus();
+        scheduleRender();
+        return true;
       }
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      setBadge?.(`Poke from ${label}`);
-      scheduleRender();
-      return true;
-    }
-    case 'chat-request': {
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
-      setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
-      setActiveChat(senderKey);
-      if (isMobileView()) setActivePane('chat');
-      setBadge?.(`Chat request from ${label}`);
-      showInlineChatDecision(senderKey);
-      renderChat();
-      scheduleRender();
-      return true;
-    }
-    case 'chat-response': {
-      const accepted = !!payload.accepted;
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
-      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-      setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
-      clearInlineChatDecision();
-      if (state.chat.activePeer === senderKey) renderChat();
-      scheduleRender();
-      return true;
-    }
-    case 'chat-typing': {
-      if (payload.isTyping) {
-        state.chat.typingPeers.set(senderKey, Date.now());
-        clearTimeout(state.chat.typingTimers.get(senderKey));
-        if (state.chat.activePeer === senderKey && els.chatTyping) {
-          els.chatTyping.classList.remove('hidden');
+      case 'peer-pong': {
+        state.pendingPings.delete(senderKey);
+        refreshStatus();
+        scheduleRender();
+        return true;
+      }
+      case 'peer-meta': {
+        refreshStatus();
+        scheduleRender();
+        return true;
+      }
+      case 'peer-poke': {
+        if (els.button) {
+          els.button.classList.add('poke-notice');
+          clearTimeout(state.pokeNoticeTimer);
+          state.pokeNoticeTimer = setTimeout(() => {
+            els.button?.classList?.remove('poke-notice');
+          }, 8000);
         }
-        const timeout = setTimeout(() => {
+        if (peer) {
+          peer.online = true;
+          state.peers.set(senderKey, peer);
+          refreshStatus();
+        }
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        setBadge?.(`Poke from ${label}`);
+        scheduleRender();
+        return true;
+      }
+      case 'chat-request': {
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        state.chat.promptMessage = { key: senderKey, text: `${label} wants to chat. Accept?` };
+        setSession(senderKey, { status: 'pending', lastTs: nowSeconds() });
+        setActiveChat(senderKey);
+        if (isMobileView()) setActivePane('chat');
+        setBadge?.(`Chat request from ${label}`);
+        showInlineChatDecision(senderKey);
+        renderChat();
+        scheduleRender();
+        return true;
+      }
+      case 'chat-response': {
+        const accepted = !!payload.accepted;
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        setSession(senderKey, { status: accepted ? 'accepted' : 'declined', lastTs: nowSeconds() });
+        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+        setBadge?.(accepted ? `Chat accepted by ${label}` : `Chat declined by ${label}`, accepted);
+        clearInlineChatDecision();
+        if (state.chat.activePeer === senderKey) renderChat();
+        scheduleRender();
+        return true;
+      }
+      case 'chat-typing': {
+        if (payload.isTyping) {
+          state.chat.typingPeers.set(senderKey, Date.now());
+          clearTimeout(state.chat.typingTimers.get(senderKey));
+          if (state.chat.activePeer === senderKey && els.chatTyping) {
+            els.chatTyping.classList.remove('hidden');
+          }
+          const timeout = setTimeout(() => {
+            state.chat.typingPeers.delete(senderKey);
+            if (state.chat.activePeer === senderKey && els.chatTyping) {
+              els.chatTyping.classList.add('hidden');
+            }
+            state.chat.typingTimers.delete(senderKey);
+          }, 1500);
+          state.chat.typingTimers.set(senderKey, timeout);
+        } else {
           state.chat.typingPeers.delete(senderKey);
+          const existingTimer = state.chat.typingTimers.get(senderKey);
+          if (existingTimer) clearTimeout(existingTimer);
+          state.chat.typingTimers.delete(senderKey);
           if (state.chat.activePeer === senderKey && els.chatTyping) {
             els.chatTyping.classList.add('hidden');
           }
-          state.chat.typingTimers.delete(senderKey);
-        }, 1500);
-        state.chat.typingTimers.set(senderKey, timeout);
-      } else {
-        state.chat.typingPeers.delete(senderKey);
-        const existingTimer = state.chat.typingTimers.get(senderKey);
-        if (existingTimer) clearTimeout(existingTimer);
-        state.chat.typingTimers.delete(senderKey);
-        if (state.chat.activePeer === senderKey && els.chatTyping) {
-          els.chatTyping.classList.add('hidden');
         }
+        return true;
       }
-      return true;
-    }
-    case 'chat-message': {
-      const label = getDisplayName(peer || { addr: senderAddr || senderKey });
-      appendHistory(senderKey, {
-        id: typeof payload.id === 'string'
-          ? payload.id
-          : `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`,
-        dir: 'in',
-        text: typeof payload.text === 'string' ? payload.text : '',
-        ts: payload.ts || nowSeconds()
-      });
-      state.chat.typingPeers.delete(senderKey);
-      const timer = state.chat.typingTimers.get(senderKey);
-      if (timer) clearTimeout(timer);
-      state.chat.typingTimers.delete(senderKey);
-      setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
-      if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
-      if (state.chat.activePeer === senderKey) {
-        renderChat();
-      } else {
-        setBadge?.(`New message from ${label}`);
+      case 'chat-message': {
+        const label = getDisplayName(peer || { addr: senderAddr || senderKey });
+        appendHistory(senderKey, {
+          id: typeof payload.id === 'string'
+            ? payload.id
+            : (String(payload.messageId || payload.message_id || '').trim() || `${payload.ts || nowSeconds()}-${Math.random().toString(36).slice(2, 10)}`),
+          dir: 'in',
+          text: typeof payload.text === 'string' ? payload.text : '',
+          ts: payload.ts || nowSeconds()
+        });
+        state.chat.typingPeers.delete(senderKey);
+        const timer = state.chat.typingTimers.get(senderKey);
+        if (timer) clearTimeout(timer);
+        state.chat.typingTimers.delete(senderKey);
+        setSession(senderKey, { status: 'accepted', lastTs: nowSeconds() });
+        if (state.chat.promptMessage?.key === senderKey) state.chat.promptMessage = null;
+        if (state.chat.activePeer === senderKey) {
+          renderChat();
+        } else {
+          setBadge?.(`New message from ${label}`);
+        }
+        scheduleRender();
+        return true;
       }
-      scheduleRender();
-      return true;
+      default:
+        return false;
     }
-    default:
-      return false;
   }
-}
 
 
   function getPresenceMeta() {
@@ -1262,11 +1423,40 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       peer?.meta?.selectedTransport ||
       peer?.meta?.selected_transport ||
       '';
-    const normalized = String(direct || '').trim().toLowerCase();
+    const normalized = normalizeTransport(direct);
     if (normalized) return normalized;
+    const selected = selectBestCandidate({
+      selectedTransport: '',
+      endpointCandidates:
+        peer?.endpointCandidates ||
+        peer?.endpoint_candidates ||
+        peer?.candidates ||
+        peer?.meta?.endpointCandidates ||
+        peer?.meta?.endpoint_candidates ||
+        {},
+      staleRejectionCount:
+        peer?.staleRejectionCount ||
+        peer?.stale_rejection_count ||
+        peer?.meta?.staleRejectionCount ||
+        0,
+      fallbackTsMs: Number(peer?.lastSeenAt || 0) || (Number(peer?.last || 0) * 1000)
+    }).selectedTransport;
+    if (selected) return selected;
     const source = String(peer?.source || '').trim().toLowerCase();
     if (source === 'noclip') return 'nats';
     return 'nkn';
+  }
+
+  function formatFreshnessMs(ms) {
+    const value = Number(ms || 0);
+    if (!Number.isFinite(value) || value <= 0) return 'unknown';
+    const sec = Math.floor(value / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h`;
+    return `${Math.floor(hr / 24)}d`;
   }
 
   function resolveNetworkLabel(peer) {
@@ -1281,18 +1471,8 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
   function resolveManualPeerAddress(rawValue) {
     const parsed = readQrAddressValue(rawValue);
     if (!parsed) return '';
-    let candidate = String(parsed).trim();
-    if (!candidate) return '';
-    const inferred = inferNetworkFromAddress(candidate);
-    if (!inferred) {
-      const activeNetwork = state.layout.activeNetwork === 'noclip' ? 'noclip' : 'hydra';
-      candidate = `${activeNetwork}.${candidate.replace(/^graph\./i, '')}`;
-    }
-    const [prefix, rest] = candidate.split('.', 2);
-    const network = normalizeNetwork(prefix);
-    const key = normalizePubKey(rest || '');
-    if (!network || !key) return '';
-    return `${network}.${key}`;
+    const activeNetwork = state.layout.activeNetwork === 'noclip' ? 'noclip' : 'hydra';
+    return normalizeAddressCandidate(parsed, activeNetwork);
   }
 
   async function addManualPeer(rawValue, { source = 'manual' } = {}) {
@@ -1310,16 +1490,33 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
 
     const targetMap = network === 'noclip' ? state.noclip.peers : state.peers;
     const existing = targetMap.get(key) || {};
+    const selected = selectBestCandidate({
+      selectedTransport: 'nkn',
+      endpointCandidates: { nkn: { endpoint: address, lastVerifiedMs: nowMs() } },
+      staleRejectionCount: 0,
+      fallbackTsMs: nowMs()
+    });
     const merged = {
       ...existing,
       nknPub: key,
       addr: address,
       originalPub: address,
       network,
+      selectedTransport: selected.selectedTransport || 'nkn',
+      selectedEndpoint: selected.selectedEndpoint || address,
+      endpointCandidates: selected.endpointCandidates,
+      candidateFreshnessMs: selected.candidateFreshnessMs,
+      staleRejectionCount: 0,
+      discoverySource: source === 'qr' ? 'manual.qr' : 'manual.input',
       meta: {
         ...(existing.meta || {}),
         network,
-        source: 'manual'
+        source: 'manual',
+        selectedTransport: selected.selectedTransport || 'nkn',
+        endpointCandidates: selected.endpointCandidates,
+        candidateFreshnessMs: selected.candidateFreshnessMs,
+        discoverySource: source === 'qr' ? 'manual.qr' : 'manual.input',
+        staleRejectionCount: 0
       },
       last: existing.last || nowSeconds(),
       lastSeenAt: existing.lastSeenAt || 0,
@@ -1353,6 +1550,182 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     scheduleRender();
     setBadge?.(ok ? `Peer added: ${formatAddress(address)}` : `Peer saved: ${formatAddress(address)}`);
     return true;
+  }
+
+  function ingestMarketplaceDirectory(catalogs = [], options = {}) {
+    const list = Array.isArray(catalogs) ? catalogs : [];
+    const source = String(options.source || 'marketplace.directory').trim() || 'marketplace.directory';
+    const ping = options.ping === true;
+    const pingLimit = Math.max(0, Math.min(20, Number(options.pingLimit) || 3));
+    const seenKeys = new Set();
+    const summary = {
+      catalogs: list.length,
+      imported: 0,
+      added: 0,
+      updated: 0,
+      skipped: 0,
+      pinged: 0
+    };
+
+    const parseTimestampMs = (entry) => {
+      const src = entry && typeof entry === 'object' ? entry : {};
+      const direct = Number(
+        src.lastIngestedAtMs ||
+        src.last_ingested_at_ms ||
+        src.generatedAtMs ||
+        src.generated_at_ms ||
+        0
+      );
+      if (Number.isFinite(direct) && direct > 0) return Math.floor(direct);
+      const iso = String(
+        src.lastIngestedAt ||
+        src.last_ingested_at ||
+        src.generatedAt ||
+        src.generated_at ||
+        ''
+      ).trim();
+      if (iso) {
+        const parsed = Date.parse(iso);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+      return nowMs();
+    };
+
+    const pushAddress = (bucket, value, fallbackNetwork = 'hydra') => {
+      const normalized = normalizeAddressCandidate(value, fallbackNetwork);
+      if (!normalized) return;
+      if (!bucket.includes(normalized)) bucket.push(normalized);
+    };
+
+    const collectAddresses = (entry) => {
+      const src = entry && typeof entry === 'object' ? entry : {};
+      const provider = src.provider && typeof src.provider === 'object'
+        ? src.provider
+        : (src.catalogPayload?.provider && typeof src.catalogPayload.provider === 'object' ? src.catalogPayload.provider : {});
+      const inferredNetwork = normalizeNetwork(
+        src.providerNetwork ||
+        src.provider_network ||
+        src.sourceNetwork ||
+        src.source_network ||
+        provider.providerNetwork ||
+        provider.provider_network
+      ) || 'hydra';
+      const addresses = [];
+      pushAddress(addresses, src.routerNkn || src.router_nkn, inferredNetwork);
+      pushAddress(addresses, src.lastSourceAddress || src.last_source_address, inferredNetwork);
+      pushAddress(addresses, provider.routerNkn || provider.router_nkn, inferredNetwork);
+      const providerAddrs = Array.isArray(provider.routerNknAddresses)
+        ? provider.routerNknAddresses
+        : (Array.isArray(provider.router_nkn_addresses) ? provider.router_nkn_addresses : []);
+      providerAddrs.forEach((addr) => pushAddress(addresses, addr, inferredNetwork));
+      return { addresses, inferredNetwork };
+    };
+
+    list.forEach((entry) => {
+      const src = entry && typeof entry === 'object' ? entry : {};
+      const { addresses, inferredNetwork } = collectAddresses(src);
+      if (!addresses.length) {
+        summary.skipped += 1;
+        return;
+      }
+      const providerLabel = sanitizeUsername(
+        String(
+          src.providerLabel ||
+          src.provider_label ||
+          src.catalogPayload?.provider?.providerLabel ||
+          src.catalogPayload?.provider?.provider_label ||
+          ''
+        ).trim()
+      );
+      const providerFingerprint = String(
+        src.providerFingerprint ||
+        src.provider_fingerprint ||
+        src.providerKeyFingerprint ||
+        src.provider_key_fingerprint ||
+        src.catalogPayload?.provider?.providerKeyFingerprint ||
+        src.catalogPayload?.provider?.provider_key_fingerprint ||
+        ''
+      ).trim().toLowerCase();
+      const sourceNetwork = normalizeNetwork(src.sourceNetwork || src.source_network) || inferredNetwork || 'hydra';
+      const tsMs = parseTimestampMs(src);
+      addresses.forEach((address) => {
+        const key = normalizePubKey(address);
+        if (!key || seenKeys.has(key)) return;
+        seenKeys.add(key);
+        const existing = state.peers.get(key) || {};
+        const selected = selectBestCandidate({
+          selectedTransport: 'nkn',
+          endpointCandidates: {
+            ...(existing.endpointCandidates || {}),
+            nkn: {
+              endpoint: address,
+              lastVerifiedMs: tsMs
+            }
+          },
+          staleRejectionCount: Number(existing.staleRejectionCount || 0),
+          fallbackTsMs: tsMs
+        });
+        const result = upsertPeer(
+          {
+            ...existing,
+            nknPub: key,
+            addr: address,
+            originalPub: address,
+            network: sourceNetwork,
+            selectedTransport: selected.selectedTransport || 'nkn',
+            selectedEndpoint: selected.selectedEndpoint || address,
+            endpointCandidates: selected.endpointCandidates,
+            candidateFreshnessMs: selected.candidateFreshnessMs,
+            staleRejectionCount: selected.staleRejectionCount,
+            discoverySource: source,
+            source: 'marketplace-directory',
+            meta: {
+              ...(existing.meta || {}),
+              network: sourceNetwork,
+              source: 'marketplace-directory',
+              marketplaceDirectory: true,
+              discoverySource: source,
+              selectedTransport: selected.selectedTransport || 'nkn',
+              endpointCandidates: selected.endpointCandidates,
+              candidateFreshnessMs: selected.candidateFreshnessMs,
+              staleRejectionCount: selected.staleRejectionCount,
+              ...(providerLabel ? { username: providerLabel, providerLabel } : {}),
+              ...(providerFingerprint ? { providerFingerprint } : {})
+            },
+            last: Math.floor(tsMs / 1000),
+            lastSeenAt: tsMs,
+            online: existing.online === true,
+            probing: false
+          },
+          { online: existing.online === true, probing: false }
+        );
+        if (!result?.entry) {
+          summary.skipped += 1;
+          return;
+        }
+        summary.imported += 1;
+        if (result.added) summary.added += 1;
+        else summary.updated += 1;
+        if (ping && summary.pinged < pingLimit) {
+          pingPeer(key);
+          summary.pinged += 1;
+        }
+      });
+    });
+
+    if (summary.imported > 0) {
+      recordDiscoveryEvent('marketplace-directory-import', {
+        source,
+        catalogs: summary.catalogs,
+        imported: summary.imported,
+        added: summary.added,
+        updated: summary.updated,
+        pinged: summary.pinged
+      });
+      scheduleRender();
+      updateBadge();
+    }
+    return summary;
   }
 
   function setStatus(text, sticky = false) {
@@ -1529,7 +1902,55 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       || inferNetworkFromAddress(nknPub)
       || inferNetworkFromAddress(rawPub);
     if (inferredNetwork) meta.network = inferredNetwork;
-    const canonicalAddr = canonicalAddressForNetwork(inferredNetwork, addrTrimmed || rawPub || nknPub, nknPub);
+    const canonicalAddr =
+      normalizeAddressCandidate(
+        canonicalAddressForNetwork(inferredNetwork, addrTrimmed || rawPub || nknPub, nknPub),
+        inferredNetwork || 'hydra'
+      ) ||
+      canonicalAddressForNetwork(inferredNetwork, addrTrimmed || rawPub || nknPub, nknPub);
+    const last = typeof entry.last === 'number' ? entry.last : nowSeconds();
+    const fallbackTsMs = last * 1000;
+    const staleRejectionCount = Number.isFinite(entry.staleRejectionCount)
+      ? Number(entry.staleRejectionCount)
+      : (
+          Number.isFinite(entry.stale_rejection_count)
+            ? Number(entry.stale_rejection_count)
+            : (Number.isFinite(meta.staleRejectionCount) ? Number(meta.staleRejectionCount) : 0)
+        );
+    const selectedTransport = normalizeTransport(
+      entry.selectedTransport ||
+      entry.selected_transport ||
+      entry.transport ||
+      meta.selectedTransport ||
+      meta.selected_transport ||
+      meta.transport
+    );
+    const scored = selectBestCandidate({
+      selectedTransport,
+      endpointCandidates:
+        entry.endpointCandidates ||
+        entry.endpoint_candidates ||
+        entry.candidates ||
+        meta.endpointCandidates ||
+        meta.endpoint_candidates ||
+        meta.candidates ||
+        {},
+      staleRejectionCount,
+      fallbackTsMs
+    });
+    const discoverySource = String(
+      entry.discoverySource ||
+      entry.discovery_source ||
+      meta.discoverySource ||
+      meta.discovery_source ||
+      ''
+    ).trim();
+    if (scored.selectedTransport) meta.selectedTransport = scored.selectedTransport;
+    if (scored.selectedEndpoint) meta.selectedEndpoint = scored.selectedEndpoint;
+    meta.endpointCandidates = scored.endpointCandidates;
+    meta.candidateFreshnessMs = scored.candidateFreshnessMs;
+    if (discoverySource) meta.discoverySource = discoverySource;
+    meta.staleRejectionCount = scored.staleRejectionCount;
     const sharedRaw = [];
     if (Array.isArray(entry.sharedSources)) sharedRaw.push(...entry.sharedSources);
     if (Array.isArray(entry.sharedFrom)) sharedRaw.push(...entry.sharedFrom);
@@ -1557,7 +1978,13 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       originalPub: typeof rawPub === 'string' ? rawPub.trim() : String(rawPub || '').trim() || nknPub,
       meta,
       network: inferredNetwork || '',
-      last: typeof entry.last === 'number' ? entry.last : nowSeconds(),
+      last,
+      selectedTransport: scored.selectedTransport || '',
+      selectedEndpoint: scored.selectedEndpoint || '',
+      endpointCandidates: scored.endpointCandidates,
+      candidateFreshnessMs: scored.candidateFreshnessMs,
+      staleRejectionCount: scored.staleRejectionCount,
+      discoverySource,
       sharedSources
     };
   }
@@ -1578,6 +2005,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     if (!peers.length) return;
     const payload = {
       type: 'peer-directory',
+      messageId: newMessageId('dir'),
       pub: state.meAddr,
       meta: {
         username: sanitizeUsername(state.username || ''),
@@ -1602,6 +2030,12 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       entries.push({
         nknPub: peer.originalPub || peer.nknPub,
         addr: peer.addr || peer.originalPub || peer.nknPub,
+        selectedTransport: String(peer.selectedTransport || peer.selected_transport || '').trim().toLowerCase(),
+        selectedEndpoint: String(peer.selectedEndpoint || '').trim(),
+        endpointCandidates: { ...(peer.endpointCandidates || {}) },
+        candidateFreshnessMs: { ...(peer.candidateFreshnessMs || {}) },
+        staleRejectionCount: Number.isFinite(peer.staleRejectionCount) ? Number(peer.staleRejectionCount) : 0,
+        discoverySource: String(peer.discoverySource || '').trim(),
         meta: {
           ...(peer.meta || {}),
           username,
@@ -1712,9 +2146,45 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       nknPub: key,
       last: lastSeconds,
       lastSeenAt,
-      addr: canonicalAddressForNetwork(network, peer.addr || existing.addr || peer.nknPub || key, key),
+      addr:
+        normalizeAddressCandidate(
+          canonicalAddressForNetwork(network, peer.addr || existing.addr || peer.nknPub || key, key),
+          network || 'hydra'
+        ) ||
+        canonicalAddressForNetwork(network, peer.addr || existing.addr || peer.nknPub || key, key),
       originalPub: peer.nknPub || existing.originalPub || key
     };
+    const staleCount = Number.isFinite(peer?.staleRejectionCount)
+      ? Number(peer.staleRejectionCount)
+      : (
+          Number.isFinite(peer?.stale_rejection_count)
+            ? Number(peer.stale_rejection_count)
+            : (Number.isFinite(existing?.staleRejectionCount) ? Number(existing.staleRejectionCount) : 0)
+        );
+    const incomingCandidates = mergeEndpointCandidates(
+      existing?.endpointCandidates || {},
+      peer?.endpointCandidates || peer?.endpoint_candidates || peer?.candidates || {}
+    );
+    const selected = selectBestCandidate({
+      selectedTransport: normalizeTransport(
+        peer?.selectedTransport ||
+        peer?.selected_transport ||
+        peer?.transport ||
+        existing?.selectedTransport ||
+        existing?.selected_transport ||
+        existing?.transport
+      ),
+      endpointCandidates: incomingCandidates,
+      staleRejectionCount: staleCount,
+      fallbackTsMs: lastSeenAt || (lastSeconds * 1000)
+    });
+    const discoverySource = String(
+      peer?.discoverySource ||
+      peer?.discovery_source ||
+      existing?.discoverySource ||
+      existing?.discovery_source ||
+      ''
+    ).trim();
     if (peer.meta && typeof peer.meta === 'object') {
       const prevMeta = existing.meta && typeof existing.meta === 'object' ? { ...existing.meta } : {};
       const nextMeta = { ...prevMeta, ...peer.meta };
@@ -1728,7 +2198,21 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       merged.meta = {};
     }
     if (network && !normalizeNetwork(merged.meta.network)) merged.meta.network = network;
+    if (selected.selectedTransport) merged.meta.selectedTransport = selected.selectedTransport;
+    if (selected.selectedEndpoint) merged.meta.selectedEndpoint = selected.selectedEndpoint;
+    merged.meta.endpointCandidates = selected.endpointCandidates;
+    merged.meta.candidateFreshnessMs = selected.candidateFreshnessMs;
+    if (discoverySource) merged.meta.discoverySource = discoverySource;
+    merged.meta.staleRejectionCount = selected.staleRejectionCount;
     if (network) merged.network = network;
+    merged.selectedTransport = selected.selectedTransport || '';
+    merged.selected_transport = merged.selectedTransport || '';
+    merged.selectedEndpoint = selected.selectedEndpoint || '';
+    merged.endpointCandidates = selected.endpointCandidates;
+    merged.candidateFreshnessMs = selected.candidateFreshnessMs;
+    merged.staleRejectionCount = selected.staleRejectionCount;
+    merged.discoverySource = discoverySource;
+    if (!merged.source) merged.source = merged.selectedTransport === 'nats' ? 'noclip' : 'hydra';
     if (online !== undefined) merged.online = online;
     if (probing !== undefined) merged.probing = probing;
 
@@ -2299,6 +2783,13 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       const statusText = peer.online ? 'Online' : peer.probing ? 'Checking...' : 'Offline';
       const networkLabel = resolveNetworkLabel(peer);
       const transportLabel = resolveTransportLabel(peer);
+      const freshnessMap =
+        peer?.candidateFreshnessMs && typeof peer.candidateFreshnessMs === 'object'
+          ? peer.candidateFreshnessMs
+          : (peer?.meta?.candidateFreshnessMs && typeof peer.meta.candidateFreshnessMs === 'object'
+            ? peer.meta.candidateFreshnessMs
+            : {});
+      const activeFreshness = freshnessMap?.[transportLabel];
       const lastSeconds = peer.last
         ? peer.last
         : peer.lastSeenAt
@@ -2307,7 +2798,9 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       parts.push(`Status: ${statusText}`);
       parts.push(`Network: ${networkLabel}`);
       parts.push(`Transport: ${transportLabel}`);
+      if (activeFreshness != null) parts.push(`Freshness: ${formatFreshnessMs(activeFreshness)}`);
       parts.push(`Last Seen: ${formatLast(lastSeconds)}`);
+      if (peer.discoverySource) parts.push(`Source: ${String(peer.discoverySource).trim()}`);
       const graphLabel = peer.meta?.graphId;
       if (graphLabel) parts.push(`Graph: ${String(graphLabel).slice(0, 8)}`);
       infoEl.textContent = parts.join(' • ');
@@ -2417,7 +2910,24 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       setBadge?.('No peer identifier available', false);
       return;
     }
-    setBadge?.(`Configure a NoClip Bridge node with target ${target.slice(0, 8)}…`, true);
+    const detail = {
+      targetPub: target,
+      targetAddr: String(peer?.addr || '').trim() || `noclip.${target}`,
+      displayName: getDisplayName(peer || {}),
+      source: 'peer-modal',
+      autoSync: false
+    };
+    let dispatched = false;
+    try {
+      dispatched = window.dispatchEvent(new CustomEvent('hydra-noclip-bridge-target', { detail }));
+    } catch (_) {
+      dispatched = false;
+    }
+    if (!dispatched) {
+      setBadge?.(`NoClip bridge target request failed for ${target.slice(0, 8)}…`, false);
+      return;
+    }
+    setBadge?.(`NoClip bridge target requested: ${target.slice(0, 8)}…`, true);
     hideModal();
   }
 
@@ -2516,14 +3026,19 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     client.on('dm', (payload) => {
       if (!payload || typeof payload !== 'object') return;
       if (payload.type === 'peer-directory') {
-        const sender = normalizePubKey(payload.pub || payload.from);
+        const sourceAddr = normalizeAddressForSend(payload.pub || payload.from || payload.addr || '');
+        const sender = normalizePubKey(payload.pub || payload.from || sourceAddr);
+        if (sender && isDuplicateInbound(payload, sender, 'nats')) {
+          recordDiscoveryEvent('recv-duplicate', { source: 'nats', target: sourceAddr || sender });
+          return;
+        }
         if (sender) {
           state.remoteHashes.set(sender, hashDirectory(payload.peers || []));
           if (sender !== normalizePubKey(state.mePub || state.meAddr)) {
             upsertPeer(
               {
                 nknPub: sender,
-                addr: payload.pub || payload.from || sender,
+                addr: sourceAddr || sender,
                 last: payload.ts || nowSeconds(),
                 meta: payload.meta || {}
               },
@@ -2684,17 +3199,60 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     const msg = evt.msg || {};
     const from = normalizePubKey(evt.from || msg.pub || msg.from);
     if (!from) return;
+    if (isDuplicateInbound(msg, from, 'nats')) {
+      recordDiscoveryEvent('recv-duplicate', { source: 'noclip', target: evt.from || from });
+      return;
+    }
     const inferredNetwork = normalizeNetwork(msg?.meta?.network) || 'noclip';
+    const selected = selectBestCandidate({
+      selectedTransport: normalizeTransport(
+        msg.selected_transport ||
+        msg.selectedTransport ||
+        msg.transport ||
+        msg?.meta?.selected_transport ||
+        msg?.meta?.selectedTransport
+      ),
+      endpointCandidates:
+        msg.endpointCandidates ||
+        msg.endpoint_candidates ||
+        msg.candidates ||
+        msg?.meta?.endpointCandidates ||
+        msg?.meta?.endpoint_candidates ||
+        {},
+      staleRejectionCount:
+        msg.staleRejectionCount ||
+        msg.stale_rejection_count ||
+        msg?.meta?.staleRejectionCount ||
+        0,
+      fallbackTsMs: (Number(msg.ts || nowSeconds()) * 1000)
+    });
     const existing = state.noclip.peers.get(from) || { nknPub: from };
     const merged = {
       ...existing,
       nknPub: from,
-      addr: canonicalAddressForNetwork(inferredNetwork, msg.addr || existing.addr || evt.from || from, from),
+      addr:
+        normalizeAddressCandidate(
+          canonicalAddressForNetwork(inferredNetwork, msg.addr || existing.addr || evt.from || from, from),
+          inferredNetwork
+        ) ||
+        canonicalAddressForNetwork(inferredNetwork, msg.addr || existing.addr || evt.from || from, from),
       last: msg.ts || nowSeconds(),
+      selectedTransport: selected.selectedTransport || existing.selectedTransport || '',
+      selectedEndpoint: selected.selectedEndpoint || existing.selectedEndpoint || '',
+      endpointCandidates: selected.endpointCandidates,
+      candidateFreshnessMs: selected.candidateFreshnessMs,
+      staleRejectionCount: selected.staleRejectionCount,
+      discoverySource: String(msg.discovery_source || msg.discoverySource || existing.discoverySource || 'noclip.discovery').trim(),
       meta: {
         ...(existing.meta || {}),
         ...(msg.meta && typeof msg.meta === 'object' ? msg.meta : {}),
         network: inferredNetwork,
+        selectedTransport: selected.selectedTransport || '',
+        selectedEndpoint: selected.selectedEndpoint || '',
+        endpointCandidates: selected.endpointCandidates,
+        candidateFreshnessMs: selected.candidateFreshnessMs,
+        staleRejectionCount: selected.staleRejectionCount,
+        discoverySource: String(msg.discovery_source || msg.discoverySource || existing.discoverySource || 'noclip.discovery').trim(),
         lastMessageType: msg.type || existing.meta?.lastMessageType || ''
       },
       network: inferredNetwork
@@ -3021,8 +3579,20 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
       });
     }
 
+    const target = normalizePubKey(pub);
+    if (!target) {
+      throw new Error('Invalid peer identifier');
+    }
+    const message = { ...(payload || {}) };
+    if (!message.messageId && !message.message_id && !message.id) {
+      message.messageId = newMessageId('dm');
+    }
+    if (!message.ts) message.ts = nowSeconds();
+    if (!message.transport) message.transport = 'nats';
+    if (!message.discovery_source) message.discovery_source = 'nats';
+
     if (state.discovery && state.discovery.dm) {
-      state.discovery.dm(pub, payload);
+      state.discovery.dm(target, message);
     } else {
       throw new Error('Discovery DM not available');
     }
@@ -3050,6 +3620,7 @@ function handlePeerMessage(payload, { transport = 'nats', sourceAddr = '' } = {}
     init,
     registerDmHandler,
     sendDm,
+    ingestMarketplaceDirectory,
     getNoclipPeers,
     subscribeNoclipPeers
   };

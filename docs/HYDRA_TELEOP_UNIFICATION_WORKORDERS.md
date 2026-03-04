@@ -685,6 +685,7 @@ Acceptance:
 6. Phase 8 after Phase 4/5 contracts stabilize, with backend migration and interop smoke gates enabled.
 7. Phase 9 to operationalize one-command rollout gate execution and artifact retention.
 8. Phase 10 to ship provider marketplace, entitlement credits, and runtime enforcement across Hydra and NoClip.
+9. Phase 11 to add repeatable catalog federation sync (manual + scheduled publish with backoff and observability).
 
 ## 7) Definition of Done (Program-Level)
 - Hydra router exposes stable control-plane APIs and NKN resolve semantics matching teleoperation behavior.

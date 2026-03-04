@@ -334,13 +334,27 @@ const NodeStore = {
       lastDeviceName: ''
     },
     Payments: {
-      mode: 'seller',
+      mode: 'credit-ledger',
+      transferRole: 'seller',
       amount: '1.0',
       asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       chainId: 8453,
       receiver: '',
       memo: '',
-      unlockTTL: 900
+      unlockTTL: 900,
+      creditApiBase: '',
+      creditAuthToken: '',
+      creditAmount: '0.1',
+      creditAmountMicros: '',
+      creditScope: 'infer',
+      creditReservationTtlSec: 90,
+      creditApplyEntitlements: true,
+      creditForceRefreshOnReserve: false,
+      marketplaceOfferId: '',
+      marketplaceServiceId: '',
+      marketplaceMaxChargeMicros: '',
+      marketplaceTransportTag: 'nkn',
+      requestedUnits: 1
     },
     WebSerial: {
       autoConnect: true,

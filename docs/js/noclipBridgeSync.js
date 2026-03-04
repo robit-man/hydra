@@ -44,6 +44,19 @@ function createNoClipBridgeSync({
     return match ? match[1].toLowerCase() : '';
   };
 
+  const normalizePeerToken = (value) => {
+    if (typeof value !== 'string') return '';
+    let text = value.trim();
+    if (!text) return '';
+    text = text.replace(/^nkn:\/\//i, '');
+    text = text.replace(/^(graph|hydra|noclip)\./i, '');
+    text = text.split(/[/?#]/)[0] || text;
+    const hex = normalizeHex64(text);
+    if (hex) return hex;
+    if (!/^[a-z0-9._-]{8,256}$/i.test(text)) return '';
+    return text.toLowerCase();
+  };
+
   const textValue = (value) => {
     if (typeof value !== 'string') return '';
     const trimmed = value.trim();
@@ -103,7 +116,7 @@ function createNoClipBridgeSync({
       identity.addr = typeof nknAddr === 'string' ? nknAddr : '';
       const explicitPub = Net?.nkn?.client?.getPublicKey?.();
       const inferredPub = normalizeHex64(identity.addr);
-      identity.pub = normalizeHex64(explicitPub) || inferredPub;
+      identity.pub = normalizeHex64(explicitPub) || inferredPub || normalizePeerToken(identity.addr);
     } catch (err) {
       console.warn('[NoClipBridgeSync] Failed to derive Hydra identity:', err);
     }
@@ -114,7 +127,7 @@ function createNoClipBridgeSync({
     if (!input || typeof input !== 'object') return null;
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
     const objectUuid = typeof input.objectUuid === 'string' ? input.objectUuid.trim() : '';
-    const noclipPub = normalizeHex64(input.noclipPub || input.noclipAddr || '');
+    const noclipPub = normalizeHex64(input.noclipPub || input.noclipAddr || '') || normalizePeerToken(input.noclipPub || input.noclipAddr || '');
     if (!sessionId || !objectUuid || !noclipPub) return null;
     const stamp = nowMs();
     const position = input.position && typeof input.position === 'object' ? { ...input.position } : null;
@@ -161,7 +174,7 @@ function createNoClipBridgeSync({
   };
 
   const findSessionsByNoclipPub = (pub) => {
-    const normalized = normalizeHex64(pub);
+    const normalized = normalizeHex64(pub) || normalizePeerToken(pub);
     if (!normalized) return [];
     return Array.from(state.sessions.values()).filter((session) => session.noclipPub === normalized);
   };
@@ -259,7 +272,11 @@ function createNoClipBridgeSync({
     console.log('[NoClipBridgeSync] Received sync request from:', from, msg);
 
     const rawSender = msg.from || from || '';
-    const normalizedPub = normalizeHex64(rawSender) || normalizeHex64(msg.noclipAddr);
+    const normalizedPub =
+      normalizeHex64(rawSender) ||
+      normalizeHex64(msg.noclipAddr) ||
+      normalizePeerToken(rawSender) ||
+      normalizePeerToken(msg.noclipAddr);
     const requestKey = normalizedPub || rawSender;
     const noclipAddr = msg.noclipAddr || (normalizedPub ? `noclip.${normalizedPub}` : rawSender);
     const objectId = msg.objectId;
@@ -277,7 +294,7 @@ function createNoClipBridgeSync({
     state.pendingRequests.set(requestKey, {
       key: requestKey,
       noclipPub: normalizedPub || '',
-      dmTarget: normalizedPub || rawSender,
+      dmTarget: normalizedPub || normalizePeerToken(rawSender) || rawSender,
       noclipAddr,
       objectId,
       objectLabel,
@@ -430,7 +447,7 @@ function createNoClipBridgeSync({
     ensureSessionsLoaded();
     const key = state.pendingRequests.has(noclipPub)
       ? noclipPub
-      : (normalizeHex64(noclipPub) || noclipPub);
+      : (normalizeHex64(noclipPub) || normalizePeerToken(noclipPub) || noclipPub);
     const request = state.pendingRequests.get(key);
     if (!request) {
       console.error('[NoClipBridgeSync] No pending request found for', noclipPub);
@@ -439,8 +456,14 @@ function createNoClipBridgeSync({
 
     try {
       // Create NoClipBridge node
-      const targetPub = request.noclipPub || normalizeHex64(noclipPub) || normalizeHex64(key) || '';
-      const displayKey = (targetPub && targetPub.length) ? targetPub : (normalizeHex64(key) || key || 'noclip');
+      const targetPub =
+        request.noclipPub ||
+        normalizeHex64(noclipPub) ||
+        normalizePeerToken(noclipPub) ||
+        normalizeHex64(key) ||
+        normalizePeerToken(key) ||
+        '';
+      const displayKey = (targetPub && targetPub.length) ? targetPub : (normalizePeerToken(key) || key || 'noclip');
       const nodeId = `noclip-bridge-${String(displayKey).slice(0, 8)}`;
       const position = { x: Math.random() * 400 - 200, y: Math.random() * 300 - 150 };
 
@@ -545,7 +568,7 @@ function createNoClipBridgeSync({
   async function rejectSyncRequest(noclipPub, reason = 'User rejected') {
     const key = state.pendingRequests.has(noclipPub)
       ? noclipPub
-      : (normalizeHex64(noclipPub) || noclipPub);
+      : (normalizeHex64(noclipPub) || normalizePeerToken(noclipPub) || noclipPub);
     const request = state.pendingRequests.get(key);
     if (!request) return;
 
