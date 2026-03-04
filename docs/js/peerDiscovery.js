@@ -10,6 +10,26 @@ const PING_TIMEOUT_MS = 8000;
 const USERNAME_KEY = 'hydra.peer.username';
 const DISCOVERY_ROOM_KEY = 'hydra.discovery.room';
 const DISCOVERY_ROOM_DEFAULT = 'nexus';
+const MARKET_EVENT_WINDOW_MS = 3000;
+const MARKET_EVENT_MAX_PER_WINDOW = 120;
+const MARKET_SUBJECT_DEFAULTS = Object.freeze([
+  'hydra.market.catalog.v1',
+  'hydra.market.status.v1'
+]);
+const MARKET_SOURCE_PRIORITY = Object.freeze({
+  'nats-gossip': 40,
+  'bridge-dm': 30,
+  'router-resolve': 25,
+  'http-directory': 20,
+  'manual': 10,
+  unknown: 0
+});
+const MARKET_EVENT_TYPES = new Set([
+  'market-service-catalog',
+  'market.service.catalog',
+  'market-service-status',
+  'market.service.status'
+]);
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -65,6 +85,46 @@ const normalizeTransport = (value) => {
   if (key === 'localhost' || key === 'lan') return 'local';
   if (TRANSPORT_ORDER.includes(key)) return key;
   return '';
+};
+
+const normalizeMarketSource = (value, fallback = '') => {
+  const text = String(value || fallback || '').trim().toLowerCase();
+  if (!text) return 'unknown';
+  if (text === 'nats-gossip' || text === 'bridge-dm' || text === 'http-directory' || text === 'router-resolve' || text === 'manual') {
+    return text;
+  }
+  if (text.includes('marketplace.directory') || text.includes('http') || text.includes('directory')) return 'http-directory';
+  if (text.includes('bridge') || text.includes('dm')) return 'bridge-dm';
+  if (text.includes('router')) return 'router-resolve';
+  if (text.includes('nats')) return 'nats-gossip';
+  return 'unknown';
+};
+
+const marketSourcePriority = (value) => Number(MARKET_SOURCE_PRIORITY[normalizeMarketSource(value)] || 0);
+
+const normalizeMarketEventType = (value) => {
+  const text = String(value || '').trim().toLowerCase();
+  if (text === 'market-service-catalog' || text === 'market.service.catalog') return 'market.service.catalog';
+  if (text === 'market-service-status' || text === 'market.service.status') return 'market.service.status';
+  return '';
+};
+
+const stableStringify = (value) => {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => stableStringify(entry)).join(',')}]`;
+  const src = value;
+  const keys = Object.keys(src).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(src[key])}`).join(',')}}`;
+};
+
+const fastChecksum = (value) => {
+  const text = stableStringify(value);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 };
 
 const isValidPeerKey = (value) => PEER_KEY_RE.test(String(value || '').trim());
@@ -416,10 +476,16 @@ class DiscoveryClient extends EventHub {
     this.nc = null;
     this.sc = null;
     this._hbTimer = null;
+    this.marketSeen = new Map();
 
     // Use unified 'discovery.' prefix to be compatible with NoClip
     this.presenceSubject = `discovery.${this.room}.presence`;
     this.dmSubject = (pub) => `discovery.${this.room}.dm.${pub}`;
+    const meta = me && typeof me === 'object' && me.meta && typeof me.meta === 'object' ? me.meta : {};
+    const configuredMarketSubjects = Array.isArray(meta.marketSubjects) ? meta.marketSubjects : [];
+    this.marketSubjects = configuredMarketSubjects
+      .map((subject) => String(subject || '').trim())
+      .filter(Boolean);
   }
 
   get peers() {
@@ -513,6 +579,48 @@ class DiscoveryClient extends EventHub {
         this.emit('status', { type: 'dm-error', err });
       }
     })();
+
+    if (Array.isArray(this.marketSubjects) && this.marketSubjects.length > 0) {
+      this.marketSubjects.forEach(async (subject) => {
+        const marketSub = await nc.subscribe(subject);
+        (async () => {
+          try {
+            for await (const msg of marketSub) {
+              const payload = this._decode(msg);
+              if (!payload || typeof payload !== 'object') continue;
+              const eventType = normalizeMarketEventType(payload.event || payload.type || '');
+              if (!eventType) continue;
+              const id = String(
+                payload.messageId ||
+                payload.message_id ||
+                payload.id ||
+                payload.mid ||
+                ''
+              ).trim() || `${eventType}:${subject}:${fastChecksum(payload)}`;
+              const now = Date.now();
+              for (const [key, expiresAt] of this.marketSeen.entries()) {
+                if (!key || !Number.isFinite(expiresAt) || expiresAt <= now) this.marketSeen.delete(key);
+              }
+              const knownUntil = Number(this.marketSeen.get(id) || 0);
+              if (knownUntil > now) continue;
+              this.marketSeen.set(id, now + (2 * 60 * 1000));
+              while (this.marketSeen.size > 2048) {
+                const oldest = this.marketSeen.keys().next();
+                if (!oldest || oldest.done) break;
+                this.marketSeen.delete(oldest.value);
+              }
+              this.emit('market', {
+                subject,
+                payload,
+                source: 'nats-gossip'
+              });
+            }
+          } catch (err) {
+            this.emit('status', { type: 'market-error', subject, err });
+          }
+        })();
+      });
+    }
 
     (async () => {
       try {
@@ -672,6 +780,15 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       discoveryStatus: 'idle',
       lastSource: '',
       events: []
+    },
+    marketplace: {
+      freshness: new Map(),
+      providers: new Map(),
+      rate: {
+        windowStartMs: 0,
+        count: 0,
+        dropped: 0
+      }
     }
   };
   state.store = sharedStore;
@@ -861,6 +978,378 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     return false;
   }
 
+  function resolveMarketSubjects() {
+    const raw = CFG?.marketplaceGossipSubjects;
+    if (Array.isArray(raw)) {
+      const list = raw.map((subject) => String(subject || '').trim()).filter(Boolean);
+      if (list.length) return list;
+    }
+    if (typeof raw === 'string') {
+      const list = raw.split(/[,\s]+/).map((subject) => subject.trim()).filter(Boolean);
+      if (list.length) return list;
+    }
+    return [...MARKET_SUBJECT_DEFAULTS];
+  }
+
+  function allowMarketplaceIngress() {
+    const rate = state.marketplace.rate;
+    const now = nowMs();
+    if (!rate.windowStartMs || now - rate.windowStartMs >= MARKET_EVENT_WINDOW_MS) {
+      rate.windowStartMs = now;
+      rate.count = 0;
+    }
+    rate.count += 1;
+    if (rate.count <= MARKET_EVENT_MAX_PER_WINDOW) return true;
+    rate.dropped += 1;
+    if (rate.dropped % 10 === 1) {
+      recordDiscoveryEvent('market-rate-limit', {
+        source: 'nats-gossip',
+        dropped: rate.dropped,
+        windowMs: MARKET_EVENT_WINDOW_MS
+      });
+    }
+    return false;
+  }
+
+  function normalizeMarketTimestampMs(payload, catalog) {
+    const payloadObj = payload && typeof payload === 'object' ? payload : {};
+    const catalogObj = catalog && typeof catalog === 'object' ? catalog : {};
+    const direct = Number(
+      catalogObj.generated_at_ms ||
+      catalogObj.generatedAtMs ||
+      payloadObj.generated_at_ms ||
+      payloadObj.generatedAtMs ||
+      payloadObj.timestamp_ms ||
+      payloadObj.timestampMs ||
+      payloadObj.ts ||
+      payloadObj.lastSeenAt ||
+      payloadObj.last_seen_at_ms ||
+      0
+    );
+    if (Number.isFinite(direct) && direct > 0) {
+      if (direct > 1e12) return Math.floor(direct);
+      return Math.floor(direct * 1000);
+    }
+    return nowMs();
+  }
+
+  function pushMarketAddress(bucket, value, fallbackNetwork = 'hydra') {
+    const normalized = normalizeAddressCandidate(value, fallbackNetwork);
+    if (!normalized) return;
+    if (!bucket.includes(normalized)) bucket.push(normalized);
+  }
+
+  function collectMarketplaceAddresses(payload, provider, sourceAddr, fallbackNetwork = 'hydra') {
+    const out = [];
+    const payloadObj = payload && typeof payload === 'object' ? payload : {};
+    const providerObj = provider && typeof provider === 'object' ? provider : {};
+    pushMarketAddress(out, sourceAddr, fallbackNetwork);
+    pushMarketAddress(out, payloadObj.source_address || payloadObj.sourceAddress, fallbackNetwork);
+    pushMarketAddress(out, providerObj.router_nkn || providerObj.routerNkn, fallbackNetwork);
+    const providerAddrList = Array.isArray(providerObj.router_nkn_addresses)
+      ? providerObj.router_nkn_addresses
+      : (Array.isArray(providerObj.routerNknAddresses) ? providerObj.routerNknAddresses : []);
+    providerAddrList.forEach((value) => pushMarketAddress(out, value, fallbackNetwork));
+    const networkUrls = providerObj.network_urls && typeof providerObj.network_urls === 'object'
+      ? providerObj.network_urls
+      : (providerObj.networkUrls && typeof providerObj.networkUrls === 'object' ? providerObj.networkUrls : {});
+    pushMarketAddress(out, networkUrls.nkn || networkUrls.nats || networkUrls.local, fallbackNetwork);
+    return out;
+  }
+
+  function ingestMarketplaceEnvelope(payload, options = {}) {
+    const raw = payload && typeof payload === 'object' ? payload : null;
+    if (!raw) return { handled: false, reason: 'invalid_payload' };
+    const eventType = normalizeMarketEventType(raw.event || raw.type || '');
+    if (!eventType) return { handled: false, reason: 'unsupported_event' };
+    if (!allowMarketplaceIngress()) return { handled: true, dropped: true, reason: 'rate_limited' };
+
+    const transport = normalizeTransport(options.transport || raw.transport || raw.selected_transport || raw.selectedTransport) || 'nats';
+    const sourceAddr = normalizeAddressForSend(
+      options.sourceAddr ||
+      raw.source_address ||
+      raw.sourceAddress ||
+      raw.pub ||
+      raw.from ||
+      raw.addr
+    );
+    const sourceTag = normalizeMarketSource(
+      options.source ||
+      raw.discovery_source ||
+      raw.discoverySource ||
+      '',
+      transport === 'nkn' ? 'bridge-dm' : 'nats-gossip'
+    );
+    const sourcePriority = marketSourcePriority(sourceTag);
+    const payloadMeta = raw.payload && typeof raw.payload === 'object' ? raw.payload : {};
+    const catalog = raw.catalog && typeof raw.catalog === 'object'
+      ? raw.catalog
+      : (raw.marketplaceCatalog && typeof raw.marketplaceCatalog === 'object'
+        ? raw.marketplaceCatalog
+        : (raw.marketplace_catalog && typeof raw.marketplace_catalog === 'object'
+          ? raw.marketplace_catalog
+          : (payloadMeta.catalog && typeof payloadMeta.catalog === 'object' ? payloadMeta.catalog : {})));
+    const provider = catalog.provider && typeof catalog.provider === 'object'
+      ? catalog.provider
+      : (raw.provider && typeof raw.provider === 'object'
+        ? raw.provider
+        : (payloadMeta.provider && typeof payloadMeta.provider === 'object' ? payloadMeta.provider : {}));
+    const summary = catalog.summary && typeof catalog.summary === 'object'
+      ? catalog.summary
+      : (raw.summary && typeof raw.summary === 'object'
+        ? raw.summary
+        : (payloadMeta.summary && typeof payloadMeta.summary === 'object' ? payloadMeta.summary : {}));
+    const status = raw.status && typeof raw.status === 'object'
+      ? raw.status
+      : (payloadMeta.status && typeof payloadMeta.status === 'object' ? payloadMeta.status : {});
+    const tsMs = normalizeMarketTimestampMs(raw, catalog);
+    const providerId = String(
+      provider.provider_id ||
+      provider.providerId ||
+      provider.provider_key_fingerprint ||
+      provider.providerKeyFingerprint ||
+      raw.provider_id ||
+      sourceAddr ||
+      ''
+    ).trim();
+    const providerFingerprint = String(
+      provider.provider_key_fingerprint ||
+      provider.providerKeyFingerprint ||
+      provider.provider_fingerprint ||
+      provider.providerFingerprint ||
+      providerId
+    ).trim().toLowerCase();
+    const fallbackNetwork = normalizeNetwork(
+      provider.provider_network ||
+      provider.providerNetwork ||
+      raw.source_network ||
+      raw.sourceNetwork
+    ) || inferNetworkFromAddress(sourceAddr) || 'hydra';
+    const addresses = collectMarketplaceAddresses(raw, provider, sourceAddr, fallbackNetwork);
+    if (!addresses.length && providerId) {
+      const fromProviderId = normalizeAddressCandidate(providerId, fallbackNetwork);
+      if (fromProviderId) addresses.push(fromProviderId);
+    }
+    if (!addresses.length) {
+      recordDiscoveryEvent('market-ignore', {
+        source: sourceTag,
+        reason: 'missing_address',
+        event: eventType
+      });
+      return { handled: true, accepted: false, reason: 'missing_address' };
+    }
+
+    const primaryAddress = addresses[0];
+    const peerKey = normalizePubKey(primaryAddress);
+    if (!peerKey) {
+      return { handled: true, accepted: false, reason: 'invalid_peer_key' };
+    }
+    const checksum = String(raw.catalog_checksum || raw.catalogChecksum || '').trim().toLowerCase()
+      || fastChecksum(
+        Object.keys(catalog || {}).length
+          ? catalog
+          : {
+              provider,
+              summary,
+              status,
+              event: eventType,
+              ts: tsMs
+            }
+      );
+    const freshnessKey = providerFingerprint || providerId || peerKey;
+    const existingFreshness = state.marketplace.freshness.get(freshnessKey) || null;
+    if (existingFreshness) {
+      const prevTs = Number(existingFreshness.tsMs || 0);
+      const prevChecksum = String(existingFreshness.checksum || '');
+      const prevPriority = Number(existingFreshness.sourcePriority || 0);
+      if (tsMs < prevTs) {
+        recordDiscoveryEvent('market-stale-drop', {
+          source: sourceTag,
+          event: eventType,
+          provider: providerId || peerKey,
+          reason: 'older_timestamp',
+          tsMs,
+          prevTs
+        });
+        return { handled: true, accepted: false, stale: true, reason: 'older_timestamp' };
+      }
+      if (tsMs === prevTs) {
+        if (checksum === prevChecksum) {
+          return { handled: true, accepted: false, stale: true, reason: 'duplicate_checksum' };
+        }
+        if (sourcePriority < prevPriority) {
+          recordDiscoveryEvent('market-stale-drop', {
+            source: sourceTag,
+            event: eventType,
+            provider: providerId || peerKey,
+            reason: 'lower_priority',
+            sourcePriority,
+            prevPriority
+          });
+          return { handled: true, accepted: false, stale: true, reason: 'lower_priority' };
+        }
+      }
+    }
+
+    const serviceCountRaw = Number(summary.service_count ?? summary.serviceCount ?? (Array.isArray(catalog.services) ? catalog.services.length : 0));
+    const serviceCount = Number.isFinite(serviceCountRaw) ? Math.max(0, Math.floor(serviceCountRaw)) : 0;
+    const healthyCountRaw = Number(summary.healthy_count ?? summary.healthyCount ?? status.healthy_count ?? status.healthyCount ?? 0);
+    const healthyCount = Number.isFinite(healthyCountRaw) ? Math.max(0, Math.floor(healthyCountRaw)) : 0;
+    const providerLabel = sanitizeUsername(
+      String(provider.provider_label || provider.providerLabel || '').trim()
+    );
+    const inferredNetwork = normalizeNetwork(provider.provider_network || provider.providerNetwork)
+      || inferNetworkFromAddress(primaryAddress)
+      || fallbackNetwork
+      || 'hydra';
+    const networkUrls = provider.network_urls && typeof provider.network_urls === 'object'
+      ? provider.network_urls
+      : (provider.networkUrls && typeof provider.networkUrls === 'object' ? provider.networkUrls : {});
+    const selectedTransportRaw = normalizeTransport(
+      status.selected_transport ||
+      status.selectedTransport ||
+      raw.selected_transport ||
+      raw.selectedTransport ||
+      summary.selected_transport ||
+      summary.selectedTransport ||
+      transport
+    ) || transport || 'nkn';
+    const existingPeer = state.peers.get(peerKey) || {};
+    const nextCandidates = mergeEndpointCandidates(
+      existingPeer.endpointCandidates || {},
+      {
+        nkn: { endpoint: primaryAddress, lastVerifiedMs: tsMs },
+        cloudflare: networkUrls.cloudflare ? { endpoint: String(networkUrls.cloudflare), lastVerifiedMs: tsMs } : undefined,
+        nats: networkUrls.nats ? { endpoint: String(networkUrls.nats), lastVerifiedMs: tsMs } : undefined,
+        upnp: networkUrls.upnp ? { endpoint: String(networkUrls.upnp), lastVerifiedMs: tsMs } : undefined,
+        local: networkUrls.local ? { endpoint: String(networkUrls.local), lastVerifiedMs: tsMs } : undefined
+      }
+    );
+    const selected = selectBestCandidate({
+      selectedTransport: selectedTransportRaw,
+      endpointCandidates: nextCandidates,
+      staleRejectionCount: Number(existingPeer.staleRejectionCount || 0),
+      fallbackTsMs: tsMs
+    });
+    const discoverySource = sourceTag;
+    const result = upsertPeer(
+      {
+        ...existingPeer,
+        nknPub: peerKey,
+        addr: primaryAddress,
+        originalPub: primaryAddress,
+        network: inferredNetwork,
+        selectedTransport: selected.selectedTransport || selectedTransportRaw,
+        selectedEndpoint: selected.selectedEndpoint || primaryAddress,
+        endpointCandidates: selected.endpointCandidates,
+        candidateFreshnessMs: selected.candidateFreshnessMs,
+        staleRejectionCount: selected.staleRejectionCount,
+        discoverySource,
+        source: 'marketplace-gossip',
+        meta: {
+          ...(existingPeer.meta || {}),
+          network: inferredNetwork,
+          source: 'marketplace-gossip',
+          discoverySource,
+          selectedTransport: selected.selectedTransport || selectedTransportRaw,
+          selectedEndpoint: selected.selectedEndpoint || primaryAddress,
+          endpointCandidates: selected.endpointCandidates,
+          candidateFreshnessMs: selected.candidateFreshnessMs,
+          staleRejectionCount: selected.staleRejectionCount,
+          ...(providerLabel ? { username: providerLabel, providerLabel } : {}),
+          ...(providerId ? { providerId } : {}),
+          ...(providerFingerprint ? { providerFingerprint } : {}),
+          marketplaceProviderId: providerId || '',
+          marketplaceProviderFingerprint: providerFingerprint || '',
+          marketplaceServiceCount: serviceCount,
+          marketplaceHealthyCount: healthyCount,
+          marketplaceCatalogChecksum: checksum,
+          marketplaceCatalogTsMs: tsMs,
+          marketplaceIngressSource: sourceTag,
+          marketplaceEventType: eventType,
+          marketplaceSubject: String(options.subject || ''),
+          marketplaceStatus: String(status.state || summary.status || '').trim().toLowerCase(),
+          marketplaceSelectedTransport: selected.selectedTransport || selectedTransportRaw
+        },
+        last: Math.floor(tsMs / 1000),
+        lastSeenAt: tsMs,
+        online: true,
+        probing: false
+      },
+      { online: true, probing: false }
+    );
+
+    if (!result?.entry) {
+      return { handled: true, accepted: false, reason: 'upsert_failed' };
+    }
+
+    state.marketplace.freshness.set(freshnessKey, {
+      tsMs,
+      checksum,
+      source: sourceTag,
+      sourcePriority,
+      providerId: providerId || peerKey
+    });
+    state.marketplace.providers.set(freshnessKey, {
+      providerId: providerId || peerKey,
+      providerFingerprint: providerFingerprint || '',
+      providerLabel,
+      serviceCount,
+      healthyCount,
+      checksum,
+      tsMs,
+      source: sourceTag
+    });
+
+    const marketDetail = {
+      event: eventType,
+      type: eventType,
+      source: sourceTag,
+      sourcePriority,
+      ts: tsMs,
+      checksum,
+      transport: selected.selectedTransport || selectedTransportRaw,
+      subject: String(options.subject || ''),
+      providerId: providerId || peerKey,
+      providerFingerprint: providerFingerprint || '',
+      providerLabel,
+      catalog,
+      summary,
+      status,
+      peer: {
+        nknPub: result.entry.nknPub,
+        addr: result.entry.addr,
+        selectedTransport: result.entry.selectedTransport,
+        selectedEndpoint: result.entry.selectedEndpoint
+      }
+    };
+    try {
+      window.dispatchEvent(new CustomEvent('hydra-market-catalog', { detail: marketDetail }));
+    } catch (_) {
+      // ignore DOM dispatch failures
+    }
+    try {
+      window.dispatchEvent(new CustomEvent('hydra-market-status', { detail: marketDetail }));
+    } catch (_) {
+      // ignore DOM dispatch failures
+    }
+    recordDiscoveryEvent('market-ingest', {
+      source: sourceTag,
+      event: eventType,
+      provider: providerId || peerKey,
+      services: serviceCount
+    });
+    scheduleRender();
+    updateBadge();
+    return {
+      handled: true,
+      accepted: true,
+      providerId: providerId || peerKey,
+      checksum,
+      tsMs
+    };
+  }
+
   function ensurePeerOrder(key) {
     const normalized = normalizePubKey(key);
     if (!normalized) return;
@@ -895,10 +1384,16 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       const msg = parseNknPeerPayload(packet, payload);
       if (!msg || typeof msg !== 'object') return;
       const type = msg.type || msg.event;
-      if (!type || !PEER_MESSAGE_TYPES.has(type)) return;
+      if (!type || !SUPPORTED_DISCOVERY_MESSAGE_TYPES.has(type)) return;
       const sourceAddr = normalizeAddressForSend(
         (packet && packet.src) || msg.from || msg.pub || msg.addr || msg.address || ''
       );
+      const marketResult = ingestMarketplaceEnvelope(msg, {
+        transport: 'nkn',
+        sourceAddr,
+        source: 'bridge-dm'
+      });
+      if (marketResult.handled) return;
       handlePeerMessage(msg, { transport: 'nkn', sourceAddr });
     };
     try {
@@ -1070,6 +1565,10 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     'chat-response',
     'chat-typing',
     'chat-message'
+  ]);
+  const SUPPORTED_DISCOVERY_MESSAGE_TYPES = new Set([
+    ...PEER_MESSAGE_TYPES,
+    ...MARKET_EVENT_TYPES
   ]);
 
   // shared peer-message dispatcher (used by both NKN and Discovery/NATS)
@@ -1554,16 +2053,16 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
 
   function ingestMarketplaceDirectory(catalogs = [], options = {}) {
     const list = Array.isArray(catalogs) ? catalogs : [];
-    const source = String(options.source || 'marketplace.directory').trim() || 'marketplace.directory';
+    const source = normalizeMarketSource(options.source || 'http-directory', 'http-directory');
     const ping = options.ping === true;
     const pingLimit = Math.max(0, Math.min(20, Number(options.pingLimit) || 3));
-    const seenKeys = new Set();
     const summary = {
       catalogs: list.length,
       imported: 0,
       added: 0,
       updated: 0,
       skipped: 0,
+      staleDropped: 0,
       pinged: 0
     };
 
@@ -1591,17 +2090,17 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       return nowMs();
     };
 
-    const pushAddress = (bucket, value, fallbackNetwork = 'hydra') => {
-      const normalized = normalizeAddressCandidate(value, fallbackNetwork);
-      if (!normalized) return;
-      if (!bucket.includes(normalized)) bucket.push(normalized);
-    };
-
-    const collectAddresses = (entry) => {
+    list.forEach((entry) => {
       const src = entry && typeof entry === 'object' ? entry : {};
-      const provider = src.provider && typeof src.provider === 'object'
-        ? src.provider
-        : (src.catalogPayload?.provider && typeof src.catalogPayload.provider === 'object' ? src.catalogPayload.provider : {});
+      const catalogPayload = src.catalogPayload && typeof src.catalogPayload === 'object'
+        ? src.catalogPayload
+        : (src.catalog && typeof src.catalog === 'object' ? src.catalog : {});
+      const provider = catalogPayload.provider && typeof catalogPayload.provider === 'object'
+        ? catalogPayload.provider
+        : (src.provider && typeof src.provider === 'object' ? src.provider : {});
+      const summaryPayload = catalogPayload.summary && typeof catalogPayload.summary === 'object'
+        ? catalogPayload.summary
+        : (src.summary && typeof src.summary === 'object' ? src.summary : {});
       const inferredNetwork = normalizeNetwork(
         src.providerNetwork ||
         src.provider_network ||
@@ -1610,107 +2109,67 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
         provider.providerNetwork ||
         provider.provider_network
       ) || 'hydra';
-      const addresses = [];
-      pushAddress(addresses, src.routerNkn || src.router_nkn, inferredNetwork);
-      pushAddress(addresses, src.lastSourceAddress || src.last_source_address, inferredNetwork);
-      pushAddress(addresses, provider.routerNkn || provider.router_nkn, inferredNetwork);
-      const providerAddrs = Array.isArray(provider.routerNknAddresses)
-        ? provider.routerNknAddresses
-        : (Array.isArray(provider.router_nkn_addresses) ? provider.router_nkn_addresses : []);
-      providerAddrs.forEach((addr) => pushAddress(addresses, addr, inferredNetwork));
-      return { addresses, inferredNetwork };
-    };
-
-    list.forEach((entry) => {
-      const src = entry && typeof entry === 'object' ? entry : {};
-      const { addresses, inferredNetwork } = collectAddresses(src);
-      if (!addresses.length) {
+      const sourceAddress = normalizeAddressForSend(
+        src.lastSourceAddress ||
+        src.last_source_address ||
+        src.routerNkn ||
+        src.router_nkn ||
+        provider.routerNkn ||
+        provider.router_nkn ||
+        ''
+      );
+      const eventPayload = {
+        type: 'market-service-catalog',
+        event: 'market.service.catalog',
+        ts: parseTimestampMs(src),
+        source_address: sourceAddress,
+        source_network: normalizeNetwork(src.sourceNetwork || src.source_network) || inferredNetwork || 'hydra',
+        catalog_checksum: String(src.catalogChecksum || src.catalog_checksum || '').trim(),
+        provider,
+        summary: summaryPayload,
+        catalog: Object.keys(catalogPayload).length
+          ? catalogPayload
+          : {
+              generated_at_ms: parseTimestampMs(src),
+              provider,
+              summary: summaryPayload,
+              services: Array.isArray(src.services) ? src.services : []
+            }
+      };
+      const before = state.peers.size;
+      const ingested = ingestMarketplaceEnvelope(eventPayload, {
+        transport: 'http',
+        source,
+        sourceAddr: sourceAddress
+      });
+      if (!ingested.handled) {
         summary.skipped += 1;
         return;
       }
-      const providerLabel = sanitizeUsername(
-        String(
-          src.providerLabel ||
-          src.provider_label ||
-          src.catalogPayload?.provider?.providerLabel ||
-          src.catalogPayload?.provider?.provider_label ||
+      if (ingested.stale) {
+        summary.staleDropped += 1;
+        return;
+      }
+      if (!ingested.accepted) {
+        summary.skipped += 1;
+        return;
+      }
+      summary.imported += 1;
+      if (state.peers.size > before) summary.added += 1;
+      else summary.updated += 1;
+      if (ping && summary.pinged < pingLimit) {
+        const providerKey = normalizePubKey(
+          provider.routerNkn ||
+          provider.router_nkn ||
+          sourceAddress ||
+          ingested.providerId ||
           ''
-        ).trim()
-      );
-      const providerFingerprint = String(
-        src.providerFingerprint ||
-        src.provider_fingerprint ||
-        src.providerKeyFingerprint ||
-        src.provider_key_fingerprint ||
-        src.catalogPayload?.provider?.providerKeyFingerprint ||
-        src.catalogPayload?.provider?.provider_key_fingerprint ||
-        ''
-      ).trim().toLowerCase();
-      const sourceNetwork = normalizeNetwork(src.sourceNetwork || src.source_network) || inferredNetwork || 'hydra';
-      const tsMs = parseTimestampMs(src);
-      addresses.forEach((address) => {
-        const key = normalizePubKey(address);
-        if (!key || seenKeys.has(key)) return;
-        seenKeys.add(key);
-        const existing = state.peers.get(key) || {};
-        const selected = selectBestCandidate({
-          selectedTransport: 'nkn',
-          endpointCandidates: {
-            ...(existing.endpointCandidates || {}),
-            nkn: {
-              endpoint: address,
-              lastVerifiedMs: tsMs
-            }
-          },
-          staleRejectionCount: Number(existing.staleRejectionCount || 0),
-          fallbackTsMs: tsMs
-        });
-        const result = upsertPeer(
-          {
-            ...existing,
-            nknPub: key,
-            addr: address,
-            originalPub: address,
-            network: sourceNetwork,
-            selectedTransport: selected.selectedTransport || 'nkn',
-            selectedEndpoint: selected.selectedEndpoint || address,
-            endpointCandidates: selected.endpointCandidates,
-            candidateFreshnessMs: selected.candidateFreshnessMs,
-            staleRejectionCount: selected.staleRejectionCount,
-            discoverySource: source,
-            source: 'marketplace-directory',
-            meta: {
-              ...(existing.meta || {}),
-              network: sourceNetwork,
-              source: 'marketplace-directory',
-              marketplaceDirectory: true,
-              discoverySource: source,
-              selectedTransport: selected.selectedTransport || 'nkn',
-              endpointCandidates: selected.endpointCandidates,
-              candidateFreshnessMs: selected.candidateFreshnessMs,
-              staleRejectionCount: selected.staleRejectionCount,
-              ...(providerLabel ? { username: providerLabel, providerLabel } : {}),
-              ...(providerFingerprint ? { providerFingerprint } : {})
-            },
-            last: Math.floor(tsMs / 1000),
-            lastSeenAt: tsMs,
-            online: existing.online === true,
-            probing: false
-          },
-          { online: existing.online === true, probing: false }
         );
-        if (!result?.entry) {
-          summary.skipped += 1;
-          return;
-        }
-        summary.imported += 1;
-        if (result.added) summary.added += 1;
-        else summary.updated += 1;
-        if (ping && summary.pinged < pingLimit) {
-          pingPeer(key);
+        if (providerKey) {
+          pingPeer(providerKey);
           summary.pinged += 1;
         }
-      });
+      }
     });
 
     if (summary.imported > 0) {
@@ -1720,6 +2179,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
         imported: summary.imported,
         added: summary.added,
         updated: summary.updated,
+        staleDropped: summary.staleDropped,
         pinged: summary.pinged
       });
       scheduleRender();
@@ -3022,6 +3482,24 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       }
     });
 
+    client.on('market', (evt) => {
+      if (!evt || typeof evt !== 'object') return;
+      const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {};
+      const sourceAddr = normalizeAddressForSend(
+        payload.source_address ||
+        payload.sourceAddress ||
+        payload.pub ||
+        payload.from ||
+        ''
+      );
+      ingestMarketplaceEnvelope(payload, {
+        transport: 'nats',
+        sourceAddr,
+        source: normalizeMarketSource(evt.source || 'nats-gossip'),
+        subject: String(evt.subject || '').trim()
+      });
+    });
+
 
     client.on('dm', (payload) => {
       if (!payload || typeof payload !== 'object') return;
@@ -3083,6 +3561,12 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       }
       const sourceAddr = payload.pub || payload.from || payload.addr || '';
       recordDiscoveryEvent('dm', { source: 'nats', target: sourceAddr || '' });
+      const marketResult = ingestMarketplaceEnvelope(payload, {
+        transport: 'nats',
+        sourceAddr,
+        source: 'nats-gossip'
+      });
+      if (marketResult.handled) return;
       if (handlePeerMessage(payload, { transport: 'nats', sourceAddr })) return;
     });
 
@@ -3144,6 +3628,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       }
 
       const meta = getPresenceMeta();
+      const marketGossipEnabled = CFG?.marketplaceGossipEnabled !== false;
+      const marketSubjects = marketGossipEnabled ? resolveMarketSubjects() : [];
+      if (marketSubjects.length) {
+        meta.marketSubjects = marketSubjects;
+      }
 
       const client = new DiscoveryClient({
         servers: DEFAULT_SERVERS,
@@ -3276,16 +3765,20 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       const addr = state.meAddr || Net.nkn?.addr || '';
       const pub = normalizePubKey(state.mePub || addr);
       const roomName = state.room || DISCOVERY_ROOM_DEFAULT;
+      const marketGossipEnabled = CFG?.marketplaceGossipEnabled !== false;
+      const marketSubjects = marketGossipEnabled ? resolveMarketSubjects() : [];
       const discovery = await createNoClipDiscovery({
         room: roomName,
         servers: DEFAULT_SERVERS,
+        marketSubjects,
         me: {
           nknPub: pub || `hydra-${Math.random().toString(36).slice(2, 10)}`,
           addr,
           meta: {
             username: state.username || '',
             network: 'hydra',
-            discoveryRoom: roomName
+            discoveryRoom: roomName,
+            marketSubjects
           }
         }
       });
@@ -3300,6 +3793,26 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
         notifyNoclipListeners();
       });
       discovery.on('dm', (evt) => handleNoclipDm(evt));
+      discovery.on('market', (evt) => {
+        if (!evt || typeof evt !== 'object') return;
+        const payload = evt.msg && typeof evt.msg === 'object'
+          ? evt.msg
+          : (evt.payload && typeof evt.payload === 'object' ? evt.payload : {});
+        const sourceAddr = normalizeAddressForSend(
+          payload.source_address ||
+          payload.sourceAddress ||
+          payload.pub ||
+          payload.from ||
+          evt.from ||
+          ''
+        );
+        ingestMarketplaceEnvelope(payload, {
+          transport: 'nats',
+          sourceAddr,
+          source: normalizeMarketSource(evt.source || 'nats-gossip'),
+          subject: String(evt.subject || '').trim()
+        });
+      });
       discovery.on('status', (ev) => {
         if (!ev) return;
         state.noclip.status = { state: ev.type || 'update', detail: ev.data ? String(ev.data) : '' };
@@ -3620,6 +4133,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     init,
     registerDmHandler,
     sendDm,
+    ingestMarketplaceEvent: ingestMarketplaceEnvelope,
     ingestMarketplaceDirectory,
     getNoclipPeers,
     subscribeNoclipPeers

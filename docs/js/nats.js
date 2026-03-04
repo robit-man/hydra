@@ -72,6 +72,13 @@ function stableDmId(msg = {}) {
   return `${kind}|${pub}|${ts}|${payload.slice(0, 256)}`;
 }
 
+function normalizeMarketEventType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (text === 'market-service-catalog' || text === 'market.service.catalog') return 'market.service.catalog';
+  if (text === 'market-service-status' || text === 'market.service.status') return 'market.service.status';
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Storage adapter (Node FS or browser localStorage)
 // ---------------------------------------------------------------------------
@@ -154,6 +161,7 @@ export class NatsDiscovery extends Evt {
       heartbeatSec = DEFAULTS.heartbeatSec,
       persistDir = DEFAULTS.persistDir,
       name = `disco-${(me.nknPub||'anon').slice(0, 8)}`,
+      marketSubjects = [],
       allowLegacyDmSubject = true,
       publishLegacyDmSubject = true
     } = opts || {};
@@ -166,9 +174,13 @@ export class NatsDiscovery extends Evt {
     this.sc = null; // String codec
     this._hb = null;
     this.name = String(name || `disco-${(me.nknPub||'anon').slice(0, 8)}`);
+    this.marketSubjects = Array.isArray(marketSubjects)
+      ? marketSubjects.map((subject) => String(subject || '').trim()).filter(Boolean).slice(0, 32)
+      : [];
     this.allowLegacyDmSubject = !!allowLegacyDmSubject;
     this.publishLegacyDmSubject = !!publishLegacyDmSubject;
     this._dmSeen = new Map();
+    this._marketSeen = new Map();
 
     // subjects
     this.subPresence = `discovery.${this.room}.presence`;
@@ -239,6 +251,32 @@ export class NatsDiscovery extends Evt {
       const currentSubject = this.subDM(this.me.nknPub);
       if (legacySubject !== currentSubject) {
         await subscribeDm(legacySubject);
+      }
+    }
+
+    if (Array.isArray(this.marketSubjects) && this.marketSubjects.length > 0) {
+      const subscribeMarket = async (subject) => {
+        if (!subject) return;
+        const sub = await this.nc.subscribe(subject);
+        (async () => {
+          for await (const m of sub) {
+            const msg = this._decode(m);
+            if (!msg || typeof msg !== 'object') continue;
+            const eventType = normalizeMarketEventType(msg.event || msg.type || '');
+            if (!eventType) continue;
+            if (this._isDuplicateMarket(msg, subject)) continue;
+            this.emit('market', {
+              subject,
+              from: String(msg.pub || msg.from || msg.source_address || msg.sourceAddress || '').trim(),
+              msg,
+              payload: msg,
+              source: 'nats-gossip'
+            });
+          }
+        })();
+      };
+      for (const subject of this.marketSubjects) {
+        await subscribeMarket(subject);
       }
     }
 
@@ -364,6 +402,24 @@ export class NatsDiscovery extends Evt {
     return false;
   }
 
+  _isDuplicateMarket(msg = {}, subject = '') {
+    const key = `${subject}:${stableDmId(msg)}`;
+    if (!key) return false;
+    const now = Date.now();
+    for (const [id, expiresAt] of this._marketSeen.entries()) {
+      if (!id || !Number.isFinite(expiresAt) || expiresAt <= now) this._marketSeen.delete(id);
+    }
+    const knownUntil = Number(this._marketSeen.get(key) || 0);
+    if (knownUntil > now) return true;
+    this._marketSeen.set(key, now + (2 * 60 * 1000));
+    while (this._marketSeen.size > 2048) {
+      const oldest = this._marketSeen.keys().next();
+      if (oldest.done) break;
+      this._marketSeen.delete(oldest.value);
+    }
+    return false;
+  }
+
   async close() {
     this.stopHeartbeat();
     if (this.nc) {
@@ -378,8 +434,8 @@ export class NatsDiscovery extends Evt {
 // ---------------------------------------------------------------------------
 // Convenience tiny facade for “simple API” consumers
 // ---------------------------------------------------------------------------
-export async function createDiscovery({ room, me, servers, heartbeatSec, persistDir, name } = {}) {
-  const d = new NatsDiscovery({ room, me, servers, heartbeatSec, persistDir, name });
+export async function createDiscovery({ room, me, servers, heartbeatSec, persistDir, name, marketSubjects } = {}) {
+  const d = new NatsDiscovery({ room, me, servers, heartbeatSec, persistDir, name, marketSubjects });
   await d.connect();
   await d.startHeartbeat();
   return d;

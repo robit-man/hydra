@@ -12,12 +12,16 @@ const CFG_PERSIST_ALLOWLIST = new Set([
   'routerLastResolveError',
   'routerLastResolvedAt',
   'routerLastInteropContractVersion',
+  'routerLastCatalogSource',
+  'routerLastCatalogSourcePriority',
   'featureFlags',
   'noclipMarketplaceApiBase',
   'noclipMarketplaceDirectoryAutoRefresh',
   'noclipMarketplaceDirectoryRefreshMs',
   'noclipMarketplaceDirectoryLastStatus',
-  'noclipMarketplaceDirectoryLastAt'
+  'noclipMarketplaceDirectoryLastAt',
+  'marketplaceGossipEnabled',
+  'marketplaceGossipSubjects'
 ]);
 const CFG_PERSIST_DROP_KEYS = new Set([
   'routerResolvedEndpoints',
@@ -117,11 +121,15 @@ const CFG_DEFAULTS = {
   routerLastResolveError: '',
   routerLastResolvedAt: 0,
   routerLastInteropContractVersion: '',
+  routerLastCatalogSource: '',
+  routerLastCatalogSourcePriority: 0,
   noclipMarketplaceApiBase: 'http://127.0.0.1:3001',
   noclipMarketplaceDirectoryAutoRefresh: true,
   noclipMarketplaceDirectoryRefreshMs: 60000,
   noclipMarketplaceDirectoryLastStatus: 'idle',
   noclipMarketplaceDirectoryLastAt: 0,
+  marketplaceGossipEnabled: true,
+  marketplaceGossipSubjects: ['hydra.market.catalog.v1', 'hydra.market.status.v1'],
   featureFlags: sanitizeFeatureFlags(FEATURE_FLAG_DEFAULTS)
 };
 const CFG = {
@@ -154,6 +162,8 @@ if (!CFG.routerLastResolveStatus) CFG.routerLastResolveStatus = 'idle';
 if (CFG.routerLastResolveError === undefined) CFG.routerLastResolveError = '';
 if (!Number.isFinite(Number(CFG.routerLastResolvedAt))) CFG.routerLastResolvedAt = 0;
 if (CFG.routerLastInteropContractVersion === undefined) CFG.routerLastInteropContractVersion = '';
+if (typeof CFG.routerLastCatalogSource !== 'string') CFG.routerLastCatalogSource = '';
+if (!Number.isFinite(Number(CFG.routerLastCatalogSourcePriority))) CFG.routerLastCatalogSourcePriority = 0;
 if (typeof CFG.noclipMarketplaceApiBase !== 'string') CFG.noclipMarketplaceApiBase = 'http://127.0.0.1:3001';
 CFG.noclipMarketplaceApiBase = CFG.noclipMarketplaceApiBase.trim() || 'http://127.0.0.1:3001';
 if (CFG.noclipMarketplaceDirectoryAutoRefresh === undefined) CFG.noclipMarketplaceDirectoryAutoRefresh = true;
@@ -161,6 +171,17 @@ if (!Number.isFinite(Number(CFG.noclipMarketplaceDirectoryRefreshMs))) CFG.nocli
 CFG.noclipMarketplaceDirectoryRefreshMs = Math.max(15000, Math.min(300000, Math.floor(Number(CFG.noclipMarketplaceDirectoryRefreshMs) || 60000)));
 if (!CFG.noclipMarketplaceDirectoryLastStatus) CFG.noclipMarketplaceDirectoryLastStatus = 'idle';
 if (!Number.isFinite(Number(CFG.noclipMarketplaceDirectoryLastAt))) CFG.noclipMarketplaceDirectoryLastAt = 0;
+if (CFG.marketplaceGossipEnabled === undefined) CFG.marketplaceGossipEnabled = true;
+if (!Array.isArray(CFG.marketplaceGossipSubjects)) {
+  CFG.marketplaceGossipSubjects = ['hydra.market.catalog.v1', 'hydra.market.status.v1'];
+}
+CFG.marketplaceGossipSubjects = CFG.marketplaceGossipSubjects
+  .map((value) => String(value || '').trim())
+  .filter(Boolean)
+  .slice(0, 16);
+if (!CFG.marketplaceGossipSubjects.length) {
+  CFG.marketplaceGossipSubjects = ['hydra.market.catalog.v1', 'hydra.market.status.v1'];
+}
 if (!Array.isArray(CFG.wires)) CFG.wires = [];
 CFG.featureFlags = sanitizeFeatureFlags(CFG.featureFlags);
 try {

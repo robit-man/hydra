@@ -15,6 +15,13 @@ const AUTO_MIN_INTERVAL_MS = 10 * 1000;
 const AUTO_MAX_INTERVAL_MS = 10 * 60 * 1000;
 const AUTO_BACKOFF_CAP = 4;
 const AUTO_JITTER_RATIO = 0.2;
+const CATALOG_SOURCE_PRIORITY = Object.freeze({
+  'nats-gossip': 40,
+  'bridge-dm': 30,
+  'router-resolve': 25,
+  'http-directory': 20,
+  unknown: 0
+});
 
 function isObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -24,6 +31,19 @@ function clampAutoIntervalMs(input) {
   const raw = Number(input || 0);
   if (!Number.isFinite(raw)) return 60000;
   return Math.max(AUTO_MIN_INTERVAL_MS, Math.min(AUTO_MAX_INTERVAL_MS, Math.round(raw)));
+}
+
+function normalizeCatalogSource(value, fallback = '') {
+  const text = String(value || fallback || '').trim().toLowerCase();
+  if (!text) return 'unknown';
+  if (text === 'nats-gossip' || text === 'bridge-dm' || text === 'router-resolve' || text === 'http-directory') {
+    return text;
+  }
+  if (text.includes('nats')) return 'nats-gossip';
+  if (text.includes('bridge') || text.includes('dm')) return 'bridge-dm';
+  if (text.includes('directory') || text.includes('http')) return 'http-directory';
+  if (text.includes('resolve') || text.includes('router')) return 'router-resolve';
+  return 'unknown';
 }
 
 function validateRouterAddress(raw) {
@@ -249,9 +269,40 @@ function normalizeCatalog(reply) {
       raw: entryRaw
     };
   }
-  const generatedAtMs = Number(rawCatalog.generated_at_ms || rawCatalog.generatedAtMs || 0);
+  const generatedAtRaw = Number(rawCatalog.generated_at_ms || rawCatalog.generatedAtMs || 0);
+  const generatedAtMs = Number.isFinite(generatedAtRaw)
+    ? (generatedAtRaw > 1e12 ? generatedAtRaw : Math.floor(generatedAtRaw * 1000))
+    : 0;
+  const fallbackTsRaw = Number(
+    source.timestamp_ms ||
+    source.timestampMs ||
+    source.ts ||
+    source.reply?.timestamp_ms ||
+    source.reply?.timestampMs ||
+    0
+  );
+  const fallbackTsMs = Number.isFinite(fallbackTsRaw)
+    ? (fallbackTsRaw > 1e12 ? fallbackTsRaw : Math.floor(fallbackTsRaw * 1000))
+    : 0;
+  const sourceTag = normalizeCatalogSource(
+    rawCatalog.discovery_source ||
+    rawCatalog.discoverySource ||
+    source.discovery_source ||
+    source.discoverySource ||
+    source.mode ||
+    source.reply?.discovery_source ||
+    source.reply?.discoverySource,
+    'router-resolve'
+  );
+  const sourcePriority = Number(CATALOG_SOURCE_PRIORITY[sourceTag] || 0);
   return {
     generatedAtMs: Number.isFinite(generatedAtMs) ? generatedAtMs : 0,
+    freshnessTsMs: Math.max(
+      Number.isFinite(generatedAtMs) ? generatedAtMs : 0,
+      Number.isFinite(fallbackTsMs) ? fallbackTsMs : 0
+    ),
+    source: sourceTag,
+    sourcePriority,
     provider: isObject(rawCatalog.provider) ? { ...rawCatalog.provider } : {},
     summary: isObject(rawCatalog.summary) ? { ...rawCatalog.summary } : {},
     services,
@@ -335,17 +386,28 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
         const ts = Number(reply?.timestamp_ms || Date.now());
         const normalizedCatalog = normalizeCatalog(reply);
         const catalogTs = Number(normalizedCatalog.generatedAtMs || 0);
+        const catalogFreshTs = Number(normalizedCatalog.freshnessTsMs || catalogTs || 0);
+        const catalogSourcePriority = Number(normalizedCatalog.sourcePriority || 0);
+        const previousCatalogSourcePriority = Number(CFG.routerLastCatalogSourcePriority || 0);
         const staleBySeq = seq < state.appliedSeq;
         const staleByTs = ts > 0 && state.latestResolvedAt > 0 && ts < state.latestResolvedAt;
-        const staleByCatalogTs = catalogTs > 0 && state.latestResolvedAt > 0 && catalogTs < state.latestResolvedAt;
-        if (staleBySeq || staleByTs || staleByCatalogTs) {
-          log?.(`[router.resolve] stale response discarded target=${target} seq=${seq} ts=${ts} catalogTs=${catalogTs}`);
+        const staleByCatalogTs = catalogFreshTs > 0 && state.latestResolvedAt > 0 && catalogFreshTs < state.latestResolvedAt;
+        const staleBySourcePriority = (
+          catalogFreshTs > 0 &&
+          state.latestResolvedAt > 0 &&
+          catalogFreshTs === state.latestResolvedAt &&
+          catalogSourcePriority < previousCatalogSourcePriority
+        );
+        if (staleBySeq || staleByTs || staleByCatalogTs || staleBySourcePriority) {
+          log?.(
+            `[router.resolve] stale response discarded target=${target} seq=${seq} ts=${ts} catalogTs=${catalogFreshTs} sourcePrio=${catalogSourcePriority} prevSourcePrio=${previousCatalogSourcePriority}`
+          );
           emit({ stale: true, reply, target });
           return { stale: true, reply };
         }
 
         state.appliedSeq = seq;
-        state.latestResolvedAt = Math.max(ts || 0, catalogTs || 0);
+        state.latestResolvedAt = Math.max(ts || 0, catalogFreshTs || 0);
         state.autoFailures = 0;
         const interopContract = extractInteropContract(reply);
         const interopContractStatus = extractInteropContractStatus(reply);
@@ -385,7 +447,7 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
           target,
           requestId: String(reply?.request_id || ''),
           sourceAddress: String(reply?.source_address || ''),
-          timestampMs: Math.max(ts || 0, catalogTs || 0),
+          timestampMs: Math.max(ts || 0, catalogFreshTs || 0),
           interopContract,
           interopContractVersion: String(interopContract.version || ''),
           interopContractCompatMinVersion: String(interopContract.compatMinVersion || ''),
@@ -396,11 +458,13 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
           rawReply: reply
         };
         CFG.routerLastResolveResult = reply;
-        CFG.routerLastResolvedAt = Math.max(ts || 0, catalogTs || 0);
+        CFG.routerLastResolvedAt = Math.max(ts || 0, catalogFreshTs || 0);
         CFG.routerLastResolveError = '';
         CFG.routerLastResolveStatus = 'ok';
         CFG.routerLastInteropContractVersion = String(interopContract.version || '');
         CFG.routerLastCatalog = normalizedCatalog.raw;
+        CFG.routerLastCatalogSource = String(normalizedCatalog.source || 'router-resolve');
+        CFG.routerLastCatalogSourcePriority = catalogSourcePriority;
         saveCFG();
         if (typeof onResolved === 'function') {
           try { onResolved(resolvedPayload); } catch (_) { /* ignore */ }
@@ -408,7 +472,7 @@ function createRouterDiscovery({ Net, CFG, saveCFG, setBadge, log, onResolved })
         log?.(`[router.resolve] target=${target} services=${Object.keys(normalizedResolved).length}`);
         setBadge('Router resolve complete');
         setStatus('ok', {
-          resolvedAt: Math.max(ts || 0, catalogTs || 0),
+          resolvedAt: Math.max(ts || 0, catalogFreshTs || 0),
           interopContractVersion: String(interopContract.version || ''),
           interopContractOk: true,
           reply,

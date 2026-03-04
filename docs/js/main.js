@@ -239,6 +239,13 @@ const applyRouterResolvedPayload = (reply) => {
     catalogRaw?.generatedAtMs ||
     0
   );
+  const catalogSource = String(
+    reply?.catalog?.source ||
+    catalogRaw?.discovery_source ||
+    catalogRaw?.discoverySource ||
+    'router-resolve'
+  ).trim();
+  const catalogSourcePriority = Number(reply?.catalog?.sourcePriority || 0);
   if ((!resolved || typeof resolved !== 'object') && !catalogRaw) return;
   const incomingTs = Number(reply?.timestampMs || reply?.rawReply?.timestamp_ms || catalogGeneratedTs || 0);
   const currentTs = Number(CFG.routerLastResolvedAt || 0);
@@ -260,6 +267,10 @@ const applyRouterResolvedPayload = (reply) => {
     CFG.routerMarketplaceCatalog = catalogRaw;
     if (Number.isFinite(catalogGeneratedTs) && catalogGeneratedTs > 0) {
       CFG.routerLastCatalogAt = catalogGeneratedTs;
+    }
+    if (catalogSource) CFG.routerLastCatalogSource = catalogSource;
+    if (Number.isFinite(catalogSourcePriority)) {
+      CFG.routerLastCatalogSourcePriority = Math.max(0, Math.floor(catalogSourcePriority));
     }
     try {
       NoClipBridge?.onRouterCatalog?.(catalogRaw, { includeStatus: true });
@@ -740,6 +751,16 @@ const createMarketplaceDirectoryClient = ({ CFG, saveCFG, setBadge, log, onDirec
   };
 
   const start = () => {
+    if (CFG?.noclipMarketplaceDirectoryAutoRefresh === false) {
+      notify({
+        ok: true,
+        disabled: true,
+        source: 'http-directory',
+        updatedAtMs: Date.now(),
+        catalogs: []
+      });
+      return;
+    }
     refresh({ manual: false });
     schedule();
   };
@@ -777,7 +798,7 @@ MarketplaceDirectory = createMarketplaceDirectoryClient({
       try {
         detail.importSummary = SharedPeerDiscovery.ingestMarketplaceDirectory(detail.catalogs, {
           ping: false,
-          source: 'marketplace.directory'
+          source: 'http-directory'
         });
       } catch (err) {
         log(`[market.directory] peer ingest failed: ${err?.message || err}`);
