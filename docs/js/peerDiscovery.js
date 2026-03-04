@@ -1300,6 +1300,16 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       tsMs,
       source: sourceTag
     });
+    while (state.marketplace.freshness.size > 1024) {
+      const oldest = state.marketplace.freshness.keys().next();
+      if (!oldest || oldest.done) break;
+      state.marketplace.freshness.delete(oldest.value);
+    }
+    while (state.marketplace.providers.size > 512) {
+      const oldest = state.marketplace.providers.keys().next();
+      if (!oldest || oldest.done) break;
+      state.marketplace.providers.delete(oldest.value);
+    }
 
     const marketDetail = {
       event: eventType,
@@ -3692,6 +3702,12 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       recordDiscoveryEvent('recv-duplicate', { source: 'noclip', target: evt.from || from });
       return;
     }
+    const marketResult = ingestMarketplaceEnvelope(msg, {
+      transport: 'nats',
+      sourceAddr: evt.from || msg.pub || msg.from || msg.addr || '',
+      source: 'bridge-dm'
+    });
+    if (marketResult.handled) return;
     const inferredNetwork = normalizeNetwork(msg?.meta?.network) || 'noclip';
     const selected = selectBestCandidate({
       selectedTransport: normalizeTransport(
