@@ -284,8 +284,7 @@ header {
   top: calc(env(safe-area-inset-top, 0px) + 10px);
   z-index: 33;
   height: var(--dock-expander-height);
-  min-width: 114px;
-  border-radius: 999px;
+  border-radius: 0.5rem;
   border: 1px solid rgba(255, 255, 255, .32);
   background: rgba(0, 0, 0, .82);
   color: var(--text);

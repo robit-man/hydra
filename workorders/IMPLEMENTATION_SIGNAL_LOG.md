@@ -41,3 +41,33 @@ This log is a compact running record of implementation progress so later session
 ### Known risks / watchpoints
 - Existing modules still rely on retained element IDs; future markup edits must preserve these IDs or update bindings.
 - Mutation observers are intentionally broad (`subtree: true`) for resilience; if performance drops, narrow observer scope to attributes/text only.
+
+## 2026-03-04 - WO-13.6 QA Matrix + Rollout Gates (Hydra Curses)
+
+### Scope
+- Convert phase-13 rollout acceptance from narrative-only docs into executable checks.
+- Verify btop-style symbol/border baseline, navigation state machine, log dock isolation, and no-ui fallback path.
+
+### Files changed
+- `service_router/tools/hydra_ui_rollout_gate.py`
+- `service_router/tests/test_ui_rollout_gate.py`
+
+### Implemented
+- Added `hydra_ui_rollout_gate.py` gate runner with five required gates:
+  - Gate A: border symbol + halftone baseline.
+  - Gate B: overlay/navigation state machine + vim key aliases.
+  - Gate C: runtime log dock buffer + scroll bounds.
+  - Gate D: watchdog log sink isolation + stdout fallback.
+  - Gate E: `--no-ui` activity/stdout fallback behavior.
+- Added pytest regression suite `test_ui_rollout_gate.py` mirroring the same gate checks.
+- Made rollout gate tool executable for direct invocation from shell/automation.
+
+### Verification evidence
+- `python3 service_router/tools/hydra_ui_rollout_gate.py --json`
+  - `status: ok`, `ready: true`, all gates passed.
+- `python3 -m pytest -q service_router/tests/test_ui_rollout_gate.py`
+  - `5 passed`.
+
+### Known risks / watchpoints
+- Current gate runner validates structure/behavior in non-curses mode; visual conformance under live curses still needs manual terminal soak checks.
+- Test output includes an upstream `pytest-asyncio` deprecation warning unrelated to this workorder.
