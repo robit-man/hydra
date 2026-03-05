@@ -18,7 +18,8 @@
   --market-offline: #ff6b6b;
   --market-chip-bg: rgba(255, 255, 255, 0.05);
   --market-chip-border: rgba(255, 255, 255, 0.18);
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-main: "Rajdhani", sans-serif;
+  --mono: "Rajdhani", sans-serif;
   --r: 16px;
   --shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 1px var(--border)
 }
@@ -36,11 +37,41 @@
 }
 
 * {
-  font-family: "Rajdhani", sans-serif !important;
+  font-family: var(--font-main) !important;
   letter-spacing: 0.04em;
   scrollbar-width: none;
   line-height: normal;
   /* Hides the scrollbar in Firefox */
+}
+
+.rajdhani-light {
+  font-family: "Rajdhani", sans-serif;
+  font-weight: 300;
+  font-style: normal;
+}
+
+.rajdhani-regular {
+  font-family: "Rajdhani", sans-serif;
+  font-weight: 400;
+  font-style: normal;
+}
+
+.rajdhani-medium {
+  font-family: "Rajdhani", sans-serif;
+  font-weight: 500;
+  font-style: normal;
+}
+
+.rajdhani-semibold {
+  font-family: "Rajdhani", sans-serif;
+  font-weight: 600;
+  font-style: normal;
+}
+
+.rajdhani-bold {
+  font-family: "Rajdhani", sans-serif;
+  font-weight: 700;
+  font-style: normal;
 }
 
 body {
@@ -48,7 +79,9 @@ body {
   margin: 0;
   color: var(--text);
   touch-action: none;
-  font: 14px/1.35 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial
+  font-size: 14px;
+  line-height: 1.35;
+  font-family: var(--font-main);
 }
 
 body::after {
