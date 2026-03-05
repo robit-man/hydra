@@ -3603,13 +3603,18 @@ class EnhancedUI:
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_CYAN, -1)  # Header
-            curses.init_pair(2, curses.COLOR_GREEN, -1)  # Active/OK
-            curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Warning
-            curses.init_pair(4, curses.COLOR_RED, -1)  # Error
-            curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # Section
-            curses.init_pair(6, curses.COLOR_CYAN, -1)  # Hydra (idle)
-            curses.init_pair(7, curses.COLOR_YELLOW, -1)  # Hydra (active)
+            # Monochrome, high-contrast palette: black background with white/gray accents.
+            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Global base
+            curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Active/OK
+            curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Muted
+            curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_WHITE)  # Inverted highlight/error
+            curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Section labels
+            curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Selection
+            curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Hydra accent
+            try:
+                stdscr.bkgd(" ", curses.color_pair(1))
+            except Exception:
+                pass
 
         while not self.stop.is_set():
             # Clear events queue
@@ -3621,8 +3626,11 @@ class EnhancedUI:
 
             stdscr.erase()
             h, w = stdscr.getmaxyx()
-            hydra_w = max(28, w // 3)
-            hydra_w = min(hydra_w, w - 24)  # leave room for content
+            if w < 78:
+                hydra_w = max(20, w // 2)
+            else:
+                hydra_w = max(30, int(w * 0.42))
+            hydra_w = min(hydra_w, max(20, w - 26))  # keep content pane usable
             hydra_win = stdscr.derwin(h, hydra_w, 0, 0)
             content_win = stdscr.derwin(h, w - hydra_w, 0, hydra_w)
             content_h, content_w = content_win.getmaxyx()
@@ -3672,6 +3680,46 @@ class EnhancedUI:
         except curses.error:
             pass
 
+    def _sync_state_attr(self, state: str):
+        key = str(state or "").strip().lower()
+        if key in {"connected", "ok", "published"}:
+            return curses.color_pair(2) | curses.A_BOLD
+        if key in {"publishing", "connecting"}:
+            return curses.color_pair(4) | curses.A_BOLD
+        if key in {"error", "failed", "unavailable", "disconnected"}:
+            return curses.color_pair(4) | curses.A_BOLD
+        return curses.color_pair(3) | curses.A_DIM
+
+    def _render_sync_bus_line(self, stdscr, y: int, x: int, http_state: str, nats_state: str, width: int):
+        """Render monochrome sync status chips with an explicit NATS segment."""
+        if width <= 6:
+            return
+        max_w = max(0, width - 1)
+        cur_x = x
+        label = "SYNC BUS "
+        self._safe_addstr(stdscr, y, cur_x, label[:max_w], curses.color_pair(5) | curses.A_BOLD)
+        cur_x += len(label)
+
+        http_token = f"HTTP:{str(http_state or 'idle').upper()}"
+        nats_token = f"NATS:{str(nats_state or 'idle').upper()}"
+        sep = "  "
+        for token, attr in (
+            (http_token, self._sync_state_attr(http_state)),
+            (nats_token, self._sync_state_attr(nats_state)),
+        ):
+            remaining = max_w - (cur_x - x)
+            if remaining <= 0:
+                break
+            draw_text = token[:remaining]
+            self._safe_addstr(stdscr, y, cur_x, draw_text, attr)
+            cur_x += len(draw_text)
+            remaining = max_w - (cur_x - x)
+            if remaining <= 0:
+                break
+            draw_sep = sep[:remaining]
+            self._safe_addstr(stdscr, y, cur_x, draw_sep, curses.A_DIM)
+            cur_x += len(draw_sep)
+
     def _draw_box(self, stdscr, y, x, h, w):
         """Draw a box border."""
         try:
@@ -3700,23 +3748,39 @@ class EnhancedUI:
     def _render_hydra_panel(self, stdscr, h: int, w: int):
         """Render the animated hydra on the left side."""
         try:
-            stdscr.attrset(curses.A_DIM)
             for row in range(h):
-                if row % 2 == 0:
-                    self._safe_addstr(stdscr, row, 1, "▌" + " " * max(0, w - 4) + "▐")
-            stdscr.attrset(curses.A_NORMAL)
+                self._safe_addstr(stdscr, row, 0, " " * max(0, w - 1), curses.color_pair(1))
         except Exception:
             pass
 
+        logo = [
+            " _   _ _   _ ____  ____      _",
+            "| | | | | | |  _ \\|  _ \\    / \\",
+            "| |_| | |_| | | | | |_) |  / _ \\",
+            "|  _  |  _  | |_| |  _ <  / ___ \\",
+            "|_| |_|_| |_|____/|_| \\_\\/_/   \\_\\",
+            "        R O U T E R   C O R E",
+        ]
+        logo_start = 1
+        for idx, line in enumerate(logo):
+            row = logo_start + idx
+            if row >= h - 2:
+                break
+            draw = line[: max(0, w - 4)]
+            x = max(2, (w - len(draw)) // 2)
+            attr = curses.color_pair(7) | (curses.A_BOLD if idx < 5 else curses.A_DIM)
+            self._safe_addstr(stdscr, row, x, draw, attr)
+
+        info_row = logo_start + len(logo) + 1
         owner_label = "Owner Key"
         owner_value = self.owner_key_display or "(unavailable)"
         owner_mode = "required" if self.owner_key_required else "disabled"
-        self._safe_addstr(stdscr, 1, 2, owner_label, curses.color_pair(5) | curses.A_BOLD)
-        self._safe_addstr(stdscr, 2, 2, owner_value, curses.color_pair(7) | curses.A_BOLD)
-        self._safe_addstr(stdscr, 3, 2, f"policy auth: {owner_mode}", curses.A_DIM)
+        self._safe_addstr(stdscr, info_row, 2, owner_label, curses.color_pair(5) | curses.A_BOLD)
+        self._safe_addstr(stdscr, info_row + 1, 2, owner_value, curses.color_pair(7) | curses.A_BOLD)
+        self._safe_addstr(stdscr, info_row + 2, 2, f"policy auth: {owner_mode}", curses.color_pair(3) | curses.A_DIM)
         provider_label = self.marketplace_provider_label or "Hydra Router"
         provider_short = provider_label if len(provider_label) <= max(8, w - 4) else provider_label[: max(7, w - 7)] + "..."
-        self._safe_addstr(stdscr, 5, 2, f"market: {provider_short}", curses.color_pair(1) | curses.A_BOLD)
+        self._safe_addstr(stdscr, info_row + 4, 2, f"market: {provider_short}", curses.color_pair(5) | curses.A_BOLD)
         market_summary = self.marketplace_summary if isinstance(self.marketplace_summary, dict) else {}
         service_count = int(market_summary.get("service_count") or 0)
         published_count = int(market_summary.get("published_count") or 0)
@@ -3727,13 +3791,19 @@ class EnhancedUI:
         sync_nats_state = str(market_summary.get("sync_nats_state") or "").strip().lower() or "idle"
         self._safe_addstr(
             stdscr,
-            6,
+            info_row + 5,
             2,
             f"svc {published_count}/{service_count} pub • healthy {healthy_count}",
-            curses.A_DIM,
+            curses.color_pair(3) | curses.A_DIM,
         )
-        self._safe_addstr(stdscr, 7, 2, f"transport: {selected_transport} • src: {source}", curses.A_DIM)
-        self._safe_addstr(stdscr, 8, 2, f"sync http:{sync_http_state} • nats:{sync_nats_state}", curses.A_DIM)
+        self._safe_addstr(
+            stdscr,
+            info_row + 6,
+            2,
+            f"transport: {selected_transport} • src: {source}",
+            curses.color_pair(3) | curses.A_DIM,
+        )
+        self._render_sync_bus_line(stdscr, info_row + 7, 2, sync_http_state, sync_nats_state, max(0, w - 4))
 
         base_x = max(4, w // 2)
         base_y = h - 3
@@ -3745,9 +3815,9 @@ class EnhancedUI:
         if net_state == "online":
             base_color = curses.color_pair(6)
         elif net_state == "offline":
-            base_color = curses.color_pair(3)  # orange/yellow
+            base_color = curses.color_pair(3)
         else:
-            base_color = curses.color_pair(4)  # red
+            base_color = curses.color_pair(4)
 
         # Make offline hydra more frantic
         if net_state == "offline":
@@ -3797,7 +3867,7 @@ class EnhancedUI:
 
         # Label
         label = "[ hydra ]"
-        self._safe_addstr(stdscr, 1, max(1, w - len(label) - 2), label, curses.color_pair(7) | curses.A_BOLD)
+        self._safe_addstr(stdscr, max(1, h - 2), max(1, w - len(label) - 2), label, curses.color_pair(7) | curses.A_BOLD)
 
     def _render_main_menu(self, stdscr, h, w):
         """Render the main menu."""
@@ -3848,17 +3918,17 @@ class EnhancedUI:
         info_row = top_end_row + 1
         if info_row < h - 7:
             self._safe_addstr(stdscr, info_row, 2, "Marketplace:", curses.color_pair(5) | curses.A_BOLD)
-            self._safe_addstr(stdscr, info_row + 1, 4, f"provider  {provider_short}", curses.A_DIM)
+            self._safe_addstr(stdscr, info_row + 1, 4, f"provider  {provider_short}", curses.color_pair(3) | curses.A_DIM)
             self._safe_addstr(
                 stdscr,
                 info_row + 2,
                 4,
                 f"catalog   {published_count}/{service_count} published • healthy {healthy_count}",
-                curses.A_DIM,
+                curses.color_pair(3) | curses.A_DIM,
             )
-            self._safe_addstr(stdscr, info_row + 3, 4, f"policy    owner key {auth_mode}", curses.A_DIM)
-            self._safe_addstr(stdscr, info_row + 4, 4, f"sync      http {sync_http_state} • nats {sync_nats_state}", curses.A_DIM)
-            self._safe_addstr(stdscr, info_row + 5, 4, f"resolve   {selected_transport} • {source}", curses.A_DIM)
+            self._safe_addstr(stdscr, info_row + 3, 4, f"policy    owner key {auth_mode}", curses.color_pair(3) | curses.A_DIM)
+            self._render_sync_bus_line(stdscr, info_row + 4, 4, sync_http_state, sync_nats_state, max(0, w - 8))
+            self._safe_addstr(stdscr, info_row + 5, 4, f"resolve   {selected_transport} • {source}", curses.color_pair(3) | curses.A_DIM)
 
         status = f"{len(self.services)} svc / {len(self.nodes)} nodes"
         self._safe_addstr(stdscr, h - 2, 2, status, curses.A_DIM)
@@ -4276,14 +4346,20 @@ class EnhancedUI:
         self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
 
         tabs = self._debug_tabs()
-        tab_line = "  ".join(
-            f"[{t}]" if i == self.debug_tab_index else t
-            for i, t in enumerate(tabs)
-        )
-        self._safe_addstr(stdscr, 1, 2, tab_line[: max(0, w - 4)], curses.color_pair(6) | curses.A_BOLD)
+        tab_col = 2
+        for i, tab_name in enumerate(tabs):
+            token = f" {tab_name} "
+            if tab_col + len(token) >= w - 2:
+                break
+            if i == self.debug_tab_index:
+                attr = curses.color_pair(4) | curses.A_BOLD
+            else:
+                attr = curses.color_pair(3) | curses.A_DIM
+            self._safe_addstr(stdscr, 1, tab_col, token, attr)
+            tab_col += len(token) + 1
 
-        help_text = "←/→ tabs | ↑/↓ scroll | ESC: Back"
-        self._safe_addstr(stdscr, 2, 2, help_text, curses.A_DIM)
+        help_text = "h/l or ←/→ tabs | ↑/↓ scroll | Enter select | ESC back"
+        self._safe_addstr(stdscr, 2, 2, help_text[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
 
         tab = tabs[self.debug_tab_index]
 

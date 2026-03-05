@@ -3192,20 +3192,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     const peersMap = isHydra ? state.peers : state.noclip.peers;
     let peers = Array.from(peersMap.values()).filter((peer) => {
       if (!peer?.nknPub) return false;
-
-      // Additional prefix filtering to ensure correct tab displays correct peers
-      const addr = peer.addr || peer.nknPub || '';
-      const addrLower = addr.toLowerCase();
-
-      if (isHydra) {
-        // Hydra tab: ONLY show hydra./graph. peers, exclude noclip. peers
-        const isNoclipPeer = addrLower.startsWith('noclip.');
-        return !isNoclipPeer; // Show everything except noclip. peers
-      } else {
-        // NoClip tab: ONLY show noclip. peers, exclude hydra./graph. peers
-        const isNoclipPeer = addrLower.startsWith('noclip.');
-        return isNoclipPeer; // Show only noclip. peers
-      }
+      if (!isHydra) return true;
+      const networkLabel = resolveNetworkLabel(peer);
+      if (networkLabel === 'noclip') return false;
+      const source = String(peer?.source || '').trim().toLowerCase();
+      return source !== 'noclip';
     });
 
     if (isHydra && state.filters.onlyFavorites) {
