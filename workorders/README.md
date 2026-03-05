@@ -84,6 +84,14 @@ This folder breaks the phased plan into executable, individually completable wor
   - `WO-12.7-noclip-provider-management-frontend.md`
   - `WO-12.8-cross-platform-catalog-reconciliation-and-health.md`
   - `WO-12.9-marketplace-remediation-e2e-gates-and-rollout.md`
+- `phase-13`
+  - `README.md`
+  - `WO-13.1-border-halftone-system.md`
+  - `WO-13.2-layout-and-panel-grid.md`
+  - `WO-13.3-navigation-and-menu-overlays.md`
+  - `WO-13.4-view-content-recomposition.md`
+  - `WO-13.5-log-dock-and-output-isolation.md`
+  - `WO-13.6-qa-and-rollout-gates.md`
 
 ## Completion Rule
 
