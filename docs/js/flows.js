@@ -184,6 +184,29 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   }
 
+  function cloneFlow(flow) {
+    if (!flow || typeof flow !== 'object') return null;
+    return {
+      id: flow.id,
+      name: flow.name,
+      createdAt: flow.createdAt,
+      updatedAt: flow.updatedAt,
+      data: cloneSnapshot(flow.data)
+    };
+  }
+
+  function listFlows({ refresh = true } = {}) {
+    if (refresh) flows = loadFlows();
+    return flows.map((flow) => cloneFlow(flow)).filter(Boolean);
+  }
+
+  function findFlow(flowId, { refresh = false } = {}) {
+    if (refresh) flows = loadFlows();
+    const targetId = String(flowId || '').trim();
+    if (!targetId) return null;
+    return flows.find((flow) => flow.id === targetId) || null;
+  }
+
   function normalizeFlow(entry) {
     if (!entry || typeof entry !== 'object') return null;
     const id = typeof entry.id === 'string' && entry.id ? entry.id : generateId();
@@ -531,14 +554,10 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
   }
 
   function handleLoad() {
-    const flow = flows.find((f) => f.id === state.selectedFlowId);
-    if (!flow) return;
-    const success = Graph.importWorkspace(cloneSnapshot(flow.data), {
-      badgeText: `Loaded flow “${flow.name}”`
+    const result = loadFlowById(state.selectedFlowId, {
+      closeModalOnLoad: true
     });
-    if (success) {
-      closeModal();
-    }
+    if (!result.ok) setBadge('Unable to load flow', false);
   }
 
   function renderEditor(flowId) {
@@ -721,15 +740,38 @@ function createFlowsLibrary({ Graph, log = () => {} }) {
   const flowsButton = qs('#flowsButton');
   flowsButton?.addEventListener('click', openModal);
 
+  function getFlowById(flowId, { refresh = true } = {}) {
+    const flow = findFlow(flowId, { refresh });
+    return cloneFlow(flow);
+  }
+
+  function loadFlowById(flowId, { closeModalOnLoad = false, badgeText = '', silent = false } = {}) {
+    const flow = findFlow(flowId, { refresh: true });
+    if (!flow) return { ok: false, reason: 'not_found', flow: null };
+    const text = String(badgeText || '').trim() || `Loaded flow "${flow.name}"`;
+    const ok = !!Graph.importWorkspace(cloneSnapshot(flow.data), {
+      badgeText: text,
+      silent
+    });
+    if (ok && closeModalOnLoad) closeModal();
+    return {
+      ok,
+      reason: ok ? '' : 'import_failed',
+      flow: cloneFlow(flow)
+    };
+  }
+
   return {
     open: openModal,
     openCreate: openCreateModal,
-    list: () => flows.slice(),
+    list: () => listFlows({ refresh: true }),
+    get: (flowId) => getFlowById(flowId, { refresh: true }),
+    load: (flowId, opts = {}) => loadFlowById(flowId, opts),
     saveSnapshot: (name, snapshot) => {
       if (!snapshot || typeof snapshot !== 'object') return null;
       flows = loadFlows();
       const baseName = typeof name === 'string' && name.trim() ? name.trim() : `Imported Flow ${new Date().toLocaleString()}`;
-      return persistNewFlow(baseName, cloneSnapshot(snapshot));
+      return cloneFlow(persistNewFlow(baseName, cloneSnapshot(snapshot)));
     }
   };
 }

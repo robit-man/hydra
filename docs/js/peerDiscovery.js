@@ -768,6 +768,9 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
       peers: new Map(),
       status: { state: 'idle', detail: '' }
     },
+    ui: {
+      inlineDockMode: false
+    },
     recentMessages: new Map(),
     outboundSeq: 0,
     pokeNoticeTimer: null,
@@ -1832,6 +1835,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
 
   const els = {
     button: null,
+    dockHost: null,
     modal: null,
     backdrop: null,
     close: null,
@@ -1858,6 +1862,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
 
   function assignElements() {
     els.button = qs('#peerListButton');
+    els.dockHost = qs('#peerDockHost');
     els.modal = qs('#peerModal');
     els.backdrop = qs('#peerBackdrop');
     els.close = qs('#peerClose');
@@ -1887,6 +1892,11 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     els.tabButtons = els.tabs ? Array.from(els.tabs.querySelectorAll('.peer-tab')) : [];
     els.networkTabs = qs('#peerNetworkTabs');
     els.networkButtons = els.networkTabs ? Array.from(els.networkTabs.querySelectorAll('[data-network]')) : [];
+    state.ui.inlineDockMode = !!(els.dockHost && els.body && els.dockHost.contains(els.body));
+    if (state.ui.inlineDockMode && els.modal) {
+      els.modal.classList.add('hidden');
+      els.modal.setAttribute('aria-hidden', 'true');
+    }
     if (els.nameInput) els.nameInput.value = state.username || '';
     if (els.search) els.search.value = state.filters.search || '';
     if (els.favToggle) els.favToggle.classList.toggle('active', !!state.filters.onlyFavorites);
@@ -1898,12 +1908,38 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
   }
 
   function showModal() {
+    if (state.ui.inlineDockMode) {
+      setActivePane('list');
+      const host = els.dockHost || els.body?.closest('#peerDockHost') || null;
+      const section = host?.closest?.('[data-section-id]');
+      if (section?.classList?.contains('is-collapsed')) {
+        const header = section.querySelector('.hydra-section__header');
+        if (header instanceof HTMLElement) header.click();
+      }
+      if (host) {
+        host.classList.add('is-active');
+        try {
+          host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        } catch (_) {
+          host.scrollIntoView({ block: 'nearest' });
+        }
+      }
+      if (els.search) {
+        try {
+          els.search.focus({ preventScroll: true });
+        } catch (_) {
+          els.search.focus();
+        }
+      }
+      return;
+    }
     if (!els.modal) return;
     els.modal.classList.remove('hidden');
     els.modal.setAttribute('aria-hidden', 'false');
   }
 
   function hideModal() {
+    if (state.ui.inlineDockMode) return;
     if (!els.modal) return;
     els.modal.classList.add('hidden');
     els.modal.setAttribute('aria-hidden', 'true');
@@ -3892,7 +3928,7 @@ function createPeerDiscovery({ Net, CFG, WorkspaceSync, setBadge, log, NoClip })
     }
 
     [els.backdrop, els.close].forEach((el) => {
-      if (el && !el._peerBound) {
+      if (!state.ui.inlineDockMode && el && !el._peerBound) {
         el.addEventListener('click', (e) => {
           e.preventDefault();
           hideModal();

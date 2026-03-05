@@ -2462,6 +2462,13 @@ function bindUI() {
   const nodeMenuListEl = qs('#nodeMenuList');
   const peerOnlineBadge = qs('#peerOnlineBadge');
   const noclipPeerBadge = qs('#noclipPeerBadge');
+  const graphFlowListEl = qs('#graphFlowList');
+  const flowsSaveCurrentBtn = qs('#flowsSaveCurrentBtn');
+  const graphJsonEditorEl = qs('#graphJsonEditor');
+  const graphJsonStatusEl = qs('#graphJsonStatus');
+  const graphJsonRefreshBtn = qs('#graphJsonRefreshBtn');
+  const graphJsonApplyBtn = qs('#graphJsonApplyBtn');
+  const graphJsonSaveFlowBtn = qs('#graphJsonSaveFlowBtn');
 
   const isMobileDockMode = () => {
     try {
@@ -2515,17 +2522,128 @@ function bindUI() {
     return Math.max(0, Math.floor(parsed));
   };
 
+  const formatFlowTimestamp = (ts) => {
+    const value = Number(ts || 0);
+    if (!Number.isFinite(value) || value <= 0) return '--';
+    try {
+      return new Date(value).toLocaleString();
+    } catch (_) {
+      return '--';
+    }
+  };
+
+  const setGraphJsonStatus = (text, tone = 'muted') => {
+    if (!graphJsonStatusEl) return;
+    graphJsonStatusEl.textContent = String(text || 'workspace').trim() || 'workspace';
+    graphJsonStatusEl.dataset.tone = String(tone || 'muted').trim().toLowerCase() || 'muted';
+  };
+
+  const normalizeGraphSnapshot = (snapshot) => {
+    const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    return {
+      nodes: Array.isArray(source.nodes) ? source.nodes : [],
+      links: Array.isArray(source.links) ? source.links : [],
+      nodeConfigs: source.nodeConfigs && typeof source.nodeConfigs === 'object' ? source.nodeConfigs : {},
+      viewport: source.viewport && typeof source.viewport === 'object' ? source.viewport : undefined,
+      transport: source.transport,
+      meta: source.meta && typeof source.meta === 'object' ? source.meta : undefined,
+      nodeStates: source.nodeStates && typeof source.nodeStates === 'object' ? source.nodeStates : undefined
+    };
+  };
+
+  const writeGraphJsonEditor = (snapshot, { label = 'workspace', tone = 'muted' } = {}) => {
+    if (!graphJsonEditorEl) return;
+    const value = normalizeGraphSnapshot(snapshot);
+    graphJsonEditorEl.value = JSON.stringify(value, null, 2);
+    setGraphJsonStatus(label, tone);
+  };
+
+  const parseGraphJsonEditor = () => {
+    const raw = String(graphJsonEditorEl?.value || '').trim();
+    if (!raw) throw new Error('Graph JSON is empty');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') throw new Error('Graph JSON must be an object');
+    if (!Array.isArray(parsed.nodes)) throw new Error('Graph JSON must include a nodes array');
+    return normalizeGraphSnapshot(parsed);
+  };
+
+  let lastFlowListSignature = '';
+  const renderGraphFlowList = (flowsInput = null) => {
+    if (!graphFlowListEl) return;
+    const flows = Array.isArray(flowsInput) ? flowsInput : (Flows?.list?.() || []);
+    const signature = flows
+      .map((flow) => `${flow.id}:${Number(flow.updatedAt || 0)}`)
+      .join('|');
+    if (signature === lastFlowListSignature && graphFlowListEl.childElementCount > 0) return;
+    lastFlowListSignature = signature;
+
+    graphFlowListEl.innerHTML = '';
+    if (!flows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'graph-flow-empty';
+      empty.textContent = 'No saved flows yet.';
+      graphFlowListEl.appendChild(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    flows.forEach((flow) => {
+      const row = document.createElement('div');
+      row.className = 'graph-flow-item';
+
+      const meta = document.createElement('div');
+      meta.className = 'graph-flow-meta';
+
+      const name = document.createElement('div');
+      name.className = 'graph-flow-name';
+      name.textContent = String(flow.name || 'Untitled Flow');
+      meta.appendChild(name);
+
+      const detail = document.createElement('div');
+      detail.className = 'graph-flow-detail';
+      const nodeCount = Array.isArray(flow?.data?.nodes) ? flow.data.nodes.length : 0;
+      detail.textContent = `${nodeCount} node${nodeCount === 1 ? '' : 's'} • ${formatFlowTimestamp(flow.updatedAt)}`;
+      meta.appendChild(detail);
+      row.appendChild(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'graph-flow-actions';
+
+      const loadBtn = document.createElement('button');
+      loadBtn.type = 'button';
+      loadBtn.className = 'ghost';
+      loadBtn.dataset.flowAction = 'load';
+      loadBtn.dataset.flowId = flow.id;
+      loadBtn.textContent = 'Load';
+      actions.appendChild(loadBtn);
+
+      const jsonBtn = document.createElement('button');
+      jsonBtn.type = 'button';
+      jsonBtn.className = 'ghost';
+      jsonBtn.dataset.flowAction = 'json';
+      jsonBtn.dataset.flowId = flow.id;
+      jsonBtn.textContent = 'JSON';
+      actions.appendChild(jsonBtn);
+
+      row.appendChild(actions);
+      fragment.appendChild(row);
+    });
+    graphFlowListEl.appendChild(fragment);
+  };
+
   const refreshWorkspaceStats = () => {
     const stats = Graph?.getWorkspaceStats?.() || {};
     const nodeCount = Number(stats.nodeCount || 0);
     const linkCount = Number(stats.linkCount || 0);
     const selectedCount = Number(stats.selectedCount || 0);
-    const flowCount = Number(Flows?.list?.().length || 0);
+    const flows = Flows?.list?.() || [];
+    const flowCount = Number(flows.length || 0);
     if (workspaceNodeCountEl) workspaceNodeCountEl.textContent = String(Math.max(0, Math.floor(nodeCount)));
     if (workspaceLinkCountEl) workspaceLinkCountEl.textContent = String(Math.max(0, Math.floor(linkCount)));
     if (workspaceSelectedCountEl) workspaceSelectedCountEl.textContent = String(Math.max(0, Math.floor(selectedCount)));
     if (workspaceFlowCountEl) workspaceFlowCountEl.textContent = String(Math.max(0, Math.floor(flowCount)));
     if (workspaceFlowCountMetaEl) workspaceFlowCountMetaEl.textContent = `${Math.max(0, Math.floor(flowCount))} saved`;
+    renderGraphFlowList(flows);
     const hasNodes = nodeCount > 0;
     leftDock.setButtonTone('workspace', hasNodes ? 'ok' : 'warn');
   };
@@ -2582,6 +2700,114 @@ function bindUI() {
     observer.observe(nodeMenuListEl, { childList: true, subtree: false });
   }
 
+  if (graphFlowListEl && !graphFlowListEl.dataset.bound) {
+    graphFlowListEl.addEventListener('click', (event) => {
+      const trigger = event.target instanceof Element
+        ? event.target.closest('[data-flow-action]')
+        : null;
+      if (!trigger) return;
+      event.preventDefault();
+      const action = String(trigger.getAttribute('data-flow-action') || '').trim().toLowerCase();
+      const flowId = String(trigger.getAttribute('data-flow-id') || '').trim();
+      if (!flowId) return;
+
+      if (action === 'load') {
+        const result = Flows?.load?.(flowId, { closeModalOnLoad: false });
+        if (!result?.ok) {
+          setBadge('Unable to load selected flow', false);
+          return;
+        }
+        writeGraphJsonEditor(Graph.exportWorkspace(), { label: 'workspace', tone: 'ok' });
+        refreshWorkspaceStats();
+        return;
+      }
+
+      if (action === 'json') {
+        const flow = Flows?.get?.(flowId);
+        if (!flow) {
+          setBadge('Unable to read flow JSON', false);
+          return;
+        }
+        writeGraphJsonEditor(flow.data, { label: `flow: ${flow.name || flow.id}`, tone: 'muted' });
+      }
+    });
+    graphFlowListEl.dataset.bound = '1';
+  }
+
+  flowsSaveCurrentBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    const snapshot = normalizeGraphSnapshot(Graph.exportWorkspace());
+    const defaultName = `Flow ${new Date().toLocaleString()}`;
+    const proposed = window.prompt('Save current graph as flow', defaultName);
+    if (proposed === null) return;
+    const flowName = String(proposed || '').trim() || defaultName;
+    const flow = Flows?.saveSnapshot?.(flowName, snapshot);
+    if (!flow) {
+      setBadge('Flow save failed', false);
+      return;
+    }
+    lastFlowListSignature = '';
+    refreshWorkspaceStats();
+    setBadge(`Saved flow "${flow.name}"`);
+  });
+
+  graphJsonRefreshBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    writeGraphJsonEditor(Graph.exportWorkspace(), { label: 'workspace', tone: 'muted' });
+  });
+
+  graphJsonApplyBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    let snapshot;
+    try {
+      snapshot = parseGraphJsonEditor();
+    } catch (err) {
+      const reason = err?.message || String(err);
+      setGraphJsonStatus('invalid json', 'error');
+      setBadge(`Graph JSON parse failed: ${reason}`, false);
+      return;
+    }
+    const ok = Graph.importWorkspace(snapshot, { badgeText: 'Graph JSON applied' });
+    if (!ok) {
+      setGraphJsonStatus('apply failed', 'error');
+      setBadge('Graph JSON apply failed', false);
+      return;
+    }
+    setGraphJsonStatus('workspace', 'ok');
+    refreshWorkspaceStats();
+  });
+
+  graphJsonSaveFlowBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    let snapshot;
+    try {
+      snapshot = parseGraphJsonEditor();
+    } catch (err) {
+      const reason = err?.message || String(err);
+      setGraphJsonStatus('invalid json', 'error');
+      setBadge(`Graph JSON parse failed: ${reason}`, false);
+      return;
+    }
+    const defaultName = `JSON Flow ${new Date().toLocaleString()}`;
+    const proposed = window.prompt('Save JSON as flow', defaultName);
+    if (proposed === null) return;
+    const flowName = String(proposed || '').trim() || defaultName;
+    const flow = Flows?.saveSnapshot?.(flowName, snapshot);
+    if (!flow) {
+      setGraphJsonStatus('save failed', 'error');
+      setBadge('Unable to save flow from JSON', false);
+      return;
+    }
+    setGraphJsonStatus(`saved: ${flow.name}`, 'ok');
+    lastFlowListSignature = '';
+    refreshWorkspaceStats();
+    setBadge(`Saved JSON flow "${flow.name}"`);
+  });
+
+  graphJsonEditorEl?.addEventListener('input', () => {
+    setGraphJsonStatus('edited', 'warn');
+  });
+
   const observeStateMutations = (target, handler) => {
     if (!target || typeof MutationObserver !== 'function') return;
     const observer = new MutationObserver(() => {
@@ -2600,6 +2826,9 @@ function bindUI() {
   observeStateMutations(marketHealthBadge, refreshRightIndicators);
   observeStateMutations(ownerAuthStatusEl, refreshRightIndicators);
 
+  if (graphJsonEditorEl && !String(graphJsonEditorEl.value || '').trim()) {
+    writeGraphJsonEditor(Graph.exportWorkspace(), { label: 'workspace', tone: 'muted' });
+  }
   setInterval(refreshWorkspaceStats, 1250);
   refreshWorkspaceStats();
   refreshCollabCounts();

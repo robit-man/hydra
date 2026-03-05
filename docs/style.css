@@ -299,14 +299,47 @@ header {
 .hydra-dock-controls {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
   padding: 8px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, .18);
   background: rgba(0, 0, 0, .78);
   backdrop-filter: blur(14px);
   min-width: 136px;
+  height: 100%;
   pointer-events: all;
+}
+
+.hydra-dock-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hydra-dock-footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-height: 34px;
+}
+
+.hydra-dock-left .hydra-dock-footer {
+  justify-content: flex-start;
+}
+
+.hydra-dock-right .hydra-dock-footer {
+  justify-content: flex-end;
+}
+
+.hydra-dock-footer .ghost {
+  min-height: 30px;
+}
+
+.hydra-dock-footer .history-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .hydra-dock-btn {
@@ -471,6 +504,10 @@ header {
   overflow: hidden;
 }
 
+.hydra-dock-panel[hidden] {
+  display: none !important;
+}
+
 .hydra-panel-header {
   display: flex;
   align-items: center;
@@ -621,6 +658,91 @@ header {
   color: var(--muted);
 }
 
+.graph-flow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.graph-flow-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, .03);
+}
+
+.graph-flow-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.graph-flow-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-flow-detail {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.graph-flow-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.graph-flow-actions button {
+  min-width: 54px;
+}
+
+.graph-flow-empty {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  padding: 10px 8px;
+  border: 1px dashed rgba(255, 255, 255, .12);
+  border-radius: 8px;
+}
+
+.graph-json-editor {
+  width: 100%;
+  min-height: 220px;
+  max-height: 340px;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .03);
+  color: var(--text);
+  padding: 10px;
+  font: 12px/1.4 var(--mono);
+}
+
+#graphJsonStatus[data-tone="ok"] {
+  color: var(--ok);
+}
+
+#graphJsonStatus[data-tone="warn"] {
+  color: var(--warn);
+}
+
+#graphJsonStatus[data-tone="error"] {
+  color: var(--err);
+}
+
 .left-sidebar-actions button,
 .node-row button {
   min-height: 30px;
@@ -707,6 +829,12 @@ header {
 }
 
 .logdata .history-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-buttons {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1649,6 +1777,14 @@ header {
     justify-content: center;
     padding: 5px;
     border-radius: 7px;
+  }
+
+  .hydra-dock-main {
+    gap: 6px;
+  }
+
+  .hydra-dock-footer {
+    min-height: 30px;
   }
 
   .hydra-dock-label {
@@ -3917,6 +4053,33 @@ audio {
   overflow: auto;
 }
 
+.peer-dock-host {
+  width: 100%;
+  min-height: 0;
+}
+
+.peer-dock-host .peer-modal-body.two-col {
+  flex-direction: column;
+  gap: 10px;
+  overflow: visible;
+  max-height: min(74vh, 820px);
+}
+
+.peer-dock-host .peer-left,
+.peer-dock-host .peer-right {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.peer-dock-host .peer-list {
+  max-height: 240px;
+}
+
+.peer-dock-host .chat-messages {
+  min-height: 150px;
+  max-height: 280px;
+}
+
 .peer-left {
   flex: 1 1 45%;
   display: flex;
@@ -4140,6 +4303,11 @@ audio {
     height: 600px;
   }
 
+  .peer-dock-host .peer-modal-body.two-col {
+    height: auto;
+    max-height: none;
+  }
+
   .peer-connect-row {
     flex-wrap: wrap;
   }
@@ -4157,6 +4325,11 @@ audio {
   .peer-modal-body.two-col .peer-right {
     height: 500px;
     min-width: 0;
+  }
+
+  .peer-dock-host .peer-modal-body.two-col .peer-left,
+  .peer-dock-host .peer-modal-body.two-col .peer-right {
+    height: auto;
   }
 
   .peer-modal-body.two-col.mobile-pane-list .peer-left {

@@ -40,21 +40,28 @@
 
                     <div id="leftDock" class="hydra-dock hydra-dock-left" data-side="left" data-open="false">
                         <div class="hydra-dock-controls">
-                            <button id="leftSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="workspace" aria-label="Workspace">
-                                <span class="hydra-dock-icon"><img src="img/plus.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Workspace</span>
-                                <span id="leftWorkspaceIndicator" class="hydra-dock-indicator"></span>
-                            </button>
-                            <button id="leftGraphsToggle" class="hydra-dock-btn" type="button" data-dock-item="graphs" aria-label="Graphs">
-                                <span class="hydra-dock-icon"><img src="img/layer.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Graphs</span>
-                            </button>
-                            <button id="leftCollabToggle" class="hydra-dock-btn" type="button" data-dock-item="collab" aria-label="Collaboration">
-                                <span class="hydra-dock-icon"><img src="img/network.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Collab</span>
-                                <span id="peerOnlineBadge" class="hydra-dock-badge hydra-dock-badge-friends peer-badge hidden">0</span>
-                                <span id="noclipPeerBadge" class="hydra-dock-badge hydra-dock-badge-chat noclip-peer-badge hidden">0</span>
-                            </button>
+                            <div class="hydra-dock-main">
+                                <button id="leftSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="workspace" aria-label="Workspace">
+                                    <span class="hydra-dock-icon"><img src="img/plus.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Workspace</span>
+                                    <span id="leftWorkspaceIndicator" class="hydra-dock-indicator"></span>
+                                </button>
+                                <button id="leftGraphsToggle" class="hydra-dock-btn" type="button" data-dock-item="graphs" aria-label="Graphs">
+                                    <span class="hydra-dock-icon"><img src="img/layer.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Graphs</span>
+                                </button>
+                                <button id="leftCollabToggle" class="hydra-dock-btn" type="button" data-dock-item="collab" aria-label="Collaboration">
+                                    <span class="hydra-dock-icon"><img src="img/network.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Collab</span>
+                                    <span id="peerOnlineBadge" class="hydra-dock-badge hydra-dock-badge-friends peer-badge hidden">0</span>
+                                    <span id="noclipPeerBadge" class="hydra-dock-badge hydra-dock-badge-chat noclip-peer-badge hidden">0</span>
+                                </button>
+                            </div>
+                            <div class="hydra-dock-footer">
+                                <button type="button" id="logToggleBtn" class="ghost" aria-label="Toggle logs">
+                                    <img src="img/chevron-down.svg" alt="" class="icon inverted">
+                                </button>
+                            </div>
                         </div>
                         <div id="leftSidebar" class="hydra-dock-panels" data-open="false">
                             <section class="hydra-dock-panel" data-dock-panel="workspace" hidden>
@@ -120,17 +127,24 @@
                                             <div class="hydra-section-copy">Load, save, import, and export graph layouts.</div>
                                             <div class="hydra-action-row">
                                                 <button id="flowsButton" class="ghost" type="button"><img src="img/layer.svg" alt="" class="icon inverted">Open Flows</button>
+                                                <button id="flowsSaveCurrentBtn" class="ghost" type="button"><img src="img/plus.svg" alt="" class="icon inverted">Save Current</button>
                                             </div>
+                                            <div id="graphFlowList" class="graph-flow-list"></div>
                                         </div>
                                     </section>
                                     <section class="hydra-section" data-section-id="graphs-history">
                                         <button class="hydra-section__header" type="button">
                                             <span class="hydra-section__arrow">▾</span>
-                                            <span class="hydra-section__title">History</span>
-                                            <span class="hydra-section__meta">Undo / Redo</span>
+                                            <span class="hydra-section__title">Raw JSON</span>
+                                            <span id="graphJsonStatus" class="hydra-section__meta">workspace</span>
                                         </button>
                                         <div class="hydra-section__content">
-                                            <div class="hydra-section-copy">Workspace history controls remain available from the log bar at the bottom.</div>
+                                            <div class="hydra-action-row">
+                                                <button id="graphJsonRefreshBtn" class="ghost" type="button"><img src="img/refresh-cw.svg" alt="" class="icon inverted">Refresh</button>
+                                                <button id="graphJsonApplyBtn" class="ghost" type="button"><img src="img/check.svg" alt="" class="icon inverted">Apply</button>
+                                                <button id="graphJsonSaveFlowBtn" class="ghost" type="button"><img src="img/save.svg" alt="" class="icon inverted">Save as Flow</button>
+                                            </div>
+                                            <textarea id="graphJsonEditor" class="graph-json-editor" spellcheck="false" autocomplete="off"></textarea>
                                         </div>
                                     </section>
                                 </div>
@@ -165,6 +179,70 @@
                                             </div>
                                         </div>
                                     </section>
+                                    <section class="hydra-section" data-section-id="collab-peers">
+                                        <button class="hydra-section__header" type="button">
+                                            <span class="hydra-section__arrow">▾</span>
+                                            <span class="hydra-section__title">Peer Mesh</span>
+                                            <span class="hydra-section__meta">Chat + Multi-Peer</span>
+                                        </button>
+                                        <div class="hydra-section__content">
+                                            <div id="peerDockHost" class="peer-dock-host">
+                                                <div class="peer-modal-body two-col" id="peerModalBody">
+                                                    <div class="peer-tabs" id="peerTabs">
+                                                        <button type="button" class="peer-tab active" data-pane="list">Peers</button>
+                                                        <button type="button" class="peer-tab" data-pane="chat">Chat</button>
+                                                    </div>
+                                                    <div class="peer-left">
+                                                        <div class="help" id="peerStatus">Initializing discovery...</div>
+                                                        <div class="peer-identity">
+                                                            <label for="peerUsernameInput">Display Name</label>
+                                                            <div class="peer-identity-row">
+                                                                <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48"
+                                                                    autocomplete="off" spellcheck="false">
+                                                                <button type="button" class="secondary" id="peerUsernameApply">Save</button>
+                                                            </div>
+                                                            <div class="peer-self muted" id="peerSelf"></div>
+                                                            <div class="peer-self-name muted" id="peerSelfName"></div>
+                                                        </div>
+                                                        <div class="peer-filters">
+                                                            <div class="peer-network-tabs" id="peerNetworkTabs">
+                                                                <button type="button" class="ghost active" data-network="hydra">Hydra</button>
+                                                                <button type="button" class="ghost" data-network="noclip">NoClip</button>
+                                                            </div>
+                                                            <input id="peerSearchInput" type="text" placeholder="Search peers" autocomplete="off"
+                                                                spellcheck="false">
+                                                            <button type="button" class="ghost" id="peerFavoritesToggle" title="Show favorites only">☆</button>
+                                                        </div>
+                                                        <div class="peer-connect-row">
+                                                            <input id="peerManualAddressInput" type="text"
+                                                                placeholder="Add peer address (hydra.<id> or noclip.<id>)" autocomplete="off"
+                                                                spellcheck="false">
+                                                            <button type="button" class="secondary" id="peerManualAddBtn">Add</button>
+                                                            <button type="button" class="ghost" id="peerManualScanBtn">Scan</button>
+                                                        </div>
+                                                        <div class="peer-ingress-hint muted" id="peerIngressHint">
+                                                            Manual or QR ingress supports prefixed and raw keys. NKN is primary; NATS is fallback.
+                                                        </div>
+                                                        <div class="peer-list" id="peerList"></div>
+                                                    </div>
+
+                                                    <div class="peer-right" id="chatWrap">
+                                                        <div class="chat-header">
+                                                            <div id="chatPeerName">Select a peer…</div>
+                                                            <button type="button" class="ghost" id="chatFavoriteBtn" title="Toggle favorite">☆</button>
+                                                        </div>
+                                                        <div class="chat-status muted" id="chatStatus">—</div>
+                                                        <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+                                                        <div class="chat-typing muted hidden" id="chatTyping">typing…</div>
+                                                        <div class="chat-input">
+                                                            <input id="chatInput" type="text" placeholder="Type a message" autocomplete="off" disabled>
+                                                            <button id="chatSend" class="secondary" disabled>Send</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </section>
                                 </div>
                             </section>
                         </div>
@@ -172,20 +250,32 @@
 
                     <div id="rightDock" class="hydra-dock hydra-dock-right" data-side="right" data-open="false">
                         <div class="hydra-dock-controls">
-                            <button id="rightSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="router" aria-label="Router">
-                                <span class="hydra-dock-icon"><img src="img/network.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Router</span>
-                            </button>
-                            <button id="rightMarketToggle" class="hydra-dock-btn" type="button" data-dock-item="market" aria-label="Marketplace">
-                                <span class="hydra-dock-icon"><img src="img/layer.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Market</span>
-                                <span id="rightMarketIndicator" class="hydra-dock-indicator"></span>
-                            </button>
-                            <button id="rightPolicyToggle" class="hydra-dock-btn" type="button" data-dock-item="policy" aria-label="Policy">
-                                <span class="hydra-dock-icon"><img src="img/code.svg" alt="" class="icon inverted"></span>
-                                <span class="hydra-dock-label">Policy</span>
-                                <span id="rightPolicyIndicator" class="hydra-dock-indicator"></span>
-                            </button>
+                            <div class="hydra-dock-main">
+                                <button id="rightSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="router" aria-label="Router">
+                                    <span class="hydra-dock-icon"><img src="img/network.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Router</span>
+                                </button>
+                                <button id="rightMarketToggle" class="hydra-dock-btn" type="button" data-dock-item="market" aria-label="Marketplace">
+                                    <span class="hydra-dock-icon"><img src="img/layer.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Market</span>
+                                    <span id="rightMarketIndicator" class="hydra-dock-indicator"></span>
+                                </button>
+                                <button id="rightPolicyToggle" class="hydra-dock-btn" type="button" data-dock-item="policy" aria-label="Policy">
+                                    <span class="hydra-dock-icon"><img src="img/code.svg" alt="" class="icon inverted"></span>
+                                    <span class="hydra-dock-label">Policy</span>
+                                    <span id="rightPolicyIndicator" class="hydra-dock-indicator"></span>
+                                </button>
+                            </div>
+                            <div class="hydra-dock-footer">
+                                <div class="history-buttons">
+                                    <button type="button" id="undoBtn" class="ghost" disabled aria-label="Undo">
+                                        <img src="img/chevron-left-double.svg" alt="" class="icon inverted">
+                                    </button>
+                                    <button type="button" id="redoBtn" class="ghost" disabled aria-label="Redo">
+                                        <img src="img/chevron-right-double.svg" alt="" class="icon inverted">
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                         <div id="rightSidebar" class="hydra-dock-panels" data-open="false">
                             <section class="hydra-dock-panel" data-dock-panel="router" hidden>
@@ -343,16 +433,6 @@
                     <div id="wsCanvas" class="dot-bg"></div>
                 </div>
                 <div class="logdata" id="logdata">
-                    <div class="log-controls">
-                        <button type="button" id="logToggleBtn" class="ghost"><img src="img/chevron-down.svg" alt=""
-                                class="icon inverted"></button>
-                        <div class="history-buttons">
-                            <button type="button" id="undoBtn" class="ghost" disabled><img
-                                    src="img/chevron-left-double.svg" alt="" class="icon inverted"></button>
-                            <button type="button" id="redoBtn" class="ghost" disabled><img
-                                    src="img/chevron-right-double.svg" alt="" class="icon inverted"></button>
-                        </div>
-                    </div>
                     <div class="log-panels" id="logPanels">
                         <div id="wiresBox" class="code" style="min-height:54px;"></div>
                         <div id="logBox" class="code" style="min-height:120px;">(logs)</div>
@@ -525,58 +605,8 @@
                 <div class="modal-title">Discovered Peers</div>
                 <button class="ghost" id="peerClose">✕</button>
             </div>
-            <div class="modal-body peer-modal-body two-col" id="peerModalBody">
-                <div class="peer-tabs" id="peerTabs">
-                    <button type="button" class="peer-tab active" data-pane="list">Peers</button>
-                    <button type="button" class="peer-tab" data-pane="chat">Chat</button>
-                </div>
-                <div class="peer-left">
-                    <div class="help" id="peerStatus">Initializing discovery...</div>
-                    <div class="peer-identity">
-                        <label for="peerUsernameInput">Display Name</label>
-                        <div class="peer-identity-row">
-                            <input id="peerUsernameInput" type="text" placeholder="Set a short username" maxlength="48"
-                                autocomplete="off" spellcheck="false">
-                            <button type="button" class="secondary" id="peerUsernameApply">Save</button>
-                        </div>
-                        <div class="peer-self muted" id="peerSelf"></div>
-                        <div class="peer-self-name muted" id="peerSelfName"></div>
-                    </div>
-                    <div class="peer-filters">
-                        <div class="peer-network-tabs" id="peerNetworkTabs">
-                            <button type="button" class="ghost active" data-network="hydra">Hydra</button>
-                            <button type="button" class="ghost" data-network="noclip">NoClip</button>
-                        </div>
-                        <input id="peerSearchInput" type="text" placeholder="Search peers" autocomplete="off"
-                            spellcheck="false">
-                        <button type="button" class="ghost" id="peerFavoritesToggle" title="Show favorites only">☆</button>
-                    </div>
-                    <div class="peer-connect-row">
-                        <input id="peerManualAddressInput" type="text"
-                            placeholder="Add peer address (hydra.<id> or noclip.<id>)" autocomplete="off"
-                            spellcheck="false">
-                        <button type="button" class="secondary" id="peerManualAddBtn">Add</button>
-                        <button type="button" class="ghost" id="peerManualScanBtn">Scan</button>
-                    </div>
-                    <div class="peer-ingress-hint muted" id="peerIngressHint">
-                        Manual or QR ingress supports prefixed and raw keys. NKN is primary; NATS is fallback.
-                    </div>
-                    <div class="peer-list" id="peerList"></div>
-                </div>
-
-                <div class="peer-right" id="chatWrap">
-                    <div class="chat-header">
-                        <div id="chatPeerName">Select a peer…</div>
-                        <button type="button" class="ghost" id="chatFavoriteBtn" title="Toggle favorite">☆</button>
-                    </div>
-                    <div class="chat-status muted" id="chatStatus">—</div>
-                    <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
-                    <div class="chat-typing muted hidden" id="chatTyping">typing…</div>
-                    <div class="chat-input">
-                        <input id="chatInput" type="text" placeholder="Type a message" autocomplete="off" disabled>
-                        <button id="chatSend" class="secondary" disabled>Send</button>
-                    </div>
-                </div>
+            <div class="modal-body">
+                <div class="help">Peer mesh is docked under the Collaboration sidebar.</div>
             </div>
         </div>
     </div>
