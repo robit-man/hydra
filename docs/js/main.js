@@ -878,6 +878,8 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
 
   const VISIBILITY_OPTIONS = ['public', 'friends', 'private'];
   const TRANSPORT_OPTIONS = ['auto', 'cloudflare', 'nats', 'nkn', 'local', 'upnp'];
+  const DEFAULT_OWNER_HEADER = 'X-Hydra-Owner-Key';
+  const HEADER_TOKEN_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
   const setStatus = (text, tone = 'muted') => {
     if (!ui.status) return;
@@ -956,8 +958,7 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
       : true;
     state.ownerRequired = required;
     state.ownerAuthenticated = authenticated;
-    const headerName = String(payload.owner_auth_header || payload.ownerAuthHeader || '').trim();
-    if (headerName) state.ownerHeader = headerName;
+    state.ownerHeader = resolveOwnerHeaderName(payload);
     const hint = String(payload.owner_key_hint || payload.ownerKeyHint || '').trim();
     if (hint) state.ownerHint = hint;
     state.ownerStatusLoaded = true;
@@ -970,8 +971,15 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
   const ownerHeaders = (headers = {}) => {
     const out = { ...(headers || {}) };
     const key = String(state.ownerKey || '').trim();
-    const headerName = String(state.ownerHeader || 'X-Hydra-Owner-Key').trim() || 'X-Hydra-Owner-Key';
-    if (key) out[headerName] = key;
+    const headerName = normalizeHeaderName(state.ownerHeader, DEFAULT_OWNER_HEADER) || DEFAULT_OWNER_HEADER;
+    state.ownerHeader = headerName;
+    if (key) {
+      if (headerName.toLowerCase() === 'authorization') {
+        out.Authorization = /^bearer\s+/i.test(key) ? key : `Bearer ${key}`;
+      } else {
+        out[headerName] = key;
+      }
+    }
     return out;
   };
 
@@ -3361,3 +3369,35 @@ function handleInviteUrlParams() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+  const normalizeHeaderName = (value, fallback = '') => {
+    let candidate = '';
+    if (Array.isArray(value)) {
+      candidate = String(value.find((entry) => String(entry || '').trim()) || '').trim();
+    } else {
+      candidate = String(value || '').trim();
+    }
+    if (!candidate) return String(fallback || '').trim();
+    if (candidate.includes(',')) {
+      candidate = candidate.split(',')[0].trim();
+    }
+    if (!candidate) return String(fallback || '').trim();
+    if (!HEADER_TOKEN_RE.test(candidate) || /[\r\n:]/.test(candidate)) {
+      return String(fallback || '').trim();
+    }
+    return candidate;
+  };
+
+  const resolveOwnerHeaderName = (ownerAuth = {}) => {
+    const payload = ownerAuth && typeof ownerAuth === 'object' ? ownerAuth : {};
+    const preferred = normalizeHeaderName(payload.owner_auth_header || payload.ownerAuthHeader || '', '');
+    if (preferred) return preferred;
+    const alternatesRaw = payload.alternate_headers || payload.alternateHeaders || [];
+    const alternates = Array.isArray(alternatesRaw)
+      ? alternatesRaw
+      : String(alternatesRaw || '').split(',');
+    const alternateMatch = alternates
+      .map((entry) => normalizeHeaderName(entry, ''))
+      .find((entry) => !!entry && entry.toLowerCase() !== 'authorization');
+    if (alternateMatch) return alternateMatch;
+    return DEFAULT_OWNER_HEADER;
+  };

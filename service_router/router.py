@@ -299,6 +299,7 @@ SENSITIVE_FIELD_EXCEPTIONS = {
 SENSITIVE_FIELD_REGEX = re.compile(
     r"(seed_hex|(?:^|_)seed(?:$|_)|password|passphrase|api_?key|token|secret|private_?key|authorization|auth_header|bearer|owner_?key)"
 )
+HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
 def _parse_semver_tuple(value: Any) -> Tuple[int, int, int]:
@@ -346,6 +347,22 @@ def _normalize_audience(value: Any, default: str = "public") -> str:
     if raw in AUTH_ALLOWED_AUDIENCE:
         return raw
     return default if default in AUTH_ALLOWED_AUDIENCE else "public"
+
+
+def _sanitize_http_header_name(value: Any, default: str = "Authorization") -> str:
+    fallback = str(default or "Authorization").strip() or "Authorization"
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback
+    if "," in raw:
+        raw = raw.split(",", 1)[0].strip()
+    if not raw:
+        return fallback
+    if any(ch in raw for ch in ("\r", "\n", ":")):
+        return fallback
+    if not HTTP_HEADER_NAME_RE.match(raw):
+        return fallback
+    return raw
 
 
 def _normalize_ticket_key_map(raw_keys: Any, fallback: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -7502,6 +7519,7 @@ class Router:
         }
         next_cfg["marketplace"] = next_marketplace_cfg
         marketplace_sync_cfg = dict(next_cfg.get("marketplace_sync", {}))
+        raw_marketplace_auth_header = str(marketplace_sync_cfg.get("auth_header") or "Authorization").strip() or "Authorization"
         next_marketplace_sync_cfg = {
             "enable_auto_publish": self._as_bool(marketplace_sync_cfg.get("enable_auto_publish"), False),
             "target_urls": str(marketplace_sync_cfg.get("target_urls") or "").strip(),
@@ -7509,7 +7527,7 @@ class Router:
             "auth_token_env": str(
                 marketplace_sync_cfg.get("auth_token_env") or "HYDRA_MARKETPLACE_SYNC_TOKEN"
             ).strip() or "HYDRA_MARKETPLACE_SYNC_TOKEN",
-            "auth_header": str(marketplace_sync_cfg.get("auth_header") or "Authorization").strip() or "Authorization",
+            "auth_header": _sanitize_http_header_name(raw_marketplace_auth_header, default="Authorization"),
             "auth_scheme": str(marketplace_sync_cfg.get("auth_scheme") or "Bearer").strip(),
             "publish_interval_seconds": self._as_int(
                 marketplace_sync_cfg.get("publish_interval_seconds"),
@@ -7531,8 +7549,7 @@ class Router:
             ),
             "include_unhealthy": self._as_bool(marketplace_sync_cfg.get("include_unhealthy"), True),
         }
-        if any(ch in next_marketplace_sync_cfg["auth_header"] for ch in ("\r", "\n", ":")):
-            next_marketplace_sync_cfg["auth_header"] = "Authorization"
+        if next_marketplace_sync_cfg["auth_header"] != raw_marketplace_auth_header:
             changed = True
         next_marketplace_sync_targets = _normalize_marketplace_sync_targets(next_marketplace_sync_cfg.get("target_urls"))
         normalized_targets_csv = ",".join(next_marketplace_sync_targets)
@@ -10907,7 +10924,7 @@ class Router:
             "publish_timeout_seconds": self._as_float(cfg.get("publish_timeout_seconds"), 6.0, minimum=1.0, maximum=120.0),
             "max_backoff_seconds": self._as_int(cfg.get("max_backoff_seconds"), 300, minimum=5, maximum=7200),
             "include_unhealthy": self._as_bool(cfg.get("include_unhealthy"), True),
-            "auth_header": str(cfg.get("auth_header") or "Authorization"),
+            "auth_header": _sanitize_http_header_name(cfg.get("auth_header"), default="Authorization"),
             "auth_scheme": str(cfg.get("auth_scheme") or "Bearer"),
             "auth_token_present": token_present,
             "auth_token_env": str(cfg.get("auth_token_env") or ""),
@@ -11489,7 +11506,7 @@ class Router:
         if include_unhealthy_value is None:
             include_unhealthy_value = self._as_bool(cfg.get("include_unhealthy"), True)
         effective_token = self._marketplace_sync_auth_token(token_override=auth_token, cfg_override=cfg)
-        auth_header = str(cfg.get("auth_header") or "Authorization").strip() or "Authorization"
+        auth_header = _sanitize_http_header_name(cfg.get("auth_header"), default="Authorization")
         auth_scheme = str(cfg.get("auth_scheme") or "Bearer").strip()
         started_at = time.time()
 
