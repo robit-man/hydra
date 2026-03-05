@@ -881,6 +881,43 @@ const createMarketplaceConfigEditor = ({ CFG, saveCFG, setBadge, log, onCatalog 
   const DEFAULT_OWNER_HEADER = 'X-Hydra-Owner-Key';
   const HEADER_TOKEN_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
+  const normalizeHeaderName = (value, fallback = '') => {
+    let candidate = '';
+    if (Array.isArray(value)) {
+      candidate = String(value.find((entry) => String(entry || '').trim()) || '').trim();
+    } else {
+      candidate = String(value || '').trim();
+    }
+    if (!candidate) return String(fallback || '').trim();
+    if (candidate.includes(',')) {
+      candidate = candidate.split(',')[0].trim();
+    }
+    if (!candidate) return String(fallback || '').trim();
+    if (!HEADER_TOKEN_RE.test(candidate) || /[\r\n:]/.test(candidate)) {
+      return String(fallback || '').trim();
+    }
+    return candidate;
+  };
+
+  const resolveOwnerHeaderName = (ownerAuth = {}) => {
+    const payload = ownerAuth && typeof ownerAuth === 'object' ? ownerAuth : {};
+    const preferredRaw = payload.owner_auth_header || payload.ownerAuthHeader || '';
+    const preferred = normalizeHeaderName(preferredRaw, '');
+    if (preferred) return preferred;
+    if (String(preferredRaw || '').trim()) {
+      log?.('[market.config] invalid owner auth header name from payload; falling back to default');
+    }
+    const alternatesRaw = payload.alternate_headers || payload.alternateHeaders || [];
+    const alternates = Array.isArray(alternatesRaw)
+      ? alternatesRaw
+      : String(alternatesRaw || '').split(',');
+    const alternateMatch = alternates
+      .map((entry) => normalizeHeaderName(entry, ''))
+      .find((entry) => !!entry && entry.toLowerCase() !== 'authorization');
+    if (alternateMatch) return alternateMatch;
+    return DEFAULT_OWNER_HEADER;
+  };
+
   const setStatus = (text, tone = 'muted') => {
     if (!ui.status) return;
     ui.status.textContent = String(text || 'config idle');
@@ -3369,35 +3406,3 @@ function handleInviteUrlParams() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
-  const normalizeHeaderName = (value, fallback = '') => {
-    let candidate = '';
-    if (Array.isArray(value)) {
-      candidate = String(value.find((entry) => String(entry || '').trim()) || '').trim();
-    } else {
-      candidate = String(value || '').trim();
-    }
-    if (!candidate) return String(fallback || '').trim();
-    if (candidate.includes(',')) {
-      candidate = candidate.split(',')[0].trim();
-    }
-    if (!candidate) return String(fallback || '').trim();
-    if (!HEADER_TOKEN_RE.test(candidate) || /[\r\n:]/.test(candidate)) {
-      return String(fallback || '').trim();
-    }
-    return candidate;
-  };
-
-  const resolveOwnerHeaderName = (ownerAuth = {}) => {
-    const payload = ownerAuth && typeof ownerAuth === 'object' ? ownerAuth : {};
-    const preferred = normalizeHeaderName(payload.owner_auth_header || payload.ownerAuthHeader || '', '');
-    if (preferred) return preferred;
-    const alternatesRaw = payload.alternate_headers || payload.alternateHeaders || [];
-    const alternates = Array.isArray(alternatesRaw)
-      ? alternatesRaw
-      : String(alternatesRaw || '').split(',');
-    const alternateMatch = alternates
-      .map((entry) => normalizeHeaderName(entry, ''))
-      .find((entry) => !!entry && entry.toLowerCase() !== 'authorization');
-    if (alternateMatch) return alternateMatch;
-    return DEFAULT_OWNER_HEADER;
-  };
