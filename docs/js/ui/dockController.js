@@ -103,7 +103,8 @@ function createDockController({
   const toggle = (panelId) => {
     const target = String(panelId || '').trim();
     if (!target || !panels.has(target)) return;
-    if (state.open && state.active === target) {
+    const isMobileControlsStage = root?.dataset.mobileMode === 'true' && root?.dataset.mobileStage === 'controls';
+    if (state.open && state.active === target && !isMobileControlsStage) {
       close();
       return;
     }

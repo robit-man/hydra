@@ -20,6 +20,9 @@
   --market-chip-border: rgba(255, 255, 255, 0.18);
   --font-main: "Rajdhani", sans-serif;
   --mono: "Rajdhani", sans-serif;
+  --dock-width-desktop: min(430px, 88vw);
+  --dock-width-mobile: min(320px, 86vw);
+  --dock-expander-height: 38px;
   --r: 16px;
   --shadow: 0 10px 30px rgba(0, 0, 0, .35), inset 0 0 1px var(--border)
 }
@@ -276,8 +279,42 @@ header {
   pointer-events: all;
 }
 
+.hydra-dock-expander {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  z-index: 33;
+  height: var(--dock-expander-height);
+  min-width: 114px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .32);
+  background: rgba(0, 0, 0, .82);
+  color: var(--text);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  pointer-events: all;
+}
+
+.hydra-dock-expander .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.hydra-dock-expander-left {
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+}
+
+.hydra-dock-expander-right {
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+}
+
 .hydra-dock {
-  --dock-panel-width: min(430px, 88vw);
+  --dock-panel-width: var(--dock-width-desktop);
   position: fixed;
   top: 10px;
   bottom: 10px;
@@ -309,6 +346,40 @@ header {
   min-width: 136px;
   height: 100%;
   pointer-events: all;
+}
+
+.hydra-dock-controls-head {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, .14);
+}
+
+.hydra-dock-controls-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: rgba(255, 255, 255, .95);
+}
+
+.hydra-controls-close {
+  border: 1px solid rgba(255, 255, 255, .24);
+  background: rgba(255, 255, 255, .06);
+  color: rgba(255, 255, 255, .82);
+  border-radius: 6px;
+  min-width: 30px;
+  min-height: 26px;
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.hydra-controls-close:hover {
+  border-color: rgba(255, 255, 255, .56);
+  color: #fff;
 }
 
 .hydra-dock-main {
@@ -517,12 +588,34 @@ header {
   border-bottom: 1px solid rgba(255, 255, 255, .14);
 }
 
+.hydra-panel-back {
+  display: none;
+  border: 1px solid rgba(255, 255, 255, .2);
+  background: rgba(255, 255, 255, .06);
+  color: rgba(255, 255, 255, .86);
+  border-radius: 999px;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.hydra-panel-back:hover {
+  border-color: rgba(255, 255, 255, .46);
+  color: #fff;
+}
+
 .hydra-panel-title {
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .09em;
   color: #fff;
+  flex: 1;
+  text-align: left;
 }
 
 .hydra-panel-close {
@@ -775,6 +868,123 @@ header {
 .hydra-dock .peer-badge,
 .hydra-dock .noclip-peer-badge {
   position: absolute;
+}
+
+body.dock-mobile-mode .hydra-dock-expander {
+  display: inline-flex;
+}
+
+body.dock-mobile-mode .hydra-dock {
+  --dock-panel-width: var(--dock-width-mobile);
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+}
+
+body.dock-mobile-mode .hydra-dock-left {
+  left: calc(env(safe-area-inset-left, 0px) + 8px);
+}
+
+body.dock-mobile-mode .hydra-dock-right {
+  right: calc(env(safe-area-inset-right, 0px) + 8px);
+}
+
+body.dock-mobile-mode .hydra-dock-controls {
+  width: var(--dock-panel-width);
+  min-width: var(--dock-panel-width);
+  max-width: var(--dock-panel-width);
+  min-height: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+}
+
+body.dock-mobile-mode .hydra-dock-left .hydra-dock-controls {
+  transform: translateX(-12px);
+}
+
+body.dock-mobile-mode .hydra-dock-right .hydra-dock-controls {
+  transform: translateX(12px);
+}
+
+body.dock-mobile-mode .hydra-dock[data-open="true"][data-mobile-stage="controls"] .hydra-dock-controls {
+  opacity: 1;
+  pointer-events: all;
+  transform: translateX(0);
+}
+
+body.dock-mobile-mode .hydra-dock-controls-head {
+  display: flex;
+}
+
+body.dock-mobile-mode .hydra-dock-label {
+  display: block;
+}
+
+body.dock-mobile-mode .hydra-dock-btn {
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  justify-content: flex-start;
+}
+
+body.dock-mobile-mode .hydra-dock-main {
+  gap: 8px;
+}
+
+body.dock-mobile-mode .hydra-dock-footer {
+  margin-top: auto;
+}
+
+body.dock-mobile-mode .hydra-dock[data-open="true"][data-mobile-stage="controls"] .hydra-dock-panels {
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.dock-mobile-mode .hydra-dock[data-open="true"][data-mobile-stage="panel"] .hydra-dock-controls {
+  display: none;
+}
+
+body.dock-mobile-mode .hydra-dock[data-open="true"][data-mobile-stage="panel"] .hydra-dock-panels {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100vw;
+  max-width: none;
+  margin: 0;
+  transform: translateX(0) !important;
+  opacity: 1;
+  pointer-events: all;
+  z-index: 34;
+}
+
+body.dock-mobile-mode .hydra-dock[data-open="true"][data-mobile-stage="panel"] .hydra-dock-panel {
+  border-radius: 0;
+  height: 100dvh;
+}
+
+body.dock-mobile-mode .hydra-panel-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) 12px 10px 12px;
+  background: rgba(0, 0, 0, .93);
+}
+
+body.dock-mobile-mode .hydra-panel-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+body.dock-mobile-mode .hydra-panel-title {
+  text-align: center;
+  margin-left: 4px;
+}
+
+body.dock-mobile-mode .hydra-panel-body {
+  padding: 10px 10px calc(env(safe-area-inset-bottom, 0px) + 14px) 10px;
 }
 
 .logdata {
@@ -1752,17 +1962,7 @@ header {
 
 @media(max-width: 640px) {
   .hydra-dock {
-    --dock-panel-width: min(88vw, 340px);
-    top: 8px;
-    bottom: 8px;
-  }
-
-  .hydra-dock-left {
-    left: 8px;
-  }
-
-  .hydra-dock-right {
-    right: 8px;
+    --dock-width-mobile: min(320px, 88vw);
   }
 
   .hydra-dock-controls {
@@ -1789,6 +1989,10 @@ header {
 
   .hydra-dock-label {
     display: none;
+  }
+
+  body.dock-mobile-mode .hydra-dock-label {
+    display: block;
   }
 
   .hydra-dock-icon,

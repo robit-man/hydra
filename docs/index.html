@@ -37,9 +37,21 @@
             <div id="workspaceWrap" class="">
                 <div class="menu-row" id="hudDockLayout">
                     <div id="dockBackdrop" class="dock-backdrop hidden" aria-hidden="true"></div>
+                    <button id="leftDockExpandBtn" class="hydra-dock-expander hydra-dock-expander-left" type="button" aria-label="Open left sidebar">
+                        <img src="img/chevron-right.svg" alt="" class="icon inverted">
+                        <span>Workspace</span>
+                    </button>
+                    <button id="rightDockExpandBtn" class="hydra-dock-expander hydra-dock-expander-right" type="button" aria-label="Open right sidebar">
+                        <span>Router</span>
+                        <img src="img/chevron-left.svg" alt="" class="icon inverted">
+                    </button>
 
                     <div id="leftDock" class="hydra-dock hydra-dock-left" data-side="left" data-open="false">
                         <div class="hydra-dock-controls">
+                            <div class="hydra-dock-controls-head">
+                                <span class="hydra-dock-controls-title">Hydra</span>
+                                <button class="hydra-controls-close" type="button" data-dock-close-menu="left" aria-label="Close left menu">✕</button>
+                            </div>
                             <div class="hydra-dock-main">
                                 <button id="leftSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="workspace" aria-label="Workspace">
                                     <span class="hydra-dock-icon"><img src="img/plus.svg" alt="" class="icon inverted"></span>
@@ -66,6 +78,7 @@
                         <div id="leftSidebar" class="hydra-dock-panels" data-open="false">
                             <section class="hydra-dock-panel" data-dock-panel="workspace" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="left" aria-label="Back to left menu">Back</button>
                                     <span class="hydra-panel-title">Workspace</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="left" aria-label="Close workspace panel">✕</button>
                                 </div>
@@ -113,6 +126,7 @@
 
                             <section class="hydra-dock-panel" data-dock-panel="graphs" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="left" aria-label="Back to left menu">Back</button>
                                     <span class="hydra-panel-title">Graphs</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="left" aria-label="Close graphs panel">✕</button>
                                 </div>
@@ -152,6 +166,7 @@
 
                             <section class="hydra-dock-panel" data-dock-panel="collab" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="left" aria-label="Back to left menu">Back</button>
                                     <span class="hydra-panel-title">Collaboration</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="left" aria-label="Close collaboration panel">✕</button>
                                 </div>
@@ -250,6 +265,10 @@
 
                     <div id="rightDock" class="hydra-dock hydra-dock-right" data-side="right" data-open="false">
                         <div class="hydra-dock-controls">
+                            <div class="hydra-dock-controls-head">
+                                <button class="hydra-controls-close" type="button" data-dock-close-menu="right" aria-label="Close right menu">✕</button>
+                                <span class="hydra-dock-controls-title">Services</span>
+                            </div>
                             <div class="hydra-dock-main">
                                 <button id="rightSidebarToggle" class="hydra-dock-btn" type="button" data-dock-item="router" aria-label="Router">
                                     <span class="hydra-dock-icon"><img src="img/network.svg" alt="" class="icon inverted"></span>
@@ -280,6 +299,7 @@
                         <div id="rightSidebar" class="hydra-dock-panels" data-open="false">
                             <section class="hydra-dock-panel" data-dock-panel="router" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="right" aria-label="Back to right menu">Back</button>
                                     <span class="hydra-panel-title">Router Link</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="right" aria-label="Close router panel">✕</button>
                                 </div>
@@ -307,6 +327,7 @@
 
                             <section class="hydra-dock-panel" data-dock-panel="market" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="right" aria-label="Back to right menu">Back</button>
                                     <span class="hydra-panel-title">Marketplace Live</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="right" aria-label="Close market panel">✕</button>
                                 </div>
@@ -352,6 +373,7 @@
 
                             <section class="hydra-dock-panel" data-dock-panel="policy" hidden>
                                 <div class="hydra-panel-header">
+                                    <button class="hydra-panel-back" type="button" data-dock-back="right" aria-label="Back to right menu">Back</button>
                                     <span class="hydra-panel-title">Marketplace Policy</span>
                                     <button class="hydra-panel-close" type="button" data-dock-close="right" aria-label="Close policy panel">✕</button>
                                 </div>

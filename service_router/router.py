@@ -927,6 +927,7 @@ class ServiceWatchdog:
         base_dir: Optional[Path] = None,
         enable_logs: bool = True,
         watchdog_config: Optional[Dict[str, Any]] = None,
+        log_sink: Optional[Callable[[str, str, Any], None]] = None,
     ):
         self.base_dir = Path(base_dir or BASE_DIR)
         self.enable_logs = enable_logs
@@ -949,6 +950,7 @@ class ServiceWatchdog:
         self._lock_file_path = WATCHDOG_LOCK_FILE
         self._lock_handle: Optional[IO[str]] = None
         self._lock_active = False
+        self._log_sink = log_sink
 
         self._reclaim_enabled = bool(self.watchdog_config.get("port_reclaim_enabled", True))
         self._reclaim_force = bool(self.watchdog_config.get("port_reclaim_force", False))
@@ -963,7 +965,19 @@ class ServiceWatchdog:
         self._acquire_instance_lock()
         atexit.register(self._release_instance_lock)
         if not self._terminal_template:
-            print("[watchdog] No terminal emulator found; log windows will not be opened.")
+            self._emit_runtime_log("WARN", "No terminal emulator found; log windows will not be opened.")
+
+    def _emit_runtime_log(self, level: str, message: Any) -> None:
+        lvl = str(level or "INFO").strip().upper() or "INFO"
+        text = str(message if message is not None else "")
+        sink = self._log_sink
+        if sink is not None:
+            try:
+                sink("watchdog", lvl, text)
+            except Exception:
+                pass
+        else:
+            print(f"[watchdog] {text}")
 
     def ensure_sources(self, service_config: Optional[Dict[str, bool]] = None) -> None:
         if not shutil.which("git"):
@@ -1196,7 +1210,7 @@ class ServiceWatchdog:
                     out[key] = bool(value)
             return out
         except Exception as exc:
-            print(f"[watchdog] Warning: failed to read desired state ({exc}); using safe defaults")
+            self._emit_runtime_log("WARN", f"failed to read desired state ({exc}); using safe defaults")
             return {}
 
     def _save_desired_state(self) -> None:
@@ -1206,7 +1220,7 @@ class ServiceWatchdog:
             tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
             tmp_path.replace(self._desired_state_path)
         except Exception as exc:
-            print(f"[watchdog] Warning: failed to write desired state ({exc})")
+            self._emit_runtime_log("WARN", f"failed to write desired state ({exc})")
             with contextlib.suppress(Exception):
                 if tmp_path.exists():
                     tmp_path.unlink()
@@ -1224,7 +1238,7 @@ class ServiceWatchdog:
             state.last_error = error or None
         if old != new_state:
             state.last_state_change_at = now
-            print(f"[watchdog] {state.definition.name}: {old or 'unknown'} -> {new_state} ({reason})")
+            self._emit_runtime_log("INFO", f"{state.definition.name}: {old or 'unknown'} -> {new_state} ({reason})")
     def _detect_terminal(self) -> Optional[List[str]]:
         for template in self.TERMINAL_TEMPLATES:
             if shutil.which(template[0]):
@@ -1375,7 +1389,7 @@ class ServiceWatchdog:
         if self._restart_pending:
             return
         self._restart_pending = True
-        print("[watchdog] Pull applied; restarting router…")
+        self._emit_runtime_log("INFO", "Pull applied; restarting router…")
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, [sys.executable, *sys.argv])
@@ -1403,10 +1417,10 @@ class ServiceWatchdog:
                 return
             if local == remote:
                 return
-            print(f"[watchdog] Updates detected for {state.definition.name}; pulling…")
+            self._emit_runtime_log("INFO", f"Updates detected for {state.definition.name}; pulling…")
             self._run_git(state.workdir, ["pull", "--rebase", "--autostash"])
             if state.process and state.process.poll() is None:
-                print(f"[watchdog] Restarting {state.definition.name} after update")
+                self._emit_runtime_log("INFO", f"Restarting {state.definition.name} after update")
                 self._terminate_process(state)
             # The supervisor loop will restart it; if not running, start a fresh loop.
             if not state.supervisor or not state.supervisor.is_alive():
@@ -1444,7 +1458,7 @@ class ServiceWatchdog:
                     blocker = self._core_repo_blocker(repo_dir)
                     if blocker:
                         if blocker != self._core_repo_block_reason:
-                            print(f"[watchdog] Skipping core repo pull: {blocker}")
+                            self._emit_runtime_log("WARN", f"Skipping core repo pull: {blocker}")
                         self._core_repo_block_reason = blocker
                         self._global_stop.wait(interval)
                         continue
@@ -1471,11 +1485,11 @@ class ServiceWatchdog:
                                 self._restore_repo(repo_dir, backup)
                             detail = (exc.stderr or exc.output or "").strip()
                             msg = detail if detail else str(exc)
-                            print(f"[watchdog] core repo pull failed: {msg}")
+                            self._emit_runtime_log("ERR", f"core repo pull failed: {msg}")
                         except Exception as exc:
                             if backup:
                                 self._restore_repo(repo_dir, backup)
-                            print(f"[watchdog] core repo pull failed: {exc}")
+                            self._emit_runtime_log("ERR", f"core repo pull failed: {exc}")
                 else:
                     # Not a git repo; skip
                     pass
@@ -2064,15 +2078,18 @@ class ServiceWatchdog:
                 reclaim_targets.extend(foreign)
             reclaim_targets = sorted(set(reclaim_targets))
             policy = "force" if reclaim_force else "owned-only"
-            print(
-                f"[watchdog] Port reclaim decision svc={state.definition.name if state else 'unknown'} "
-                f"port={port} policy={policy} observed={observed} owned={owned} foreign={foreign} "
-                f"targets={reclaim_targets}"
+            self._emit_runtime_log(
+                "INFO",
+                (
+                    f"Port reclaim decision svc={state.definition.name if state else 'unknown'} "
+                    f"port={port} policy={policy} observed={observed} owned={owned} foreign={foreign} "
+                    f"targets={reclaim_targets}"
+                ),
             )
             for pid in reclaim_targets:
                 ok = self._terminate_pid_for_reclaim(pid)
                 result = "ok" if ok else "failed"
-                print(f"[watchdog] Port reclaim result port={port} pid={pid} result={result}")
+                self._emit_runtime_log("INFO", f"Port reclaim result port={port} pid={pid} result={result}")
 
             remaining = [pid for pid in self._find_pids_on_port(port) if pid != os.getpid()]
             if remaining:
@@ -2243,6 +2260,23 @@ if not LOGGER.handlers:
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     LOGGER.addHandler(file_handler)
 LOGGER.setLevel(logging.INFO)
+
+
+class UILogForwardHandler(logging.Handler):
+    """Forward router logger lines to an in-memory UI sink."""
+
+    def __init__(self, sink: Callable[[str, str, Any], None]):
+        super().__init__(level=logging.INFO)
+        self._sink = sink
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            level = record.levelname or "INFO"
+            self._sink("router", level, msg)
+        except Exception:
+            pass
 
 
 def _json_clone(payload: Any) -> Any:
@@ -2836,7 +2870,7 @@ def load_config() -> dict:
         default_cfg = _default_config()
         CONFIG_PATH.write_text(json.dumps(default_cfg, indent=2))
         created_default = True
-        print(f"→ wrote default config {CONFIG_PATH}")
+        LOGGER.info("Wrote default config %s", CONFIG_PATH)
 
     try:
         raw_cfg = json.loads(CONFIG_PATH.read_text())
@@ -3289,6 +3323,18 @@ class EnhancedUI:
     """Enhanced nested menu interface with Config, Statistics, Address Book, Ingress, and Egress views."""
 
     MENU_ITEMS = ["Config", "Statistics", "Address Book", "Ingress", "Egress", "Debug"]
+    VIEW_BY_MENU_ITEM: Dict[str, str] = {
+        "Config": "config",
+        "Statistics": "stats",
+        "Address Book": "addressbook",
+        "Ingress": "ingress",
+        "Egress": "egress",
+        "Debug": "debug",
+    }
+    BASE_VIEW = "BASE_VIEW"
+    OVERLAY_MENU = "OVERLAY_MENU"
+    OVERLAY_HELP = "OVERLAY_HELP"
+    OVERLAY_CONFIRM = "OVERLAY_CONFIRM"
 
     def __init__(self, enabled: bool, config_path: Path):
         self.enabled = enabled and curses is not None and sys.stdout.isatty()
@@ -3301,7 +3347,9 @@ class EnhancedUI:
         self.action_handler: Optional[Callable[[dict], None]] = None
 
         # Menu state
-        self.current_view = "main"  # main, config, stats, addressbook, ingress, egress
+        self.ui_state: str = self.BASE_VIEW
+        self.base_view: str = "main"  # main, config, stats, addressbook, ingress, egress, debug
+        self.current_view = "main"  # compatibility mirror for existing rendering code paths
         self.main_menu_index = 0
         self.scroll_offset = 0
         self.selected_service = None
@@ -3309,12 +3357,28 @@ class EnhancedUI:
         self.show_qr = False
         self.qr_data = ""
         self.qr_label = ""
+        self.last_content_dims: Tuple[int, int] = (0, 0)
+        self.overlay_menu_stack: List[Dict[str, Any]] = []
+        self.overlay_help_return_state: str = self.BASE_VIEW
+        self.confirm_overlay: Dict[str, Any] = {
+            "title": "Confirm",
+            "message": "",
+            "accept_label": "Yes",
+            "cancel_label": "No",
+            "accept_command": "app.quit",
+            "accept_payload": {},
+            "selected": 1,
+        }
 
         # Activity tracking
         self.activity: Deque[Tuple[str, str, str, str]] = deque(maxlen=500)
         self.flow_logs: Deque[Dict[str, str]] = deque(maxlen=800)
         self.debug_tab_index: int = 0
         self.debug_scroll_offsets: Dict[str, int] = {}
+        self.runtime_logs: Deque[Dict[str, str]] = deque(maxlen=2000)
+        self.runtime_log_lock = threading.Lock()
+        self.runtime_log_scroll: int = 0
+        self.runtime_log_visible_rows: int = 0
 
         # Stats tracker
         self.stats = StatsTracker()
@@ -3345,6 +3409,46 @@ class EnhancedUI:
             "sync_http_state": "",
             "sync_nats_state": "",
         }
+        self.border_ascii_mode = self._env_flag("HYDRA_UI_ASCII_BORDERS", False)
+        # Allow explicit fallback for terminals where halftone border glyphs render poorly.
+        self.border_halftone_enabled = self._env_flag("HYDRA_UI_BORDER_HALFTONE", True)
+        if self.border_ascii_mode:
+            self.border_symbols: Dict[str, str] = {
+                "h": "=",
+                "v": "|",
+                "tl": "+",
+                "tr": "+",
+                "bl": "+",
+                "br": "+",
+                "t_down": "+",
+                "t_up": "+",
+                "l_right": "+",
+                "r_left": "+",
+                "cross": "+",
+            }
+            self.border_halftone_h: Tuple[str, ...] = ("#", "=", "-", ".", " ")
+            self.border_halftone_v: Tuple[str, ...] = ("#", "|", ":", ".", " ")
+        else:
+            self.border_symbols = {
+                "h": "━",
+                "v": "┃",
+                "tl": "┏",
+                "tr": "┓",
+                "bl": "┗",
+                "br": "┛",
+                "t_down": "┳",
+                "t_up": "┻",
+                "l_right": "┣",
+                "r_left": "┫",
+                "cross": "╋",
+            }
+            self.border_halftone_h = ("━", "╍", "─", "╌", "·")
+            self.border_halftone_v = ("┃", "╏", "│", "╎", "·")
+        self.layout_min_width = self._env_int("HYDRA_UI_MIN_WIDTH", 88, minimum=64, maximum=240)
+        self.layout_min_height = self._env_int("HYDRA_UI_MIN_HEIGHT", 24, minimum=16, maximum=120)
+        self.status_strip_rows = self._env_int("HYDRA_UI_STATUS_ROWS", 1, minimum=0, maximum=3)
+        self.log_dock_rows = self._env_int("HYDRA_UI_LOG_DOCK_ROWS", 7, minimum=0, maximum=14)
+        self._init_keymaps()
 
     def _load_service_config(self):
         """Load service enabled/disabled state from config."""
@@ -3506,6 +3610,50 @@ class EnhancedUI:
             "sync_nats_state": str(src.get("sync_nats_state") or "").strip().lower(),
         }
 
+    def append_runtime_log(self, source: str, level: str, message: Any):
+        ts = time.strftime("%H:%M:%S")
+        src = str(source or "runtime").strip() or "runtime"
+        lvl = str(level or "INFO").strip().upper()[:8] or "INFO"
+        text = str(message if message is not None else "")
+        lines = text.splitlines() or [""]
+        with self.runtime_log_lock:
+            prior_len = len(self.runtime_logs)
+            for line in lines:
+                self.runtime_logs.append(
+                    {
+                        "ts": ts,
+                        "source": src,
+                        "level": lvl,
+                        "message": line,
+                    }
+                )
+            added = len(self.runtime_logs) - prior_len
+            if added <= 0:
+                return
+            if self.runtime_log_scroll > 0:
+                max_scroll = self._runtime_log_max_scroll_unlocked()
+                self.runtime_log_scroll = min(max_scroll, self.runtime_log_scroll + added)
+
+    def _runtime_log_snapshot(self) -> List[Dict[str, str]]:
+        with self.runtime_log_lock:
+            return list(self.runtime_logs)
+
+    def _runtime_log_max_scroll_unlocked(self) -> int:
+        visible = max(1, int(self.runtime_log_visible_rows or 1))
+        return max(0, len(self.runtime_logs) - visible)
+
+    def _runtime_log_max_scroll(self) -> int:
+        with self.runtime_log_lock:
+            return self._runtime_log_max_scroll_unlocked()
+
+    def _scroll_runtime_logs(self, delta: int):
+        if delta == 0:
+            return
+        with self.runtime_log_lock:
+            max_scroll = self._runtime_log_max_scroll_unlocked()
+            next_scroll = self.runtime_log_scroll + int(delta)
+            self.runtime_log_scroll = max(0, min(max_scroll, next_scroll))
+
     def bump(self, node_id: str, kind: str, msg: str, nkn_addr: str = "", bytes_sent: int = 0,
              service: Optional[str] = None, bytes_in: int = 0, duration_s: float = 0.0):
         target = self.nodes.get(node_id)
@@ -3642,40 +3790,95 @@ class EnhancedUI:
                 pass
 
             stdscr.erase()
-            h, w = stdscr.getmaxyx()
-            if w < 78:
-                hydra_w = max(20, w // 2)
-            else:
-                hydra_w = max(30, int(w * 0.42))
-            hydra_w = min(hydra_w, max(20, w - 26))  # keep content pane usable
-            hydra_win = stdscr.derwin(h, hydra_w, 0, 0)
-            content_win = stdscr.derwin(h, w - hydra_w, 0, hydra_w)
-            content_h, content_w = content_win.getmaxyx()
+            screen_h, screen_w = stdscr.getmaxyx()
+            layout = self._compute_layout(screen_h, screen_w)
 
+            if not layout.get("ok"):
+                self._render_layout_size_error(stdscr, layout, screen_h, screen_w)
+                stdscr.noutrefresh()
+                curses.doupdate()
+                try:
+                    ch = stdscr.getch()
+                    self._handle_input(ch)
+                except Exception:
+                    pass
+                continue
+
+            hydra_rect = layout["hydra_panel"]
+            content_rect = layout["content_panel"]
+            log_rect = layout["log_dock"]
+            status_rect = layout["status_strip"]
+
+            self._render_frame_chrome(stdscr, int(layout.get("divider_x", 0)), screen_h, screen_w)
+
+            try:
+                hydra_win = stdscr.derwin(
+                    int(hydra_rect["h"]),
+                    int(hydra_rect["w"]),
+                    int(hydra_rect["y"]),
+                    int(hydra_rect["x"]),
+                )
+                content_win = stdscr.derwin(
+                    int(content_rect["h"]),
+                    int(content_rect["w"]),
+                    int(content_rect["y"]),
+                    int(content_rect["x"]),
+                )
+            except curses.error:
+                self._render_layout_size_error(stdscr, layout, screen_h, screen_w)
+                stdscr.noutrefresh()
+                curses.doupdate()
+                try:
+                    ch = stdscr.getch()
+                    self._handle_input(ch)
+                except Exception:
+                    pass
+                continue
+
+            content_h, content_w = content_win.getmaxyx()
+            hydra_h, hydra_w = hydra_win.getmaxyx()
+            self.last_content_dims = (int(content_h), int(content_w))
             hydra_win.erase()
             content_win.erase()
 
-            self._render_hydra_panel(hydra_win, h, hydra_w)
-            self._render_frame_chrome(stdscr, hydra_w, h, w)
+            self._render_hydra_panel(hydra_win, hydra_h, hydra_w)
+            self._render_base_view(content_win, content_h, content_w)
 
-            if self.current_view == "main":
-                self._render_main_menu(content_win, content_h, content_w)
-            elif self.current_view == "config":
-                self._render_config_view(content_win, content_h, content_w)
-            elif self.current_view == "stats":
-                self._render_stats_view(content_win, content_h, content_w)
-            elif self.current_view == "addressbook":
-                self._render_address_book_view(content_win, content_h, content_w)
-            elif self.current_view == "ingress":
-                self._render_ingress_view(content_win, content_h, content_w)
-            elif self.current_view == "egress":
-                self._render_egress_view(content_win, content_h, content_w)
-            elif self.current_view == "debug":
-                self._render_debug_view(content_win, content_h, content_w)
-
+            stdscr.noutrefresh()
             hydra_win.noutrefresh()
             content_win.noutrefresh()
-            stdscr.noutrefresh()
+
+            if int(log_rect.get("h", 0)) > 0:
+                try:
+                    log_win = stdscr.derwin(
+                        int(log_rect["h"]),
+                        int(log_rect["w"]),
+                        int(log_rect["y"]),
+                        int(log_rect["x"]),
+                    )
+                    log_h, log_w = log_win.getmaxyx()
+                    self._render_log_dock_placeholder(log_win, log_h, log_w)
+                    log_win.noutrefresh()
+                except curses.error:
+                    pass
+
+            if int(status_rect.get("h", 0)) > 0:
+                try:
+                    status_win = stdscr.derwin(
+                        int(status_rect["h"]),
+                        int(status_rect["w"]),
+                        int(status_rect["y"]),
+                        int(status_rect["x"]),
+                    )
+                    status_h, status_w = status_win.getmaxyx()
+                    self._render_status_strip(status_win, status_h, status_w, layout)
+                    status_win.noutrefresh()
+                except curses.error:
+                    pass
+
+            if self.ui_state != self.BASE_VIEW:
+                self._render_overlay(stdscr, screen_h, screen_w)
+
             curses.doupdate()
 
             # Handle input
@@ -3684,6 +3887,190 @@ class EnhancedUI:
                 self._handle_input(ch)
             except Exception:
                 pass
+
+    def _compute_layout(self, screen_h: int, screen_w: int) -> Dict[str, Any]:
+        min_w = int(self.layout_min_width or 88)
+        min_h = int(self.layout_min_height or 24)
+        payload: Dict[str, Any] = {
+            "ok": False,
+            "minimum": {"width": min_w, "height": min_h},
+            "actual": {"width": int(screen_w), "height": int(screen_h)},
+            "error": "",
+        }
+        if screen_w < min_w or screen_h < min_h:
+            payload["error"] = "terminal_too_small"
+            return payload
+
+        inner_x = 1
+        inner_y = 1
+        inner_w = max(0, int(screen_w) - 2)
+        inner_h = max(0, int(screen_h) - 2)
+        if inner_w < 40 or inner_h < 8:
+            payload["error"] = "insufficient_inner_space"
+            return payload
+
+        status_h = int(max(0, self.status_strip_rows))
+        if status_h > max(0, inner_h - 7):
+            status_h = max(0, inner_h - 7)
+
+        max_log = max(0, inner_h - status_h - 8)
+        log_h = int(max(0, self.log_dock_rows))
+        log_h = min(log_h, max_log)
+        body_h = inner_h - status_h - log_h
+        if body_h < 8:
+            payload["error"] = "insufficient_body_height"
+            return payload
+
+        if inner_w < 78:
+            hydra_w = max(20, inner_w // 2)
+        else:
+            hydra_w = max(30, int(inner_w * 0.42))
+        hydra_w = min(hydra_w, max(20, inner_w - 26))
+        if inner_w - hydra_w < 24:
+            hydra_w = max(16, inner_w - 24)
+        content_w = inner_w - hydra_w
+        if hydra_w < 14 or content_w < 20:
+            payload["error"] = "insufficient_panel_width"
+            return payload
+
+        body_y = inner_y
+        hydra_rect = {"y": body_y, "x": inner_x, "h": body_h, "w": hydra_w}
+        content_rect = {"y": body_y, "x": inner_x + hydra_w, "h": body_h, "w": content_w}
+        log_rect = {"y": body_y + body_h, "x": inner_x, "h": log_h, "w": inner_w}
+        status_rect = {"y": body_y + body_h + log_h, "x": inner_x, "h": status_h, "w": inner_w}
+
+        payload.update(
+            {
+                "ok": True,
+                "frame": {"y": 0, "x": 0, "h": int(screen_h), "w": int(screen_w)},
+                "hydra_panel": hydra_rect,
+                "content_panel": content_rect,
+                "log_dock": log_rect,
+                "status_strip": status_rect,
+                "divider_x": int(inner_x + hydra_w),
+            }
+        )
+        return payload
+
+    def _render_layout_size_error(self, stdscr, layout: Dict[str, Any], screen_h: int, screen_w: int):
+        stdscr.erase()
+        self._draw_panel_box(stdscr, 0, 0, screen_h, screen_w, attr=curses.color_pair(3) | curses.A_DIM)
+        title = " HYDRA UI SIZE ERROR "
+        title_x = max(2, (screen_w - len(title)) // 2)
+        self._safe_addstr(stdscr, 0, title_x, title, curses.color_pair(4) | curses.A_BOLD)
+        minimum = layout.get("minimum") if isinstance(layout.get("minimum"), dict) else {}
+        min_w = int(minimum.get("width") or self.layout_min_width or 88)
+        min_h = int(minimum.get("height") or self.layout_min_height or 24)
+        lines = [
+            "Terminal does not meet minimum layout requirements.",
+            f"Required: {min_w}x{min_h}  •  Current: {int(screen_w)}x{int(screen_h)}",
+            "Resize terminal or run with --no-ui for headless mode.",
+        ]
+        start_y = max(2, (screen_h // 2) - (len(lines) // 2))
+        for idx, line in enumerate(lines):
+            row = start_y + idx
+            if row >= screen_h - 1:
+                break
+            col = max(2, (screen_w - len(line)) // 2)
+            self._safe_addstr(stdscr, row, col, line, curses.color_pair(3) | curses.A_DIM)
+        hint = "Q: quit  •  ESC: quit  •  resize and continue"
+        self._safe_addstr(stdscr, max(1, screen_h - 2), max(2, (screen_w - len(hint)) // 2), hint, curses.color_pair(3) | curses.A_DIM)
+
+    def _runtime_log_attr(self, level: str):
+        lvl = str(level or "").strip().upper()
+        if lvl in {"ERR", "ERROR", "CRITICAL"}:
+            return curses.color_pair(4) | curses.A_BOLD
+        if lvl in {"WARN", "WARNING"}:
+            return curses.color_pair(4) | curses.A_DIM
+        if lvl in {"INFO", "NOTICE"}:
+            return curses.color_pair(2)
+        return curses.color_pair(3) | curses.A_DIM
+
+    def _render_log_dock_placeholder(self, stdscr, h: int, w: int):
+        stdscr.erase()
+        if h < 3:
+            self._safe_addstr(stdscr, 0, 0, "LOG", curses.color_pair(3) | curses.A_DIM)
+            return
+        self._draw_box(stdscr, 0, 0, h, w)
+
+        with self.runtime_log_lock:
+            logs = list(self.runtime_logs)
+            self.runtime_log_visible_rows = max(1, h - 2)
+            max_scroll = self._runtime_log_max_scroll_unlocked()
+            if self.runtime_log_scroll > max_scroll:
+                self.runtime_log_scroll = max_scroll
+            scroll = self.runtime_log_scroll
+
+        title = "[RUNTIME LOGS]"
+        self._safe_addstr(stdscr, 0, max(2, (w - len(title)) // 2), title, curses.color_pair(5) | curses.A_BOLD)
+        inner_w = max(0, w - 4)
+        visible = max(1, h - 2)
+        if not logs:
+            empty = "No runtime log lines yet."
+            self._safe_addstr(stdscr, 1, 2, self._truncate_text(empty, inner_w), curses.color_pair(3) | curses.A_DIM)
+            hint = "PgUp/PgDn scroll • [ ] fine scroll"
+            self._safe_addstr(stdscr, h - 2, 2, self._truncate_text(hint, inner_w), curses.color_pair(3) | curses.A_DIM)
+            return
+
+        end_idx = max(0, len(logs) - scroll)
+        start_idx = max(0, end_idx - visible)
+        lines = logs[start_idx:end_idx]
+        for idx, entry in enumerate(lines):
+            row = 1 + idx
+            if row >= h - 1:
+                break
+            ts = entry.get("ts", "--:--:--")
+            source = self._truncate_text(entry.get("source", "runtime"), 10)
+            level = self._truncate_text(entry.get("level", "INFO"), 7)
+            msg = entry.get("message", "")
+            prefix = f"{ts} {source:<10} {level:<7} "
+            avail = max(0, inner_w - len(prefix))
+            line = prefix + self._truncate_text(msg, avail)
+            self._safe_addstr(stdscr, row, 2, self._truncate_text(line, inner_w), self._runtime_log_attr(level))
+
+        range_token = f"{start_idx + 1}-{end_idx}/{len(logs)}"
+        self._safe_addstr(stdscr, h - 2, max(2, w - len(range_token) - 2), range_token, curses.color_pair(3) | curses.A_DIM)
+
+    def _render_status_strip(self, stdscr, h: int, w: int, layout: Dict[str, Any]):
+        stdscr.erase()
+        if h <= 0 or w <= 2:
+            return
+        view = str(self.base_view or "main").upper()
+        service_total = len(self.services)
+        node_total = len(self.nodes)
+        state_label = self._ui_state_label()
+        hints = self._status_hints_for_state()
+        status = f"{state_label} | VIEW {view} | {service_total} svc / {node_total} nodes | {hints}"
+        self._safe_addstr(stdscr, 0, 0, status[: max(0, w - 1)], curses.color_pair(3) | curses.A_DIM)
+
+    def _ui_state_label(self) -> str:
+        if self.ui_state == self.OVERLAY_MENU:
+            return "STATE MENU"
+        if self.ui_state == self.OVERLAY_HELP:
+            return "STATE HELP"
+        if self.ui_state == self.OVERLAY_CONFIRM:
+            return "STATE CONFIRM"
+        return "STATE BASE"
+
+    def _status_hints_for_state(self) -> str:
+        if self.ui_state == self.OVERLAY_MENU:
+            return "j/k move • enter open • h/esc back"
+        if self.ui_state == self.OVERLAY_HELP:
+            return "esc/enter close • m menu"
+        if self.ui_state == self.OVERLAY_CONFIRM:
+            return "h/l switch • enter confirm • esc cancel"
+        view = str(self.base_view or "main")
+        if view == "config":
+            return "j/k move • space toggle • s save • [ ] logs • PgUp/PgDn logs"
+        if view == "debug":
+            return "j/k scroll • h/l tabs • PgUp/PgDn logs • [ ] logs • g/G jump"
+        if view == "ingress":
+            return "j/k move • enter qr • PgUp/PgDn logs • [ ] logs • g/G jump"
+        if view == "addressbook":
+            return "j/k move • PgUp/PgDn logs • [ ] logs • g/G jump • m menu"
+        if view == "main":
+            return "j/k move • enter open • PgUp/PgDn logs • [ ] logs • ? help"
+        return "j/k move • enter select • PgUp/PgDn logs • [ ] logs • esc back"
 
     def _safe_addstr(self, stdscr, y, x, text, attr=curses.A_NORMAL):
         """Safely add string to stdscr, handling errors."""
@@ -3694,6 +4081,80 @@ class EnhancedUI:
                 if len(text) > max_len:
                     text = text[:max_len]
                 stdscr.addstr(y, x, text, attr)
+        except curses.error:
+            pass
+
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return bool(default)
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
+
+    @staticmethod
+    def _env_int(name: str, default: int = 0, minimum: int = 0, maximum: int = 1_000_000) -> int:
+        raw = os.environ.get(name)
+        try:
+            value = int(str(raw).strip()) if raw is not None else int(default)
+        except Exception:
+            value = int(default)
+        if value < minimum:
+            return int(minimum)
+        if value > maximum:
+            return int(maximum)
+        return int(value)
+
+    def _halftone_char_for_x(self, absolute_x: int, total_cols: int, axis: str = "h") -> str:
+        axis_key = "v" if str(axis or "").strip().lower().startswith("v") else "h"
+        fallback = self.border_symbols["v"] if axis_key == "v" else self.border_symbols["h"]
+        if not self.border_halftone_enabled:
+            return fallback
+        cols = max(2, int(total_cols or 0))
+        x = max(0, min(cols - 1, int(absolute_x or 0)))
+        ratio = float(x) / float(cols - 1)
+        ramp = self.border_halftone_v if axis_key == "v" else self.border_halftone_h
+        if not ramp:
+            return fallback
+        idx = int(round(ratio * float(len(ramp) - 1)))
+        idx = max(0, min(len(ramp) - 1, idx))
+        return str(ramp[idx] or fallback)
+
+    def _draw_panel_box(self, stdscr, y: int, x: int, h: int, w: int, attr=curses.A_DIM):
+        """Draw a unified thick border with left→right halftone density."""
+        if h < 2 or w < 2:
+            return
+        try:
+            begin_y, begin_x = stdscr.getbegyx()
+            _, total_cols = stdscr.getmaxyx()
+            if stdscr is not None and hasattr(curses, "COLS"):
+                total_cols = max(int(total_cols or 0), int(getattr(curses, "COLS", total_cols) or total_cols))
+            top_chars = [
+                self._halftone_char_for_x(begin_x + x + col, total_cols, axis="h")
+                for col in range(1, max(1, w - 1))
+            ]
+            top = "".join(top_chars[: max(0, w - 2)])
+            bot = top
+            left_char = self._halftone_char_for_x(begin_x + x, total_cols, axis="v")
+            right_char = self._halftone_char_for_x(begin_x + x + w - 1, total_cols, axis="v")
+
+            stdscr.addstr(y, x, self.border_symbols["tl"], attr)
+            if top:
+                stdscr.addstr(y, x + 1, top, attr)
+            stdscr.addstr(y, x + w - 1, self.border_symbols["tr"], attr)
+
+            stdscr.addstr(y + h - 1, x, self.border_symbols["bl"], attr)
+            if bot:
+                stdscr.addstr(y + h - 1, x + 1, bot, attr)
+            stdscr.addstr(y + h - 1, x + w - 1, self.border_symbols["br"], attr)
+
+            for row in range(y + 1, y + h - 1):
+                stdscr.addstr(row, x, left_char, attr)
+                stdscr.addstr(row, x + w - 1, right_char, attr)
         except curses.error:
             pass
 
@@ -3738,28 +4199,26 @@ class EnhancedUI:
             cur_x += len(draw_sep)
 
     def _draw_box(self, stdscr, y, x, h, w):
-        """Draw a box border."""
-        try:
-            stdscr.attron(curses.A_DIM)
-            stdscr.addstr(y, x, "╔" + "═" * (w - 2) + "╗")
-            stdscr.addstr(y + h - 1, x, "╚" + "═" * (w - 2) + "╝")
-            for row in range(y + 1, y + h - 1):
-                stdscr.addstr(row, x, "║")
-                stdscr.addstr(row, x + w - 1, "║")
-            stdscr.attroff(curses.A_DIM)
-        except curses.error:
-            pass
+        """Compatibility wrapper using the unified panel border renderer."""
+        self._draw_panel_box(stdscr, y, x, h, w, attr=curses.color_pair(3) | curses.A_DIM)
 
     def _render_frame_chrome(self, stdscr, divider_x: int, h: int, w: int):
-        """Brutalist chrome: heavy top/bottom bars and a vertical divider."""
+        """Draw global frame + divider using the shared thick/halftone border system."""
+        frame_attr = curses.color_pair(3) | curses.A_DIM
+        self._draw_panel_box(stdscr, 0, 0, h, w, attr=frame_attr)
+        if divider_x <= 0 or divider_x >= w - 1:
+            return
         try:
-            bar = "┏" + "━" * (w - 2) + "┓"
-            self._safe_addstr(stdscr, 0, 0, bar, curses.A_BOLD)
-            bottom = "┗" + "━" * (w - 2) + "┛"
-            self._safe_addstr(stdscr, h - 1, 0, bottom, curses.A_DIM)
+            begin_y, begin_x = stdscr.getbegyx()
+            _, total_cols = stdscr.getmaxyx()
+            if hasattr(curses, "COLS"):
+                total_cols = max(int(total_cols or 0), int(getattr(curses, "COLS", total_cols) or total_cols))
+            divider_char = self._halftone_char_for_x(begin_x + divider_x, total_cols, axis="v")
             for row in range(1, h - 1):
-                self._safe_addstr(stdscr, row, divider_x, "┃", curses.A_DIM)
-        except Exception:
+                stdscr.addstr(row, divider_x, divider_char, frame_attr)
+            stdscr.addstr(0, divider_x, self.border_symbols["t_down"], frame_attr)
+            stdscr.addstr(h - 1, divider_x, self.border_symbols["t_up"], frame_attr)
+        except curses.error:
             pass
 
     def _render_hydra_panel(self, stdscr, h: int, w: int):
@@ -3822,6 +4281,8 @@ class EnhancedUI:
         )
         self._render_sync_bus_line(stdscr, info_row + 7, 2, sync_http_state, sync_nats_state, max(0, w - 4))
 
+        metadata_end = info_row + 7
+        art_top = min(max(1, metadata_end + 2), max(1, h - 3))
         base_x = max(4, w // 2)
         base_y = h - 3
         self.hydra.base_x = base_x
@@ -3842,10 +4303,14 @@ class EnhancedUI:
         elif net_state == "hard_offline":
             activity_lvl = max(activity_lvl, 0.8)
 
+        draw_segments = max(2, min(self.hydra.stalk_segments, max(2, base_y - art_top + 1)))
+
         # Draw stalk with varied thickness
         stalk_color = base_color | (curses.A_BOLD if activity_lvl > 0.6 else curses.A_DIM)
-        for seg in range(self.hydra.stalk_segments):
+        for seg in range(draw_segments):
             y = base_y - seg
+            if y < art_top:
+                continue
             ch = "┃" if seg % 2 == 0 else "│"
             self._safe_addstr(stdscr, y, base_x, ch, stalk_color)
             if activity_lvl > 0.5 and seg % 3 == 0:
@@ -3856,6 +4321,8 @@ class EnhancedUI:
         root_count = min(6, 2 + int(activity_lvl * 6))
         for r in range(root_count):
             ry = base_y - (r * 2 + 1)
+            if ry < art_top:
+                continue
             rx = base_x - (2 + (r % 3))
             self._safe_addstr(stdscr, ry, rx, "╱", base_color)
             self._safe_addstr(stdscr, ry + 1, rx + 1, "╱", base_color)
@@ -3869,6 +4336,8 @@ class EnhancedUI:
             offset = int(math.sin(time.time() * 0.8 + idx) * sway)
             polyp.x = base_x + offset
             polyp.y = base_y - (idx * 4 + 2)
+            if polyp.y < art_top:
+                continue
             polyp.update(max(activity_lvl, polyp.activity))
             # Draw head
             head_char = "◉" if polyp.activity > 0.4 else "○"
@@ -3876,202 +4345,514 @@ class EnhancedUI:
             self._safe_addstr(stdscr, polyp.y, polyp.x, head_char, head_attr)
             # Draw tentacles and buds
             for tx, ty in polyp.get_tentacle_positions():
+                if ty < art_top:
+                    continue
                 char = "~" if (tx + ty) % 3 else "⌇"
                 self._safe_addstr(stdscr, ty, tx, char, base_color)
             bud_char = "✶" if polyp.activity > 0.6 else "·"
             bud_color = curses.color_pair(4) if net_state == "hard_offline" else curses.color_pair(7)
-            self._safe_addstr(stdscr, polyp.y - 1, polyp.x + 1, bud_char, bud_color)
+            if polyp.y - 1 >= art_top:
+                self._safe_addstr(stdscr, polyp.y - 1, polyp.x + 1, bud_char, bud_color)
 
         # Label
         label = "[ hydra ]"
         self._safe_addstr(stdscr, max(1, h - 2), max(1, w - len(label) - 2), label, curses.color_pair(7) | curses.A_BOLD)
 
+    def _render_base_view(self, stdscr, h: int, w: int):
+        view = str(self.base_view or "main")
+        if view == "main":
+            self._render_main_menu(stdscr, h, w)
+        elif view == "config":
+            self._render_config_view(stdscr, h, w)
+        elif view == "stats":
+            self._render_stats_view(stdscr, h, w)
+        elif view == "addressbook":
+            self._render_address_book_view(stdscr, h, w)
+        elif view == "ingress":
+            self._render_ingress_view(stdscr, h, w)
+        elif view == "egress":
+            self._render_egress_view(stdscr, h, w)
+        elif view == "debug":
+            self._render_debug_view(stdscr, h, w)
+        else:
+            self._render_main_menu(stdscr, h, w)
+
+    def _render_overlay(self, stdscr, screen_h: int, screen_w: int):
+        if self.ui_state == self.OVERLAY_MENU:
+            self._render_overlay_menu(stdscr, screen_h, screen_w)
+        elif self.ui_state == self.OVERLAY_HELP:
+            self._render_overlay_help(stdscr, screen_h, screen_w)
+        elif self.ui_state == self.OVERLAY_CONFIRM:
+            self._render_overlay_confirm(stdscr, screen_h, screen_w)
+
+    def _overlay_panel_geometry(self, screen_h: int, screen_w: int, width: int, height: int) -> Tuple[int, int, int, int]:
+        h = max(6, min(int(height), max(6, screen_h - 4)))
+        w = max(24, min(int(width), max(24, screen_w - 4)))
+        y = max(1, (screen_h - h) // 2)
+        x = max(1, (screen_w - w) // 2)
+        return y, x, h, w
+
+    def _render_overlay_menu(self, stdscr, screen_h: int, screen_w: int):
+        current = self._menu_current()
+        if not current:
+            return
+        items = current.get("items") if isinstance(current.get("items"), list) else []
+        height = max(9, min(screen_h - 4, len(items) + 6))
+        width = min(max(44, max((len(str(item.get("label", ""))) for item in items), default=20) + 14), max(44, screen_w - 4))
+        y, x, h, w = self._overlay_panel_geometry(screen_h, screen_w, width, height)
+        self._draw_panel_box(stdscr, y, x, h, w, attr=curses.color_pair(4) | curses.A_BOLD)
+        title = str(current.get("title") or "MENU")
+        header = f"[ {title.upper()} ]"
+        self._safe_addstr(stdscr, y, x + max(2, (w - len(header)) // 2), header, curses.color_pair(4) | curses.A_BOLD)
+        inner_rows = max(1, h - 4)
+        idx = int(current.get("index") or 0)
+        scroll = int(current.get("scroll") or 0)
+        if idx < scroll:
+            scroll = idx
+        if idx >= scroll + inner_rows:
+            scroll = max(0, idx - inner_rows + 1)
+        current["scroll"] = scroll
+        end = min(len(items), scroll + inner_rows)
+        row = y + 2
+        for pos in range(scroll, end):
+            item = items[pos]
+            label = str(item.get("label") or "")
+            suffix = " ›" if item.get("submenu") else ""
+            line = f"{label}{suffix}"
+            selected = pos == idx
+            marker = "▶" if selected else " "
+            attr = curses.color_pair(4) | curses.A_BOLD if selected else curses.color_pair(3) | curses.A_DIM
+            self._safe_addstr(stdscr, row, x + 2, f"{marker} {line}"[: max(0, w - 4)], attr)
+            row += 1
+        hint = "j/k move  •  enter/l open  •  h/esc back"
+        self._safe_addstr(stdscr, y + h - 2, x + 2, hint[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
+
+    def _render_overlay_help(self, stdscr, screen_h: int, screen_w: int):
+        lines = [
+            "Hydra Keymap",
+            "Arrow keys and vim aliases are equivalent in all navigable views.",
+            "j/k or ↑/↓: move selection    h/l or ←/→: change tabs/menus",
+            "g/G or Home/End: jump top/bottom    PgUp/PgDn: page scroll",
+            "Enter: activate/select    Space: toggle config item",
+            "m: open menu overlay      ?: open help      esc: close overlay/back",
+            "s: save config (Config view)",
+        ]
+        height = min(max(10, len(lines) + 4), max(10, screen_h - 4))
+        width = min(max(70, max(len(line) for line in lines) + 6), max(40, screen_w - 4))
+        y, x, h, w = self._overlay_panel_geometry(screen_h, screen_w, width, height)
+        self._draw_panel_box(stdscr, y, x, h, w, attr=curses.color_pair(4) | curses.A_BOLD)
+        title = "[ HELP ]"
+        self._safe_addstr(stdscr, y, x + max(2, (w - len(title)) // 2), title, curses.color_pair(4) | curses.A_BOLD)
+        for i, line in enumerate(lines):
+            row = y + 2 + i
+            if row >= y + h - 1:
+                break
+            attr = curses.color_pair(5) | curses.A_BOLD if i == 0 else curses.color_pair(3) | curses.A_DIM
+            self._safe_addstr(stdscr, row, x + 2, line[: max(0, w - 4)], attr)
+        hint = "ESC, ENTER, or q to close"
+        self._safe_addstr(stdscr, y + h - 2, x + 2, hint[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
+
+    def _render_overlay_confirm(self, stdscr, screen_h: int, screen_w: int):
+        title = str(self.confirm_overlay.get("title") or "Confirm")
+        message = str(self.confirm_overlay.get("message") or "")
+        accept = str(self.confirm_overlay.get("accept_label") or "Yes")
+        cancel = str(self.confirm_overlay.get("cancel_label") or "No")
+        selected = int(self.confirm_overlay.get("selected") or 1)
+        lines = [title, message]
+        width = min(max(48, max(len(line) for line in lines) + 10), max(36, screen_w - 4))
+        y, x, h, w = self._overlay_panel_geometry(screen_h, screen_w, width, 10)
+        self._draw_panel_box(stdscr, y, x, h, w, attr=curses.color_pair(4) | curses.A_BOLD)
+        self._safe_addstr(stdscr, y, x + max(2, (w - len(title) - 4) // 2), f"[ {title.upper()} ]", curses.color_pair(4) | curses.A_BOLD)
+        self._safe_addstr(stdscr, y + 3, x + 2, message[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
+        left_token = f"[ {accept} ]"
+        right_token = f"[ {cancel} ]"
+        left_x = x + max(4, (w // 2) - len(left_token) - 2)
+        right_x = x + min(w - len(right_token) - 4, (w // 2) + 2)
+        left_attr = curses.color_pair(4) | curses.A_BOLD if selected == 0 else curses.color_pair(3) | curses.A_DIM
+        right_attr = curses.color_pair(4) | curses.A_BOLD if selected == 1 else curses.color_pair(3) | curses.A_DIM
+        self._safe_addstr(stdscr, y + 5, left_x, left_token, left_attr)
+        self._safe_addstr(stdscr, y + 5, right_x, right_token, right_attr)
+        hint = "h/l switch  •  enter confirm  •  esc cancel"
+        self._safe_addstr(stdscr, y + h - 2, x + 2, hint[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
+
+    def _truncate_text(self, value: Any, width: int) -> str:
+        text = str(value if value is not None else "")
+        limit = max(0, int(width or 0))
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        if limit <= 1:
+            return text[:limit]
+        return text[: limit - 1] + "…"
+
+    def _truncate_middle(self, value: Any, width: int) -> str:
+        text = str(value if value is not None else "")
+        limit = max(0, int(width or 0))
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        if limit < 5:
+            return self._truncate_text(text, limit)
+        left = max(1, (limit - 1) // 2)
+        right = max(1, limit - left - 1)
+        return f"{text[:left]}…{text[-right:]}"
+
+    def _hline(self, stdscr, y: int, x: int, width: int, attr=curses.A_DIM):
+        run = max(0, int(width or 0))
+        if run <= 0:
+            return
+        self._safe_addstr(stdscr, y, x, "─" * run, attr)
+
+    def _render_section_shell(
+        self,
+        stdscr,
+        y: int,
+        x: int,
+        h: int,
+        w: int,
+        title: str,
+        subtitle: str = "",
+        footer: str = "",
+    ) -> Dict[str, int]:
+        self._draw_box(stdscr, y, x, h, w)
+        token = f"[ {str(title or '').upper()} ]"
+        self._safe_addstr(stdscr, y, x + max(2, (w - len(token)) // 2), token, curses.color_pair(5) | curses.A_BOLD)
+
+        row = y + 1
+        inner_x = x + 2
+        inner_w = max(0, w - 4)
+        if subtitle:
+            self._safe_addstr(stdscr, row, inner_x, self._truncate_text(subtitle, inner_w), curses.color_pair(3) | curses.A_DIM)
+            row += 1
+        if row < y + h - 1:
+            self._hline(stdscr, row, x + 1, max(0, w - 2), curses.color_pair(3) | curses.A_DIM)
+            row += 1
+
+        content_y = row
+        footer_y = y + h - 2
+        content_bottom = footer_y
+        if footer and footer_y > content_y:
+            self._hline(stdscr, footer_y - 1, x + 1, max(0, w - 2), curses.color_pair(3) | curses.A_DIM)
+            self._safe_addstr(
+                stdscr,
+                footer_y,
+                inner_x,
+                self._truncate_text(footer, inner_w),
+                curses.color_pair(3) | curses.A_DIM,
+            )
+            content_bottom = footer_y - 2
+
+        return {
+            "y": int(content_y),
+            "x": int(inner_x),
+            "h": int(max(0, content_bottom - content_y + 1)),
+            "w": int(inner_w),
+            "footer_y": int(footer_y),
+        }
+
+    def _row_attr(self, selected: bool = False, muted: bool = False, alert: bool = False):
+        if selected:
+            return curses.color_pair(4) | curses.A_BOLD
+        if alert:
+            return curses.color_pair(4) | curses.A_BOLD
+        if muted:
+            return curses.color_pair(3) | curses.A_DIM
+        return curses.color_pair(2)
+
+    def _service_endpoint_for(self, svc: str) -> str:
+        name = str(svc or "").strip()
+        for svc_key, target_info in SERVICE_TARGETS.items():
+            aliases = target_info.get("aliases", [])
+            if name == svc_key or name in aliases:
+                return str(target_info.get("endpoint") or "—")
+        return "—"
+
     def _render_main_menu(self, stdscr, h, w):
-        """Render the main menu."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "[HYDRA ROUTER]"
-        self._safe_addstr(stdscr, 0, 2, title, curses.color_pair(1) | curses.A_BOLD)
-        help_text = "↑/↓ choose • Enter select • Q quit"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
+        """Render main view as navigation + preview sections."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Hydra Router",
+            subtitle="Navigation and service-market preview",
+            footer=f"{len(self.services)} services • {len(self.nodes)} nodes • enter to open view",
+        )
+        if root["h"] <= 2 or root["w"] <= 10:
+            return
 
-        split = (len(self.MENU_ITEMS) + 1) // 2
-        top_items = self.MENU_ITEMS[:split]
-        bottom_items = self.MENU_ITEMS[split:]
+        nav_w = max(28, min(root["w"] - 24, int(root["w"] * 0.42)))
+        nav_w = min(nav_w, max(20, root["w"] - 20))
+        preview_w = max(18, root["w"] - nav_w - 1)
 
-        row = 3
-        for i, item in enumerate(top_items):
-            selected = (i == self.main_menu_index)
-            bullet = "►" if selected else " "
-            attr = curses.color_pair(6) | curses.A_BOLD if selected else curses.A_NORMAL
-            pad = "━" if selected else "─"
-            line = f"{bullet} [{item.upper():<12}] {pad*max(4, w - 24)}"
-            self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
-            row += 2
-        top_end_row = row
+        nav = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"],
+            root["h"],
+            nav_w,
+            "Navigation",
+            subtitle="j/k move • enter open • m menu",
+        )
+        preview = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"] + nav_w + 1,
+            root["h"],
+            preview_w,
+            "Selection Preview",
+            subtitle="Current selection details",
+        )
 
-        row = h - (len(bottom_items) * 2 + 2)
-        for j, item in enumerate(bottom_items):
-            idx = split + j
-            selected = (idx == self.main_menu_index)
-            bullet = "►" if selected else " "
-            attr = curses.color_pair(6) | curses.A_BOLD if selected else curses.A_DIM
-            pad = "▏" if selected else ":"
-            line = f"{bullet} {item:<14} {pad*4}"
-            self._safe_addstr(stdscr, row, w - len(line) - 3, line[: max(0, w - 6)], attr)
-            row += 2
+        for i, item in enumerate(self.MENU_ITEMS):
+            row = nav["y"] + i
+            if row >= nav["y"] + nav["h"]:
+                break
+            selected = i == self.main_menu_index
+            marker = "▶" if selected else " "
+            line = f"{marker} {item}"
+            self._safe_addstr(stdscr, row, nav["x"], self._truncate_text(line, nav["w"]), self._row_attr(selected=selected))
 
+        selected_item = self.MENU_ITEMS[self.main_menu_index] if self.MENU_ITEMS else "Main"
+        descriptions = {
+            "Config": "Toggle service exposure and port isolation policy.",
+            "Statistics": "24h request density by service.",
+            "Address Book": "Known peers and per-service usage profile.",
+            "Ingress": "Service addresses and shareable QR targets.",
+            "Egress": "Bandwidth and top consumer ranking.",
+            "Debug": "Directional flow logs and blocked traces.",
+        }
         market_summary = self.marketplace_summary if isinstance(self.marketplace_summary, dict) else {}
         provider = self.marketplace_provider_label or "Hydra Router"
-        provider_short = provider if len(provider) <= max(12, w - 24) else provider[: max(11, w - 27)] + "..."
         service_count = int(market_summary.get("service_count") or 0)
         published_count = int(market_summary.get("published_count") or 0)
         healthy_count = int(market_summary.get("healthy_count") or 0)
-        selected_transport = str(market_summary.get("selected_transport_top") or "").strip().lower() or "--"
+        transport = str(market_summary.get("selected_transport_top") or "").strip().lower() or "--"
         source = str(market_summary.get("source") or "").strip().lower() or "unknown"
         sync_http_state = str(market_summary.get("sync_http_state") or "").strip().lower() or "idle"
         sync_nats_state = str(market_summary.get("sync_nats_state") or "").strip().lower() or "idle"
         auth_mode = "required" if self.owner_key_required else "disabled"
 
-        info_row = top_end_row + 1
-        if info_row < h - 7:
-            self._safe_addstr(stdscr, info_row, 2, "Marketplace:", curses.color_pair(5) | curses.A_BOLD)
-            self._safe_addstr(stdscr, info_row + 1, 4, f"provider  {provider_short}", curses.color_pair(3) | curses.A_DIM)
-            self._safe_addstr(
-                stdscr,
-                info_row + 2,
-                4,
-                f"catalog   {published_count}/{service_count} published • healthy {healthy_count}",
-                curses.color_pair(3) | curses.A_DIM,
-            )
-            self._safe_addstr(stdscr, info_row + 3, 4, f"policy    owner key {auth_mode}", curses.color_pair(3) | curses.A_DIM)
-            self._render_sync_bus_line(stdscr, info_row + 4, 4, sync_http_state, sync_nats_state, max(0, w - 8))
-            self._safe_addstr(stdscr, info_row + 5, 4, f"resolve   {selected_transport} • {source}", curses.color_pair(3) | curses.A_DIM)
+        preview_lines = [
+            f"view: {selected_item}",
+            self._truncate_text(descriptions.get(selected_item, "Select a section to inspect."), preview["w"]),
+            "",
+            f"owner key: {self._truncate_middle(self.owner_key_display or '(unavailable)', max(12, preview['w'] - 11))}",
+            f"policy: {auth_mode}",
+            f"provider: {self._truncate_text(provider, max(8, preview['w'] - 10))}",
+            f"catalog: {published_count}/{service_count} published • healthy {healthy_count}",
+            f"resolve: {transport} • {source}",
+        ]
 
-        status = f"{len(self.services)} svc / {len(self.nodes)} nodes"
-        self._safe_addstr(stdscr, h - 2, 2, status, curses.A_DIM)
-
-    def _render_config_view(self, stdscr, h, w):
-        """Render the Config view with service enable/disable."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Configuration ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        help_text = "↑/↓: Navigate | Space: Toggle | S: Save | ESC: Back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
-
-        start_row = 3
-        services = sorted(self.services.keys())
-
-        if not services:
-            self._safe_addstr(stdscr, start_row, 2, "(No services configured)", curses.A_DIM)
-            return
-
-        self._safe_addstr(stdscr, start_row, 2, "Services:", curses.color_pair(5) | curses.A_BOLD)
-        start_row += 2
-
-        visible_rows = h - start_row - 2
-        end_idx = min(len(services), self.scroll_offset + visible_rows)
-
-        for i in range(self.scroll_offset, end_idx):
-            svc = services[i]
-            enabled = self.service_config.get(svc, True)
-            status = "[✓]" if enabled else "[ ]"
-
-            row = start_row + (i - self.scroll_offset)
-            if i == self.main_menu_index:
-                text = f"▶ {status} {svc}"
-                attr = curses.color_pair(6)
-            else:
-                text = f"  {status} {svc}"
-                attr = curses.color_pair(2) if enabled else curses.A_DIM
-
-            self._safe_addstr(stdscr, row, 4, text, attr)
-
-            info = self.services.get(svc, {})
-            addr = info.get("assigned_addr") or "—"
-            if len(addr) > 20:
-                addr = addr[:17] + "..."
-            state = info.get("status", "unknown")
-
-            # Get endpoint info from SERVICE_TARGETS (module-level constant)
-            endpoint = "—"
-            for svc_key, target_info in SERVICE_TARGETS.items():
-                if svc in target_info.get("aliases", []) or svc == svc_key:
-                    endpoint = target_info.get("endpoint", "—")
-                    break
-            if len(endpoint) > 25:
-                endpoint = endpoint[:22] + "..."
-
-            detail = f"{state} | {endpoint}"
-            self._safe_addstr(stdscr, row, 40, detail, curses.A_DIM)
-
-        # Add security settings section
-        security_row = start_row + (end_idx - self.scroll_offset) + 2
-        if security_row < h - 3:
-            self._safe_addstr(stdscr, security_row, 2, "Security:", curses.color_pair(5) | curses.A_BOLD)
-            security_row += 2
-
-            # Port Isolation toggle (index == len(services))
-            is_selected = (self.main_menu_index == len(services))
-            isolation_status = "[✓]" if self.port_isolation_enabled else "[ ]"
-            isolation_text = f"{'▶ ' if is_selected else '  '}{isolation_status} Port Isolation (restrict to known endpoints)"
-            isolation_icon = " 🔒" if self.port_isolation_enabled else " 🔓"
-            isolation_attr = curses.color_pair(6) if is_selected else (curses.color_pair(2) if self.port_isolation_enabled else curses.A_DIM)
-            self._safe_addstr(stdscr, security_row, 4, isolation_text + isolation_icon, isolation_attr)
-
-    def _render_stats_view(self, stdscr, h, w):
-        """Render Statistics view with ASCII bar graphs."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Service Statistics (24h) ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        help_text = "ESC: Back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
-
-        timeline = self.stats.get_service_timeline(24)
-
-        if not timeline:
-            self._safe_addstr(stdscr, 3, 2, "(No activity in last 24 hours)", curses.A_DIM)
-            return
-
-        start_row = 3
-        row = start_row
-
-        for svc in sorted(timeline.keys()):
-            if row >= h - 2:
+        row = preview["y"]
+        for line in preview_lines:
+            if row >= preview["y"] + preview["h"]:
                 break
-
-            history = timeline[svc]
-            if not history:
-                continue
-
-            buckets = [0] * 24
-            now = time.time()
-            for ts, count in history:
-                hours_ago = int((now - ts) / 3600)
-                if 0 <= hours_ago < 24:
-                    buckets[23 - hours_ago] += count
-
-            svc_label = (svc[:15] + "...") if len(svc) > 18 else svc
-            self._safe_addstr(stdscr, row, 2, f"{svc_label:18}", curses.color_pair(5))
-
-            max_val = max(buckets) if max(buckets) > 0 else 1
-            bar_width = min(40, w - 25)
-
-            for i, count in enumerate(buckets[-bar_width:]):
-                if count > 0:
-                    height = int((count / max_val) * 5) + 1
-                    bar_char = "▁▂▃▄▅▆▇█"[min(height - 1, 7)]
-                    color = curses.color_pair(2) if count > 0 else curses.A_DIM
-                    self._safe_addstr(stdscr, row, 22 + i, bar_char, color)
-
-            total = sum(buckets)
-            self._safe_addstr(stdscr, row, w - 12, f"({total:>5})", curses.A_DIM)
+            attr = curses.color_pair(5) | curses.A_BOLD if line.startswith("view:") else curses.color_pair(3) | curses.A_DIM
+            self._safe_addstr(stdscr, row, preview["x"], self._truncate_text(line, preview["w"]), attr)
             row += 1
 
-        if row < h - 1:
-            self._safe_addstr(stdscr, row + 1, 22, "←24h", curses.A_DIM)
-            self._safe_addstr(stdscr, row + 1, w - 8, "now→", curses.A_DIM)
+        if row < preview["y"] + preview["h"]:
+            self._render_sync_bus_line(stdscr, row, preview["x"], sync_http_state, sync_nats_state, preview["w"])
+
+    def _render_config_view(self, stdscr, h, w):
+        """Render Config view with uniform section/table layout."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Configuration",
+            subtitle="Service exposure and policy controls",
+            footer="space toggle • s save • esc back",
+        )
+        if root["h"] <= 4:
+            return
+
+        summary_h = min(max(6, root["h"] // 4), max(6, root["h"] - 7))
+        summary = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"],
+            summary_h,
+            root["w"],
+            "Policy Summary",
+        )
+        table_y = root["y"] + summary_h + 1
+        table_h = max(5, root["h"] - summary_h - 1)
+        table = self._render_section_shell(
+            stdscr,
+            table_y,
+            root["x"],
+            table_h,
+            root["w"],
+            "Service Controls",
+        )
+
+        services = sorted(self.services.keys())
+        enabled_count = sum(1 for svc in services if self.service_config.get(svc, True))
+        summary_lines = [
+            f"services: {enabled_count}/{len(services)} enabled",
+            f"owner key: {'required' if self.owner_key_required else 'disabled'}",
+            f"port isolation: {'enabled' if self.port_isolation_enabled else 'disabled'}",
+        ]
+        row = summary["y"]
+        for line in summary_lines:
+            if row >= summary["y"] + summary["h"]:
+                break
+            self._safe_addstr(stdscr, row, summary["x"], self._truncate_text(line, summary["w"]), curses.color_pair(3) | curses.A_DIM)
+            row += 1
+
+        sync_http_state = str(self.marketplace_summary.get("sync_http_state") or "").strip().lower() or "idle"
+        sync_nats_state = str(self.marketplace_summary.get("sync_nats_state") or "").strip().lower() or "idle"
+        if row < summary["y"] + summary["h"]:
+            self._render_sync_bus_line(stdscr, row, summary["x"], sync_http_state, sync_nats_state, summary["w"])
+
+        rows: List[Dict[str, Any]] = []
+        for svc in services:
+            info = self.services.get(svc, {})
+            rows.append(
+                {
+                    "kind": "service",
+                    "name": svc,
+                    "enabled": bool(self.service_config.get(svc, True)),
+                    "state": str(info.get("status", "unknown")),
+                    "endpoint": self._service_endpoint_for(svc),
+                }
+            )
+        rows.append(
+            {
+                "kind": "policy",
+                "name": "Port Isolation",
+                "enabled": bool(self.port_isolation_enabled),
+                "state": "enforced" if self.port_isolation_enabled else "open",
+                "endpoint": "known endpoints only" if self.port_isolation_enabled else "all endpoints",
+            }
+        )
+        if not rows:
+            self._safe_addstr(stdscr, table["y"], table["x"], "(No configurable rows)", curses.color_pair(3) | curses.A_DIM)
+            return
+
+        self.main_menu_index = max(0, min(self.main_menu_index, len(rows) - 1))
+        visible_rows = max(1, table["h"] - 1)
+        if self.main_menu_index < self.scroll_offset:
+            self.scroll_offset = self.main_menu_index
+        if self.main_menu_index >= self.scroll_offset + visible_rows:
+            self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
+        end_idx = min(len(rows), self.scroll_offset + visible_rows)
+
+        marker_w = 3
+        state_w = 6
+        svc_w = max(10, min(24, table["w"] // 3))
+        status_w = max(8, min(12, table["w"] // 5))
+        endpoint_w = max(6, table["w"] - marker_w - state_w - svc_w - status_w - 4)
+        header = (
+            f"{'':<{marker_w}} "
+            f"{'ON':<{state_w}} "
+            f"{'SERVICE':<{svc_w}} "
+            f"{'STATE':<{status_w}} "
+            f"{'ENDPOINT':<{endpoint_w}}"
+        )
+        self._safe_addstr(stdscr, table["y"], table["x"], self._truncate_text(header, table["w"]), curses.color_pair(5) | curses.A_BOLD)
+
+        for i in range(self.scroll_offset, end_idx):
+            row_y = table["y"] + 1 + (i - self.scroll_offset)
+            if row_y >= table["y"] + table["h"]:
+                break
+            item = rows[i]
+            selected = i == self.main_menu_index
+            enabled = bool(item.get("enabled"))
+            marker = "▶" if selected else " "
+            on_state = "[x]" if enabled else "[ ]"
+            name = self._truncate_text(str(item.get("name", "")), svc_w)
+            state = self._truncate_text(str(item.get("state", "")), status_w)
+            endpoint = self._truncate_middle(item.get("endpoint", ""), endpoint_w)
+            line = (
+                f"{marker:<{marker_w}} "
+                f"{on_state:<{state_w}} "
+                f"{name:<{svc_w}} "
+                f"{state:<{status_w}} "
+                f"{endpoint:<{endpoint_w}}"
+            )
+            attr = self._row_attr(selected=selected, muted=not enabled and item.get("kind") == "service")
+            self._safe_addstr(stdscr, row_y, table["x"], self._truncate_text(line, table["w"]), attr)
+
+    def _render_stats_view(self, stdscr, h, w):
+        """Render statistics with shared section and normalized columns."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Service Statistics",
+            subtitle="24h request activity density",
+            footer="sparkline: past (left) → now (right)",
+        )
+        if root["h"] <= 2:
+            return
+
+        timeline = self.stats.get_service_timeline(24)
+        if not timeline:
+            self._safe_addstr(stdscr, root["y"], root["x"], "(No activity in last 24 hours)", curses.color_pair(3) | curses.A_DIM)
+            return
+
+        chart = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"],
+            root["h"],
+            root["w"],
+            "Request Timeline",
+        )
+        if chart["h"] <= 1:
+            return
+
+        now = time.time()
+        buckets_by_service: Dict[str, List[int]] = {}
+        totals: Dict[str, int] = {}
+        for svc, history in timeline.items():
+            buckets = [0] * 24
+            for ts, count in history:
+                try:
+                    hours_ago = int((now - float(ts)) / 3600)
+                except Exception:
+                    continue
+                if 0 <= hours_ago < 24:
+                    buckets[23 - hours_ago] += int(count or 0)
+            buckets_by_service[svc] = buckets
+            totals[svc] = sum(buckets)
+
+        sorted_services = sorted(buckets_by_service.keys(), key=lambda s: totals.get(s, 0), reverse=True)
+        visible_rows = max(1, chart["h"] - 1)
+        svc_w = max(10, min(20, chart["w"] // 4))
+        total_w = 7
+        spark_w = max(8, chart["w"] - svc_w - total_w - 3)
+
+        header = f"{'SERVICE':<{svc_w}} {'ACTIVITY':<{spark_w}} {'TOTAL':>{total_w}}"
+        self._safe_addstr(stdscr, chart["y"], chart["x"], self._truncate_text(header, chart["w"]), curses.color_pair(5) | curses.A_BOLD)
+
+        ramp = " ▁▂▃▄▅▆▇█"
+        for idx, svc in enumerate(sorted_services[:visible_rows]):
+            row = chart["y"] + 1 + idx
+            buckets = buckets_by_service.get(svc, [0] * 24)
+            max_bucket = max(buckets) if max(buckets) > 0 else 1
+            spark_chars: List[str] = []
+            source = buckets[-spark_w:]
+            if len(source) < spark_w:
+                source = ([0] * (spark_w - len(source))) + source
+            for val in source:
+                level = int(round((float(val) / float(max_bucket)) * (len(ramp) - 1)))
+                level = max(0, min(len(ramp) - 1, level))
+                spark_chars.append(ramp[level])
+            spark = "".join(spark_chars)
+            total = totals.get(svc, 0)
+            line = f"{self._truncate_text(svc, svc_w):<{svc_w}} {spark:<{spark_w}} {total:>{total_w}}"
+            self._safe_addstr(stdscr, row, chart["x"], self._truncate_text(line, chart["w"]), self._row_attr())
 
     def _fmt_bytes(self, n: int) -> str:
         if n >= 1024 * 1024:
@@ -4085,31 +4866,32 @@ class EnhancedUI:
 
     def _render_address_detail(self, stdscr, entry: Dict[str, Any], y: int, x: int, h: int, w: int):
         """Render detail panel for a selected address."""
-        self._draw_box(stdscr, y, x, h, w)
-        inner_y = y + 1
-        inner_x = x + 2
-        addr = entry.get("addr", "—")
-        total = entry.get("total_requests", 0)
-        last = entry.get("last_seen", 0)
-        first = entry.get("first_seen", last)
-        span_s = max(0.0, last - first)
-        span_label = self._fmt_minutes(span_s) if span_s else "—"
-        bytes_in = entry.get("bytes_in", 0)
-        bytes_out = entry.get("bytes_out", 0)
-        active_s = entry.get("active_seconds", 0.0)
-        active_label = self._fmt_minutes(active_s)
+        detail = self._render_section_shell(stdscr, y, x, h, w, "Peer Detail")
+        if detail["h"] <= 0:
+            return
 
-        self._safe_addstr(stdscr, inner_y, inner_x, "addr:", curses.color_pair(5) | curses.A_BOLD)
-        self._safe_addstr(stdscr, inner_y, inner_x + 6, addr[: max(8, w - 10)], curses.A_NORMAL)
-        inner_y += 1
-        self._safe_addstr(stdscr, inner_y, inner_x, f"first: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(first))}", curses.A_DIM)
-        inner_y += 1
-        self._safe_addstr(stdscr, inner_y, inner_x, f"last : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last))}", curses.A_DIM)
-        inner_y += 2
-        self._safe_addstr(stdscr, inner_y, inner_x, f"requests: {total}   span: {span_label}   active: {active_label}", curses.color_pair(2))
-        inner_y += 1
-        self._safe_addstr(stdscr, inner_y, inner_x, f"in : {self._fmt_bytes(bytes_in)}   out: {self._fmt_bytes(bytes_out)}", curses.A_NORMAL)
-        inner_y += 2
+        addr = entry.get("addr", "—")
+        total = int(entry.get("total_requests", 0) or 0)
+        last = float(entry.get("last_seen", 0) or 0.0)
+        first = float(entry.get("first_seen", last) or last)
+        span_s = max(0.0, last - first)
+        bytes_in = int(entry.get("bytes_in", 0) or 0)
+        bytes_out = int(entry.get("bytes_out", 0) or 0)
+        active_s = float(entry.get("active_seconds", 0.0) or 0.0)
+
+        lines = [
+            f"addr: {self._truncate_middle(addr, max(8, detail['w'] - 6))}",
+            f"first: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(first)) if first else '—'}",
+            f"last : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last)) if last else '—'}",
+            f"reqs: {total} • span {self._fmt_minutes(span_s) if span_s else '—'} • active {self._fmt_minutes(active_s)}",
+            f"in: {self._fmt_bytes(bytes_in)} • out: {self._fmt_bytes(bytes_out)}",
+        ]
+        row = detail["y"]
+        for line in lines:
+            if row >= detail["y"] + detail["h"]:
+                break
+            self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(line, detail["w"]), curses.color_pair(3) | curses.A_DIM)
+            row += 1
 
         services_raw = entry.get("services", {})
         services: Dict[str, Dict[str, Any]] = {}
@@ -4117,201 +4899,269 @@ class EnhancedUI:
             if isinstance(info, dict):
                 services[svc] = info
             else:
-                # Legacy int count
-                services[svc] = {"count": int(info or 0), "bytes_in": 0, "bytes_out": 0, "active_seconds": 0.0, "first_seen": entry.get("first_seen", first), "last_seen": last}
+                services[svc] = {
+                    "count": int(info or 0),
+                    "bytes_in": 0,
+                    "bytes_out": 0,
+                    "active_seconds": 0.0,
+                    "first_seen": entry.get("first_seen", first),
+                    "last_seen": last,
+                }
+        if row < detail["y"] + detail["h"]:
+            self._safe_addstr(stdscr, row, detail["x"], "services", curses.color_pair(5) | curses.A_BOLD)
+            row += 1
         if not services:
-            self._safe_addstr(stdscr, inner_y, inner_x, "(no service usage)", curses.A_DIM)
+            if row < detail["y"] + detail["h"]:
+                self._safe_addstr(stdscr, row, detail["x"], "(no service usage)", curses.color_pair(3) | curses.A_DIM)
             return
 
-        self._safe_addstr(stdscr, inner_y, inner_x, "services:", curses.color_pair(5) | curses.A_BOLD)
-        inner_y += 1
+        svc_name_w = max(8, min(18, detail["w"] // 3))
+        count_w = 5
+        bw_w = max(8, min(12, detail["w"] // 5))
+        active_w = max(6, min(8, detail["w"] // 6))
         for svc, info in sorted(services.items(), key=lambda kv: kv[1].get("count", 0), reverse=True):
-            if inner_y >= y + h - 1:
+            if row >= detail["y"] + detail["h"]:
                 break
-            cnt = info.get("count", 0)
-            bin_val = info.get("bytes_in", 0)
-            bout_val = info.get("bytes_out", 0)
-            active = info.get("active_seconds", 0.0)
-            line = f" - {svc:<14} {cnt:>4}x  in {self._fmt_bytes(bin_val):>8}  out {self._fmt_bytes(bout_val):>8}  act {self._fmt_minutes(active):>6}"
-            self._safe_addstr(stdscr, inner_y, inner_x, line[: max(10, w - 4)], curses.A_NORMAL)
-            inner_y += 1
+            cnt = int(info.get("count", 0) or 0)
+            bin_val = int(info.get("bytes_in", 0) or 0)
+            bout_val = int(info.get("bytes_out", 0) or 0)
+            active = float(info.get("active_seconds", 0.0) or 0.0)
+            line = (
+                f"{self._truncate_text(svc, svc_name_w):<{svc_name_w}} "
+                f"{cnt:>{count_w}} "
+                f"in {self._truncate_text(self._fmt_bytes(bin_val), bw_w):>{bw_w}} "
+                f"out {self._truncate_text(self._fmt_bytes(bout_val), bw_w):>{bw_w}} "
+                f"{self._truncate_text(self._fmt_minutes(active), active_w):>{active_w}}"
+            )
+            self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(line, detail["w"]), self._row_attr())
+            row += 1
 
     def _render_address_book_view(self, stdscr, h, w):
-        """Render Address Book with NKN addresses and usage stats."""
-        title = "⌈ Address Book ⌋"
-        self._safe_addstr(stdscr, 0, 2, title, curses.color_pair(1) | curses.A_BOLD)
-        help_text = "↑/↓ select • detail pane on the right • ESC back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
-
-        addresses = self.stats.get_address_book()
-        if not addresses:
-            self._safe_addstr(stdscr, 3, 2, "(No visitors yet)", curses.A_DIM)
+        """Render address book with shared list/detail composition."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Address Book",
+            subtitle="Known NKN peers and usage footprint",
+            footer="j/k move • PgUp/PgDn page • g/G jump",
+        )
+        if root["h"] <= 2:
             return
 
-        list_w = max(32, w // 2)
-        detail_w = w - list_w - 3
-        list_start_row = 3
-        visible_rows = h - list_start_row - 2
+        addresses = self.stats.get_address_book()
+        list_w = max(34, min(root["w"] - 24, root["w"] // 2))
+        detail_w = max(18, root["w"] - list_w - 1)
+        list_section = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"],
+            root["h"],
+            list_w,
+            "Peers",
+        )
+        detail_section = (root["y"], root["x"] + list_w + 1, root["h"], detail_w)
 
-        # Clamp selection
-        self.main_menu_index = min(self.main_menu_index, max(0, len(addresses) - 1))
+        if not addresses:
+            self._safe_addstr(stdscr, list_section["y"], list_section["x"], "(No visitors yet)", curses.color_pair(3) | curses.A_DIM)
+            self._render_address_detail(stdscr, {}, detail_section[0], detail_section[1], detail_section[2], detail_section[3])
+            return
+
+        self.main_menu_index = max(0, min(self.main_menu_index, len(addresses) - 1))
+        visible_rows = max(1, list_section["h"] - 1)
         if self.main_menu_index < self.scroll_offset:
             self.scroll_offset = self.main_menu_index
         if self.main_menu_index >= self.scroll_offset + visible_rows:
             self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
         end_idx = min(len(addresses), self.scroll_offset + visible_rows)
 
-        # List header
-        header = f"{'addr':<28} {'reqs':>6} {'last':>16}"
-        self._safe_addstr(stdscr, list_start_row, 1, header, curses.color_pair(5) | curses.A_BOLD)
-        self._safe_addstr(stdscr, list_start_row + 1, 1, "─" * (list_w - 2), curses.A_DIM)
+        addr_w = max(10, min(26, list_section["w"] // 2))
+        req_w = 6
+        last_w = max(8, list_section["w"] - addr_w - req_w - 5)
+        header = f"{'':<2} {'ADDR':<{addr_w}} {'REQS':>{req_w}} {'LAST':<{last_w}}"
+        self._safe_addstr(stdscr, list_section["y"], list_section["x"], self._truncate_text(header, list_section["w"]), curses.color_pair(5) | curses.A_BOLD)
 
         for i in range(self.scroll_offset, end_idx):
-            addr_info = addresses[i]
-            addr = addr_info.get("addr", "—")
-            total = addr_info.get("total_requests", 0)
-            last_seen = addr_info.get("last_seen", 0)
-            last_str = time.strftime("%m-%d %H:%M", time.localtime(last_seen))
-
-            addr_display = (addr[:24] + "...") if len(addr) > 27 else addr
-
-            row = list_start_row + 2 + (i - self.scroll_offset)
-            if row >= h - 1:
+            row = list_section["y"] + 1 + (i - self.scroll_offset)
+            if row >= list_section["y"] + list_section["h"]:
                 break
+            entry = addresses[i]
+            addr = self._truncate_middle(entry.get("addr", "—"), addr_w)
+            reqs = int(entry.get("total_requests", 0) or 0)
+            last_seen = float(entry.get("last_seen", 0) or 0)
+            last_str = time.strftime("%m-%d %H:%M", time.localtime(last_seen)) if last_seen else "—"
+            selected = i == self.main_menu_index
+            marker = "▶" if selected else " "
+            line = f"{marker:<2} {addr:<{addr_w}} {reqs:>{req_w}} {self._truncate_text(last_str, last_w):<{last_w}}"
+            self._safe_addstr(stdscr, row, list_section["x"], self._truncate_text(line, list_section["w"]), self._row_attr(selected=selected))
 
-            if i == self.main_menu_index:
-                attr = curses.color_pair(6) | curses.A_BOLD
-                prefix = "►"
-            else:
-                attr = curses.A_NORMAL
-                prefix = " "
-
-            line = f"{prefix} {addr_display:<27} {total:>6} {last_str:>16}"
-            self._safe_addstr(stdscr, row, 1, line[: list_w - 2], attr)
-
-        # Detail panel
         selected = addresses[self.main_menu_index] if addresses else {}
-        detail_h = h - 4
-        detail_x = list_w + 2
-        self._render_address_detail(stdscr, selected, 2, detail_x, detail_h, detail_w)
+        self._render_address_detail(stdscr, selected, detail_section[0], detail_section[1], detail_section[2], detail_section[3])
 
     def _render_ingress_view(self, stdscr, h, w):
-        """Render Ingress view with QR codes for service addresses."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Ingress Addresses ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        help_text = "↑/↓: Navigate | Enter: Show QR | ESC: Back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
+        """Render ingress endpoints with list/detail or QR mode."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Ingress",
+            subtitle="Service addresses and QR ingress targets",
+            footer="j/k move • enter QR • esc back",
+        )
+        if root["h"] <= 2:
+            return
 
         if self.show_qr and self.qr_data:
-            self._render_qr_code(stdscr, 3, 2, h - 4, w - 4)
+            qr = self._render_section_shell(
+                stdscr,
+                root["y"],
+                root["x"],
+                root["h"],
+                root["w"],
+                "Ingress QR",
+                subtitle=self._truncate_text(self.qr_label or "Selected service address", root["w"]),
+                footer="esc to close QR",
+            )
+            self._render_qr_code(stdscr, qr["y"], qr["x"], qr["h"], qr["w"])
             return
 
-        start_row = 3
         services = sorted(self.services.keys())
+        list_w = max(34, min(root["w"] - 22, int(root["w"] * 0.62)))
+        detail_w = max(18, root["w"] - list_w - 1)
+        lst = self._render_section_shell(stdscr, root["y"], root["x"], root["h"], list_w, "Service Addresses")
+        detail = self._render_section_shell(stdscr, root["y"], root["x"] + list_w + 1, root["h"], detail_w, "Selected Endpoint")
 
         if not services:
-            self._safe_addstr(stdscr, start_row, 2, "(No services available)", curses.A_DIM)
+            self._safe_addstr(stdscr, lst["y"], lst["x"], "(No services available)", curses.color_pair(3) | curses.A_DIM)
             return
 
-        visible_rows = h - start_row - 2
+        self.main_menu_index = max(0, min(self.main_menu_index, len(services) - 1))
+        visible_rows = max(1, lst["h"] - 1)
+        if self.main_menu_index < self.scroll_offset:
+            self.scroll_offset = self.main_menu_index
+        if self.main_menu_index >= self.scroll_offset + visible_rows:
+            self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
         end_idx = min(len(services), self.scroll_offset + visible_rows)
 
+        svc_w = max(10, min(22, lst["w"] // 3))
+        state_w = 10
+        addr_w = max(8, lst["w"] - svc_w - state_w - 4)
+        header = f"{'':<2} {'SERVICE':<{svc_w}} {'STATE':<{state_w}} {'ADDRESS':<{addr_w}}"
+        self._safe_addstr(stdscr, lst["y"], lst["x"], self._truncate_text(header, lst["w"]), curses.color_pair(5) | curses.A_BOLD)
+
         for i in range(self.scroll_offset, end_idx):
+            row = lst["y"] + 1 + (i - self.scroll_offset)
+            if row >= lst["y"] + lst["h"]:
+                break
             svc = services[i]
             info = self.services.get(svc, {})
-            addr = info.get("assigned_addr", "—")
-            state = info.get("status", "unknown")
+            addr = str(info.get("assigned_addr") or "—")
+            state = str(info.get("status") or "unknown")
+            selected = i == self.main_menu_index
+            marker = "▶" if selected else " "
+            line = (
+                f"{marker:<2} "
+                f"{self._truncate_text(svc, svc_w):<{svc_w}} "
+                f"{self._truncate_text(state, state_w):<{state_w}} "
+                f"{self._truncate_middle(addr, addr_w):<{addr_w}}"
+            )
+            muted = state not in {"ready", "online", "published"}
+            self._safe_addstr(stdscr, row, lst["x"], self._truncate_text(line, lst["w"]), self._row_attr(selected=selected, muted=muted))
 
-            row = start_row + (i - self.scroll_offset)
-            if i == self.main_menu_index:
-                attr = curses.color_pair(6)
-                prefix = "▶ "
-            else:
-                attr = curses.color_pair(2) if state == "ready" else curses.A_DIM
-                prefix = "  "
-
-            svc_display = (svc[:20] + "...") if len(svc) > 23 else svc
-            # Don't truncate address - show full string
-            addr_display = addr
-
-            line = f"{prefix}{svc_display:<23} [{state:<8}] {addr_display}"
-            self._safe_addstr(stdscr, row, 2, line, attr)
+        selected_name = services[self.main_menu_index]
+        selected_info = self.services.get(selected_name, {})
+        selected_addr = str(selected_info.get("assigned_addr") or "—")
+        selected_state = str(selected_info.get("status") or "unknown")
+        endpoint = self._service_endpoint_for(selected_name)
+        detail_lines = [
+            f"service: {self._truncate_text(selected_name, max(8, detail['w'] - 9))}",
+            f"state: {selected_state}",
+            f"route: {self._truncate_text(endpoint, max(8, detail['w'] - 7))}",
+            f"addr: {self._truncate_middle(selected_addr, max(8, detail['w'] - 6))}",
+            "enter: render QR for this address",
+        ]
+        row = detail["y"]
+        for line in detail_lines:
+            if row >= detail["y"] + detail["h"]:
+                break
+            self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(line, detail["w"]), curses.color_pair(3) | curses.A_DIM)
+            row += 1
 
     def _render_egress_view(self, stdscr, h, w):
-        """Render Egress view with bandwidth and user leaderboard."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Egress Statistics ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        help_text = "ESC: Back"
-        self._safe_addstr(stdscr, 1, 2, help_text, curses.A_DIM)
-
-        egress = self.stats.get_egress_stats()
-
-        if not egress:
-            self._safe_addstr(stdscr, 3, 2, "(No egress data)", curses.A_DIM)
+        """Render egress analytics in two normalized tables."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Egress Statistics",
+            subtitle="Per-service bandwidth and top consumers",
+            footer="sorted by aggregate volume",
+        )
+        if root["h"] <= 2:
             return
 
-        start_row = 3
-        self._safe_addstr(stdscr, start_row, 2, "Service Summary:", curses.color_pair(5) | curses.A_BOLD)
-        start_row += 2
+        egress = self.stats.get_egress_stats()
+        if not egress:
+            self._safe_addstr(stdscr, root["y"], root["x"], "(No egress data)", curses.color_pair(3) | curses.A_DIM)
+            return
 
-        header = f"{'Service':<20} {'Requests':>10} {'Bandwidth':>15} {'Users':>8}"
-        self._safe_addstr(stdscr, start_row, 2, header, curses.A_BOLD)
-        start_row += 1
+        top_h = max(6, root["h"] // 2)
+        top = self._render_section_shell(stdscr, root["y"], root["x"], top_h, root["w"], "Service Summary")
+        bottom_h = max(5, root["h"] - top_h - 1)
+        bottom = self._render_section_shell(stdscr, root["y"] + top_h + 1, root["x"], bottom_h, root["w"], "Top Users")
 
-        for svc in sorted(egress.keys()):
-            if start_row >= h // 2:
-                break
+        svc_w = max(10, min(24, top["w"] // 3))
+        req_w = 8
+        bw_w = max(10, min(14, top["w"] // 4))
+        users_w = max(5, min(8, top["w"] // 8))
+        hdr = f"{'SERVICE':<{svc_w}} {'REQ':>{req_w}} {'BANDWIDTH':>{bw_w}} {'USERS':>{users_w}}"
+        self._safe_addstr(stdscr, top["y"], top["x"], self._truncate_text(hdr, top["w"]), curses.color_pair(5) | curses.A_BOLD)
 
-            stats = egress[svc]
-            req_count = stats.get("request_count", 0)
-            bytes_sent = stats.get("bytes_sent", 0)
-            users = len(stats.get("users", {}))
+        services_sorted = sorted(
+            egress.keys(),
+            key=lambda s: int((egress.get(s) or {}).get("bytes_sent", 0) or 0),
+            reverse=True,
+        )
+        for idx, svc in enumerate(services_sorted[: max(0, top["h"] - 1)]):
+            row = top["y"] + 1 + idx
+            stats = egress.get(svc, {})
+            req_count = int(stats.get("request_count", 0) or 0)
+            bytes_sent = int(stats.get("bytes_sent", 0) or 0)
+            users = len(stats.get("users", {}) or {})
+            line = (
+                f"{self._truncate_text(svc, svc_w):<{svc_w}} "
+                f"{req_count:>{req_w}} "
+                f"{self._truncate_text(self._fmt_bytes(bytes_sent), bw_w):>{bw_w}} "
+                f"{users:>{users_w}}"
+            )
+            self._safe_addstr(stdscr, row, top["x"], self._truncate_text(line, top["w"]), self._row_attr())
 
-            if bytes_sent > 1024 * 1024 * 1024:
-                bw = f"{bytes_sent / (1024**3):.2f} GB"
-            elif bytes_sent > 1024 * 1024:
-                bw = f"{bytes_sent / (1024**2):.2f} MB"
-            elif bytes_sent > 1024:
-                bw = f"{bytes_sent / 1024:.2f} KB"
-            else:
-                bw = f"{bytes_sent} B"
+        user_totals: Dict[str, int] = {}
+        for stats in egress.values():
+            user_map = stats.get("users", {}) if isinstance(stats.get("users", {}), dict) else {}
+            for user, sent in user_map.items():
+                user_totals[str(user)] = user_totals.get(str(user), 0) + int(sent or 0)
+        user_rows = sorted(user_totals.items(), key=lambda kv: kv[1], reverse=True)
 
-            svc_display = (svc[:17] + "...") if len(svc) > 20 else svc
-            line = f"  {svc_display:<20} {req_count:>10} {bw:>15} {users:>8}"
-            self._safe_addstr(stdscr, start_row, 2, line, curses.color_pair(2))
-            start_row += 1
-
-        start_row += 2
-        if start_row < h - 5:
-            self._safe_addstr(stdscr, start_row, 2, "Top Users (by bandwidth):", curses.color_pair(5) | curses.A_BOLD)
-            start_row += 2
-
-            user_totals = {}
-            for stats in egress.values():
-                for user, bytes_sent in stats.get("users", {}).items():
-                    user_totals[user] = user_totals.get(user, 0) + bytes_sent
-
-            top_users = sorted(user_totals.items(), key=lambda x: x[1], reverse=True)[:10]
-
-            for i, (user, bytes_sent) in enumerate(top_users):
-                if start_row >= h - 2:
-                    break
-
-                if bytes_sent > 1024 * 1024 * 1024:
-                    bw = f"{bytes_sent / (1024**3):.2f} GB"
-                elif bytes_sent > 1024 * 1024:
-                    bw = f"{bytes_sent / (1024**2):.2f} MB"
-                else:
-                    bw = f"{bytes_sent / 1024:.2f} KB"
-
-                user_display = (user[:40] + "...") if len(user) > 43 else user
-                line = f"  {i+1:2}. {user_display:<43} {bw:>15}"
-                self._safe_addstr(stdscr, start_row, 2, line, curses.A_NORMAL)
-                start_row += 1
+        rank_w = 4
+        user_w = max(12, bottom["w"] - rank_w - 12)
+        amt_w = 10
+        hdr2 = f"{'RANK':<{rank_w}} {'USER':<{user_w}} {'BANDWIDTH':>{amt_w}}"
+        self._safe_addstr(stdscr, bottom["y"], bottom["x"], self._truncate_text(hdr2, bottom["w"]), curses.color_pair(5) | curses.A_BOLD)
+        for idx, (user, sent) in enumerate(user_rows[: max(0, bottom["h"] - 1)]):
+            row = bottom["y"] + 1 + idx
+            line = (
+                f"{idx + 1:<{rank_w}} "
+                f"{self._truncate_middle(user, user_w):<{user_w}} "
+                f"{self._truncate_text(self._fmt_bytes(sent), amt_w):>{amt_w}}"
+            )
+            self._safe_addstr(stdscr, row, bottom["x"], self._truncate_text(line, bottom["w"]), self._row_attr())
 
     def _debug_tabs(self) -> List[str]:
         """Tabs for the Debug view: All + known services (from config or seen flows)."""
@@ -4357,103 +5207,99 @@ class EnhancedUI:
         return label[: max_label - 1] + "…"
 
     def _render_debug_view(self, stdscr, h, w):
-        """Render Debug/Activity Log view with directional flows and tabs."""
-        self._draw_box(stdscr, 0, 0, h, w)
-        title = "═══ Debug / Activity Log ═══"
-        self._safe_addstr(stdscr, 0, (w - len(title)) // 2, title, curses.color_pair(1) | curses.A_BOLD)
-
-        tabs = self._debug_tabs()
-        tab_col = 2
-        for i, tab_name in enumerate(tabs):
-            token = f" {tab_name} "
-            if tab_col + len(token) >= w - 2:
-                break
-            if i == self.debug_tab_index:
-                attr = curses.color_pair(4) | curses.A_BOLD
-            else:
-                attr = curses.color_pair(3) | curses.A_DIM
-            self._safe_addstr(stdscr, 1, tab_col, token, attr)
-            tab_col += len(token) + 1
-
-        help_text = "h/l or ←/→ tabs | ↑/↓ scroll | Enter select | ESC back"
-        self._safe_addstr(stdscr, 2, 2, help_text[: max(0, w - 4)], curses.color_pair(3) | curses.A_DIM)
-
-        tab = tabs[self.debug_tab_index]
-
-        start_row = 4
-        visible_rows = h - start_row - 1
-
-        flows = [
-            entry for entry in reversed(self.flow_logs)
-            if tab == "All" or entry.get("service") == tab
-        ]
-
-        if not flows:
-            # Fall back to coarse activity if no flow entries yet
-            if self.activity:
-                self._safe_addstr(stdscr, start_row, 2, "(No flow entries yet; showing recent activity)", curses.A_DIM)
-                start_row += 2
-                visible_rows = h - start_row - 1
-                activity_list = list(reversed(self.activity))
-                total_entries = len(activity_list)
-                max_scroll = max(0, total_entries - visible_rows)
-                alt_scroll = min(self._debug_scroll_for_tab(tab), max_scroll)
-                end_idx = min(total_entries, alt_scroll + visible_rows)
-                for i in range(alt_scroll, end_idx):
-                    ts, source, kind, message = activity_list[i]
-                    row = start_row + (i - alt_scroll)
-                    attr = curses.color_pair(2) if kind in ("IN", "OUT") else (curses.color_pair(4) if kind == "ERR" else curses.A_NORMAL)
-                    line = f"[{ts}] {source:<12} {kind:<3} {message}"
-                    self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
-                if total_entries > visible_rows:
-                    scroll_info = f"Showing {alt_scroll + 1}-{end_idx} of {total_entries}"
-                    self._safe_addstr(stdscr, h - 1, w - len(scroll_info) - 2, scroll_info, curses.A_DIM)
-            else:
-                self._safe_addstr(stdscr, start_row, 2, "(No recent flows)", curses.A_DIM)
+        """Render debug view with tab selector + uniform log table."""
+        root = self._render_section_shell(
+            stdscr,
+            0,
+            0,
+            h,
+            w,
+            "Debug Activity",
+            subtitle="Directional flow and fallback event traces",
+            footer="h/l tabs • j/k scroll • PgUp/PgDn page",
+        )
+        if root["h"] <= 2:
             return
 
-        total_entries = len(flows)
-        max_scroll = max(0, total_entries - visible_rows)
-        scroll = min(self._debug_scroll_for_tab(tab), max_scroll)
-        self._set_debug_scroll(tab, scroll)
+        tabs = self._debug_tabs()
+        if not tabs:
+            tabs = ["All"]
+        if self.debug_tab_index >= len(tabs):
+            self.debug_tab_index = max(0, len(tabs) - 1)
+        active_tab = tabs[self.debug_tab_index]
 
-        end_idx = min(total_entries, scroll + visible_rows)
+        tab_h = min(max(5, root["h"] // 4), max(5, root["h"] - 7))
+        tab_sec = self._render_section_shell(
+            stdscr,
+            root["y"],
+            root["x"],
+            tab_h,
+            root["w"],
+            "Filters",
+            subtitle=f"active: {active_tab}",
+        )
+        log_sec = self._render_section_shell(
+            stdscr,
+            root["y"] + tab_h + 1,
+            root["x"],
+            max(5, root["h"] - tab_h - 1),
+            root["w"],
+            "Flow Log",
+        )
+
+        tab_row = tab_sec["y"]
+        cur_x = tab_sec["x"]
+        for i, tab_name in enumerate(tabs):
+            token = f"[ {tab_name} ]"
+            if cur_x + len(token) >= tab_sec["x"] + tab_sec["w"]:
+                break
+            attr = self._row_attr(selected=(i == self.debug_tab_index), muted=(i != self.debug_tab_index))
+            self._safe_addstr(stdscr, tab_row, cur_x, token, attr)
+            cur_x += len(token) + 1
+
+        flows = [entry for entry in reversed(self.flow_logs) if active_tab == "All" or entry.get("service") == active_tab]
+        rendered: List[Tuple[str, bool, bool]] = []
+        if flows:
+            for entry in flows:
+                ts = str(entry.get("ts", "--:--:--"))
+                src = self._short_label(str(entry.get("source", "unknown")), 16)
+                tgt = self._short_label(str(entry.get("target", "unknown")), 16)
+                payload = str(entry.get("payload", ""))
+                arrow = str(entry.get("dir", "→"))[:1] or "→"
+                channel = str(entry.get("channel", ""))
+                svc = str(entry.get("service", ""))
+                msg = f"[{ts}] {src} {arrow} {payload} {arrow} {tgt}"
+                if svc and svc != "All":
+                    msg += f" [{svc}]"
+                if channel:
+                    msg += f" @{channel}"
+                blocked = bool(entry.get("blocked"))
+                has_err = "err" in payload.lower()
+                rendered.append((msg, blocked, has_err))
+        else:
+            activity_items = list(reversed(self.activity))
+            for ts, source, kind, message in activity_items:
+                msg = f"[{ts}] {self._truncate_text(source, 14):<14} {kind:<3} {message}"
+                is_err = str(kind).upper() == "ERR" or "err" in str(message).lower()
+                rendered.append((msg, False, is_err))
+
+        if not rendered:
+            self._safe_addstr(stdscr, log_sec["y"], log_sec["x"], "(No recent flows)", curses.color_pair(3) | curses.A_DIM)
+            return
+
+        visible_rows = max(1, log_sec["h"])
+        total = len(rendered)
+        max_scroll = max(0, total - visible_rows)
+        scroll = min(self._debug_scroll_for_tab(active_tab), max_scroll)
+        self._set_debug_scroll(active_tab, scroll)
+        end_idx = min(total, scroll + visible_rows)
         for i in range(scroll, end_idx):
-            entry = flows[i]
-            row = start_row + (i - scroll)
-            ts = entry.get("ts", "--:--:--")
-            src = entry.get("source", "unknown")
-            tgt = entry.get("target", "unknown")
-            payload = entry.get("payload", "")
-            svc = entry.get("service", "")
-            channel = entry.get("channel", "")
-            arrow = entry.get("dir", "→")
-
-            # Compact source/target to fit on screen
-            max_label = max(10, (w // 4))
-            src_short = self._short_label(src, max_label)
-            tgt_short = self._short_label(tgt, max_label)
-
-            payload_space = max(10, w - len(ts) - len(src_short) - len(tgt_short) - 12)
-            payload_short = payload if len(payload) <= payload_space else payload[: payload_space - 1] + "…"
-
-            dir_left = arrow if len(arrow) == 1 else "→"
-            dir_right = dir_left
-            line = f"[{ts}] {src_short} {dir_left} {payload_short} {dir_right} {tgt_short}"
-            if svc and svc != "All":
-                line += f" [{svc}]"
-            if channel:
-                line += f" @{channel}"
-            attr = curses.color_pair(2)
-            if entry.get("blocked"):
-                attr = curses.color_pair(3) | curses.A_BOLD  # orange/yellow for blocked
-            elif "err" in payload.lower():
-                attr = curses.color_pair(4)
-            self._safe_addstr(stdscr, row, 2, line[: max(0, w - 4)], attr)
-
-        if total_entries > visible_rows:
-            scroll_info = f"Showing {scroll + 1}-{end_idx} of {total_entries}"
-            self._safe_addstr(stdscr, h - 1, w - len(scroll_info) - 2, scroll_info, curses.A_DIM)
+            row = log_sec["y"] + (i - scroll)
+            line, blocked, has_err = rendered[i]
+            attr = self._row_attr(alert=blocked or has_err)
+            if not (blocked or has_err):
+                attr = curses.color_pair(3) | curses.A_DIM
+            self._safe_addstr(stdscr, row, log_sec["x"], self._truncate_text(line, log_sec["w"]), attr)
 
     def _render_qr_code(self, stdscr, y, x, max_h, max_w):
         """Render QR code for selected service."""
@@ -4483,126 +5329,362 @@ class EnhancedUI:
         if inst_y < y + max_h:
             self._safe_addstr(stdscr, inst_y, start_x, "Press ESC to close", curses.A_DIM)
 
+    def _init_keymaps(self):
+        key_up = getattr(curses, "KEY_UP", -1)
+        key_down = getattr(curses, "KEY_DOWN", -1)
+        key_left = getattr(curses, "KEY_LEFT", -1)
+        key_right = getattr(curses, "KEY_RIGHT", -1)
+        key_home = getattr(curses, "KEY_HOME", -1)
+        key_end = getattr(curses, "KEY_END", -1)
+        key_page_up = getattr(curses, "KEY_PPAGE", -1)
+        key_page_down = getattr(curses, "KEY_NPAGE", -1)
+        key_enter = getattr(curses, "KEY_ENTER", 10)
+
+        self._global_keymap: Dict[int, str] = {
+            ord('m'): "overlay.menu.open",
+            ord('M'): "overlay.menu.open",
+            ord('?'): "overlay.help.open",
+        }
+        self._state_keymaps: Dict[str, Dict[int, str]] = {
+            self.BASE_VIEW: {
+                ord('q'): "state.escape",
+                ord('Q'): "state.escape",
+                27: "state.escape",
+                key_up: "nav.up",
+                ord('k'): "nav.up",
+                key_down: "nav.down",
+                ord('j'): "nav.down",
+                key_left: "nav.left",
+                ord('h'): "nav.left",
+                key_right: "nav.right",
+                ord('l'): "nav.right",
+                key_home: "nav.home",
+                key_end: "nav.end",
+                key_page_up: "nav.page_up",
+                key_page_down: "nav.page_down",
+                ord('g'): "nav.home",
+                ord('G'): "nav.end",
+                ord('['): "log.line_up",
+                ord(']'): "log.line_down",
+                key_enter: "activate",
+                10: "activate",
+                13: "activate",
+                ord(' '): "toggle",
+                ord('s'): "save",
+                ord('S'): "save",
+            },
+            self.OVERLAY_MENU: {
+                ord('q'): "overlay.close",
+                ord('Q'): "overlay.close",
+                27: "overlay.close",
+                key_up: "nav.up",
+                ord('k'): "nav.up",
+                key_down: "nav.down",
+                ord('j'): "nav.down",
+                key_left: "overlay.back",
+                ord('h'): "overlay.back",
+                key_right: "activate",
+                ord('l'): "activate",
+                key_home: "nav.home",
+                key_end: "nav.end",
+                key_page_up: "nav.page_up",
+                key_page_down: "nav.page_down",
+                ord('g'): "nav.home",
+                ord('G'): "nav.end",
+                key_enter: "activate",
+                10: "activate",
+                13: "activate",
+            },
+            self.OVERLAY_HELP: {
+                ord('q'): "overlay.close",
+                ord('Q'): "overlay.close",
+                27: "overlay.close",
+                key_enter: "overlay.close",
+                10: "overlay.close",
+                13: "overlay.close",
+            },
+            self.OVERLAY_CONFIRM: {
+                ord('q'): "overlay.close",
+                ord('Q'): "overlay.close",
+                ord('y'): "confirm.accept",
+                ord('Y'): "confirm.accept",
+                ord('n'): "confirm.cancel",
+                ord('N'): "confirm.cancel",
+                27: "overlay.close",
+                key_left: "nav.left",
+                ord('h'): "nav.left",
+                key_right: "nav.right",
+                ord('l'): "nav.right",
+                key_enter: "activate",
+                10: "activate",
+                13: "activate",
+            },
+        }
+
+    def _command_for_input(self, ch: int) -> Optional[str]:
+        if ch is None or ch < 0:
+            return None
+        state_map = self._state_keymaps.get(self.ui_state, {})
+        if ch in state_map:
+            return state_map[ch]
+        return self._global_keymap.get(ch)
+
     def _handle_input(self, ch):
-        """Handle keyboard input for navigation."""
-        if ch == ord('q') or ch == ord('Q'):
-            if self.current_view == "main":
-                self.stop.set()
+        command = self._command_for_input(ch)
+        if not command:
+            return
+        self._dispatch_command(command)
+
+    def _dispatch_command(self, command: str, payload: Optional[Dict[str, Any]] = None):
+        cmd = str(command or "").strip().lower()
+        data = payload if isinstance(payload, dict) else {}
+
+        if cmd == "state.escape":
+            self._dispatch_escape()
+            return
+        if cmd == "overlay.menu.open":
+            self._open_overlay_menu("root")
+            return
+        if cmd == "overlay.help.open":
+            self._open_help_overlay()
+            return
+        if cmd == "overlay.close":
+            if self.ui_state == self.OVERLAY_MENU:
+                self._menu_pop(close_if_root=True)
+            elif self.ui_state == self.OVERLAY_HELP:
+                self._close_help_overlay()
+            elif self.ui_state == self.OVERLAY_CONFIRM:
+                self._close_confirm_overlay()
+            return
+        if cmd == "overlay.back":
+            if self.ui_state == self.OVERLAY_MENU:
+                self._menu_pop(close_if_root=True)
+            elif self.ui_state == self.OVERLAY_CONFIRM:
+                self._confirm_set_selection(1)
+            return
+        if cmd == "confirm.open.quit":
+            self._open_confirm_overlay(
+                title="Quit Hydra Router",
+                message="Stop the router UI and return to shell?",
+                accept_command="app.quit",
+                accept_payload={},
+                accept_label="Quit",
+                cancel_label="Cancel",
+                default_cancel=True,
+            )
+            return
+        if cmd == "confirm.accept":
+            accept_command = str(self.confirm_overlay.get("accept_command") or "app.quit")
+            accept_payload = self.confirm_overlay.get("accept_payload")
+            self._close_confirm_overlay()
+            self._dispatch_command(accept_command, accept_payload if isinstance(accept_payload, dict) else {})
+            return
+        if cmd == "confirm.cancel":
+            self._close_confirm_overlay()
+            return
+        if cmd == "app.quit":
+            self.stop.set()
+            return
+        if cmd == "view.open":
+            view = str(data.get("view") or "main").strip().lower()
+            self._set_base_view(view, reset_selection=True)
+            if self.ui_state != self.BASE_VIEW:
+                self.ui_state = self.BASE_VIEW
+            self.overlay_menu_stack.clear()
+            return
+        if cmd == "activate":
+            if self.ui_state == self.OVERLAY_MENU:
+                self._menu_activate_current()
+            elif self.ui_state == self.OVERLAY_HELP:
+                self._close_help_overlay()
+            elif self.ui_state == self.OVERLAY_CONFIRM:
+                if int(self.confirm_overlay.get("selected") or 1) == 0:
+                    self._dispatch_command("confirm.accept")
+                else:
+                    self._dispatch_command("confirm.cancel")
             else:
-                self.current_view = "main"
-                self.main_menu_index = 0
-                self.scroll_offset = 0
-                self.show_qr = False
-
-        elif ch == 27:  # ESC
-            if self.show_qr:
-                self.show_qr = False
-            elif self.current_view != "main":
-                self.current_view = "main"
-                self.main_menu_index = 0
-                self.scroll_offset = 0
-            else:
-                self.stop.set()
-
-        elif ch in (curses.KEY_UP, ord('k')):
-            if self.current_view == "main":
-                self.main_menu_index = (self.main_menu_index - 1) % len(self.MENU_ITEMS)
-            elif self.current_view == "debug":
-                # Scroll debug view
-                tab = self._debug_tabs()[self.debug_tab_index]
-                cur = self._debug_scroll_for_tab(tab)
-                self._set_debug_scroll(tab, cur - 1)
-            else:
-                self.main_menu_index = max(0, self.main_menu_index - 1)
-                if self.main_menu_index < self.scroll_offset:
-                    self.scroll_offset = self.main_menu_index
-
-        elif ch in (curses.KEY_DOWN, ord('j')):
-            if self.current_view == "main":
-                self.main_menu_index = (self.main_menu_index + 1) % len(self.MENU_ITEMS)
-            elif self.current_view == "debug":
-                # Scroll debug view
-                tab = self._debug_tabs()[self.debug_tab_index]
-                cur = self._debug_scroll_for_tab(tab)
-                self._set_debug_scroll(tab, cur + 1)
-            else:
-                max_idx = 0
-                if self.current_view == "config":
-                    # Services + 1 for security section (port isolation)
-                    max_idx = max(0, len(self.services))
-                elif self.current_view == "addressbook":
-                    max_idx = max(0, len(self.stats.get_address_book()) - 1)
-                elif self.current_view == "ingress":
-                    max_idx = max(0, len(self.services) - 1)
-
-                self.main_menu_index = min(max_idx, self.main_menu_index + 1)
-
-        elif ch in (curses.KEY_ENTER, 10, 13):
-            self._handle_enter()
-
-        elif ch == ord(' '):
-            if self.current_view == "config":
-                services = sorted(self.services.keys())
-                if 0 <= self.main_menu_index < len(services):
-                    # Toggle service enabled/disabled
-                    svc = services[self.main_menu_index]
-                    self.service_config[svc] = not self.service_config.get(svc, True)
-                    if self.action_handler:
-                        self.action_handler({
-                            "type": "service_toggle",
-                            "service": svc,
-                            "enabled": self.service_config[svc],
-                        })
-                elif self.main_menu_index == len(services):
-                    # Toggle port isolation (security section)
-                    self.port_isolation_enabled = not self.port_isolation_enabled
-                    if self.action_handler:
-                        self.action_handler({
-                            "type": "port_isolation",
-                            "enabled": self.port_isolation_enabled,
-                        })
-
-        elif ch in (ord('s'), ord('S')):
-            if self.current_view == "config":
+                self._base_activate()
+            return
+        if cmd == "toggle":
+            if self.ui_state == self.BASE_VIEW:
+                self._base_toggle()
+            return
+        if cmd == "save":
+            if self.ui_state == self.BASE_VIEW and self.base_view == "config":
                 self._save_service_config()
-        elif ch in (curses.KEY_RIGHT, ord('l')):
-            if self.current_view == "debug":
-                tabs = self._debug_tabs()
-                if tabs:
-                    self.debug_tab_index = (self.debug_tab_index + 1) % len(tabs)
-        elif ch in (curses.KEY_LEFT, ord('h')):
-            if self.current_view == "debug":
-                tabs = self._debug_tabs()
-                if tabs:
-                    self.debug_tab_index = (self.debug_tab_index - 1) % len(tabs)
+            return
+        if cmd == "log.line_up":
+            self._scroll_runtime_logs(1)
+            return
+        if cmd == "log.line_down":
+            self._scroll_runtime_logs(-1)
+            return
 
-    def _handle_enter(self):
-        """Handle Enter key based on current view."""
-        if self.current_view == "main":
-            selected = self.MENU_ITEMS[self.main_menu_index]
-            if selected == "Config":
-                self.current_view = "config"
-            elif selected == "Statistics":
-                self.current_view = "stats"
-            elif selected == "Address Book":
-                self.current_view = "addressbook"
-            elif selected == "Ingress":
-                self.current_view = "ingress"
-            elif selected == "Egress":
-                self.current_view = "egress"
-            elif selected == "Debug":
-                self.current_view = "debug"
+        if cmd in {"nav.up", "nav.down", "nav.left", "nav.right", "nav.home", "nav.end", "nav.page_up", "nav.page_down"}:
+            if self.ui_state == self.OVERLAY_MENU:
+                self._menu_navigate(cmd)
+            elif self.ui_state == self.OVERLAY_CONFIRM:
+                if cmd in {"nav.left", "nav.right"}:
+                    self._confirm_set_selection(0 if cmd == "nav.left" else 1)
+            elif self.ui_state == self.BASE_VIEW:
+                if cmd == "nav.page_up":
+                    self._scroll_runtime_logs(max(1, self.runtime_log_visible_rows - 1))
+                elif cmd == "nav.page_down":
+                    self._scroll_runtime_logs(-max(1, self.runtime_log_visible_rows - 1))
+                self._navigate_base(cmd)
+            return
 
+    def _dispatch_escape(self):
+        if self.ui_state == self.OVERLAY_MENU:
+            self._menu_pop(close_if_root=True)
+            return
+        if self.ui_state == self.OVERLAY_HELP:
+            self._close_help_overlay()
+            return
+        if self.ui_state == self.OVERLAY_CONFIRM:
+            self._close_confirm_overlay()
+            return
+        if self.show_qr:
+            self.show_qr = False
+            return
+        if self.base_view != "main":
+            self._set_base_view("main", reset_selection=True)
+            return
+        self._dispatch_command("confirm.open.quit")
+
+    def _set_base_view(self, view: str, reset_selection: bool = False):
+        target = str(view or "main").strip().lower()
+        valid = {"main", "config", "stats", "addressbook", "ingress", "egress", "debug"}
+        if target not in valid:
+            target = "main"
+        self.base_view = target
+        self.current_view = target
+        if reset_selection:
             self.main_menu_index = 0
             self.scroll_offset = 0
-            # Reset debug scroll when entering debug view
-            if self.current_view == "debug":
-                tabs = self._debug_tabs()
-                if tabs:
-                    self.debug_tab_index = 0
-                    self._set_debug_scroll(tabs[0], 0)
+        if target == "debug":
+            tabs = self._debug_tabs()
+            if tabs:
+                self.debug_tab_index = min(self.debug_tab_index, len(tabs) - 1)
+                self._set_debug_scroll(tabs[self.debug_tab_index], 0)
+        if target != "ingress":
+            self.show_qr = False
 
-        elif self.current_view == "ingress":
+    def _page_step_for_view(self, view: str) -> int:
+        h = max(1, int(self.last_content_dims[0] or 0))
+        if view == "config":
+            return max(1, h - 7)
+        if view == "addressbook":
+            return max(1, h - 5)
+        if view == "ingress":
+            return max(1, h - 5)
+        if view == "debug":
+            return max(1, h - 5)
+        return max(1, h // 2)
+
+    def _max_index_for_view(self, view: str) -> int:
+        if view == "main":
+            return max(0, len(self.MENU_ITEMS) - 1)
+        if view == "config":
+            return max(0, len(self.services))
+        if view == "addressbook":
+            return max(0, len(self.stats.get_address_book()) - 1)
+        if view == "ingress":
+            return max(0, len(self.services) - 1)
+        return 0
+
+    def _sync_scroll_to_selection(self, view: str):
+        visible_rows = self._page_step_for_view(view)
+        if self.main_menu_index < self.scroll_offset:
+            self.scroll_offset = self.main_menu_index
+        if self.main_menu_index >= self.scroll_offset + visible_rows:
+            self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
+
+    def _navigate_base(self, command: str):
+        view = str(self.base_view or "main")
+        cmd = str(command or "")
+
+        if view == "debug":
+            self._navigate_debug(cmd)
+            return
+
+        max_idx = self._max_index_for_view(view)
+        if view == "main":
+            if cmd in {"nav.up", "nav.down"}:
+                step = -1 if cmd == "nav.up" else 1
+                self.main_menu_index = (self.main_menu_index + step) % max(1, len(self.MENU_ITEMS))
+            elif cmd in {"nav.page_up", "nav.page_down"}:
+                step = -self._page_step_for_view(view) if cmd == "nav.page_up" else self._page_step_for_view(view)
+                self.main_menu_index = (self.main_menu_index + step) % max(1, len(self.MENU_ITEMS))
+            elif cmd == "nav.home":
+                self.main_menu_index = 0
+            elif cmd == "nav.end":
+                self.main_menu_index = max_idx
+            return
+
+        if max_idx <= 0 and view not in {"config", "addressbook", "ingress"}:
+            return
+        if cmd == "nav.up":
+            self.main_menu_index = max(0, self.main_menu_index - 1)
+        elif cmd == "nav.down":
+            self.main_menu_index = min(max_idx, self.main_menu_index + 1)
+        elif cmd == "nav.page_up":
+            self.main_menu_index = max(0, self.main_menu_index - self._page_step_for_view(view))
+        elif cmd == "nav.page_down":
+            self.main_menu_index = min(max_idx, self.main_menu_index + self._page_step_for_view(view))
+        elif cmd == "nav.home":
+            self.main_menu_index = 0
+        elif cmd == "nav.end":
+            self.main_menu_index = max_idx
+        self._sync_scroll_to_selection(view)
+
+    def _debug_visible_rows(self) -> int:
+        return max(1, self._page_step_for_view("debug"))
+
+    def _debug_entry_count(self, tab: str) -> int:
+        flows = [
+            entry for entry in reversed(self.flow_logs)
+            if tab == "All" or entry.get("service") == tab
+        ]
+        if flows:
+            return len(flows)
+        return len(self.activity)
+
+    def _navigate_debug(self, command: str):
+        tabs = self._debug_tabs()
+        if not tabs:
+            return
+        tab = tabs[self.debug_tab_index]
+        if command in {"nav.left", "nav.right"}:
+            step = -1 if command == "nav.left" else 1
+            self.debug_tab_index = (self.debug_tab_index + step) % len(tabs)
+            tab = tabs[self.debug_tab_index]
+            return
+
+        cur = self._debug_scroll_for_tab(tab)
+        if command == "nav.up":
+            cur -= 1
+        elif command == "nav.down":
+            cur += 1
+        elif command == "nav.page_up":
+            cur -= self._debug_visible_rows()
+        elif command == "nav.page_down":
+            cur += self._debug_visible_rows()
+        elif command == "nav.home":
+            cur = 0
+        elif command == "nav.end":
+            total = self._debug_entry_count(tab)
+            cur = max(0, total - self._debug_visible_rows())
+        self._set_debug_scroll(tab, cur)
+
+    def _base_activate(self):
+        view = str(self.base_view or "main")
+        if view == "main":
+            selected = self.MENU_ITEMS[self.main_menu_index]
+            target_view = self.VIEW_BY_MENU_ITEM.get(selected, "main")
+            self._dispatch_command("view.open", {"view": target_view})
+            return
+        if view == "ingress":
             services = sorted(self.services.keys())
             if 0 <= self.main_menu_index < len(services):
                 svc = services[self.main_menu_index]
@@ -4612,6 +5694,187 @@ class EnhancedUI:
                     self.qr_data = addr
                     self.qr_label = f"Service: {svc}"
                     self.show_qr = True
+
+    def _base_toggle(self):
+        if self.base_view != "config":
+            return
+        services = sorted(self.services.keys())
+        if 0 <= self.main_menu_index < len(services):
+            svc = services[self.main_menu_index]
+            self.service_config[svc] = not self.service_config.get(svc, True)
+            if self.action_handler:
+                self.action_handler({
+                    "type": "service_toggle",
+                    "service": svc,
+                    "enabled": self.service_config[svc],
+                })
+            return
+        if self.main_menu_index == len(services):
+            self.port_isolation_enabled = not self.port_isolation_enabled
+            if self.action_handler:
+                self.action_handler({
+                    "type": "port_isolation",
+                    "enabled": self.port_isolation_enabled,
+                })
+
+    def _menu_definition(self, menu_id: str) -> Dict[str, Any]:
+        menu_key = str(menu_id or "root").strip().lower()
+        if menu_key == "views":
+            return {
+                "id": "views",
+                "title": "Views",
+                "items": [
+                    {"label": "Main", "command": "view.open", "payload": {"view": "main"}},
+                    {"label": "Config", "command": "view.open", "payload": {"view": "config"}},
+                    {"label": "Statistics", "command": "view.open", "payload": {"view": "stats"}},
+                    {"label": "Address Book", "command": "view.open", "payload": {"view": "addressbook"}},
+                    {"label": "Ingress", "command": "view.open", "payload": {"view": "ingress"}},
+                    {"label": "Egress", "command": "view.open", "payload": {"view": "egress"}},
+                    {"label": "Debug", "command": "view.open", "payload": {"view": "debug"}},
+                ],
+                "index": 0,
+                "scroll": 0,
+            }
+        if menu_key == "actions":
+            return {
+                "id": "actions",
+                "title": "Actions",
+                "items": [
+                    {"label": "Save Config", "command": "save"},
+                    {"label": "Toggle Selected Item", "command": "toggle"},
+                    {"label": "Open Help", "command": "overlay.help.open"},
+                    {"label": "Quit Router UI", "command": "confirm.open.quit"},
+                ],
+                "index": 0,
+                "scroll": 0,
+            }
+        return {
+            "id": "root",
+            "title": "Hydra Menu",
+            "items": [
+                {"label": "Views", "submenu": "views"},
+                {"label": "Actions", "submenu": "actions"},
+                {"label": "Help", "command": "overlay.help.open"},
+                {"label": "Close Overlay", "command": "overlay.close"},
+                {"label": "Quit Hydra Router", "command": "confirm.open.quit"},
+            ],
+            "index": 0,
+            "scroll": 0,
+        }
+
+    def _menu_current(self) -> Optional[Dict[str, Any]]:
+        if not self.overlay_menu_stack:
+            return None
+        return self.overlay_menu_stack[-1]
+
+    def _open_overlay_menu(self, menu_id: str = "root"):
+        if self.ui_state != self.OVERLAY_MENU:
+            self.ui_state = self.OVERLAY_MENU
+        if self.overlay_menu_stack:
+            return
+        self.overlay_menu_stack = [self._menu_definition(menu_id)]
+
+    def _menu_push(self, menu_id: str):
+        menu = self._menu_definition(menu_id)
+        self.overlay_menu_stack.append(menu)
+        self.ui_state = self.OVERLAY_MENU
+
+    def _menu_pop(self, close_if_root: bool = True):
+        if not self.overlay_menu_stack:
+            self.ui_state = self.BASE_VIEW
+            return
+        if len(self.overlay_menu_stack) > 1:
+            self.overlay_menu_stack.pop()
+            return
+        if close_if_root:
+            self.overlay_menu_stack.clear()
+            self.ui_state = self.BASE_VIEW
+
+    def _menu_navigate(self, command: str):
+        menu = self._menu_current()
+        if not menu:
+            return
+        items = menu.get("items") if isinstance(menu.get("items"), list) else []
+        if not items:
+            return
+        idx = int(menu.get("index") or 0)
+        if command == "nav.up":
+            idx = (idx - 1) % len(items)
+        elif command == "nav.down":
+            idx = (idx + 1) % len(items)
+        elif command == "nav.page_up":
+            idx = max(0, idx - max(1, self._page_step_for_view("main") // 2))
+        elif command == "nav.page_down":
+            idx = min(len(items) - 1, idx + max(1, self._page_step_for_view("main") // 2))
+        elif command == "nav.home":
+            idx = 0
+        elif command == "nav.end":
+            idx = len(items) - 1
+        menu["index"] = idx
+
+    def _menu_activate_current(self):
+        menu = self._menu_current()
+        if not menu:
+            return
+        items = menu.get("items") if isinstance(menu.get("items"), list) else []
+        if not items:
+            return
+        idx = int(menu.get("index") or 0)
+        idx = max(0, min(len(items) - 1, idx))
+        item = items[idx]
+        submenu = item.get("submenu")
+        if submenu:
+            self._menu_push(str(submenu))
+            return
+        command = item.get("command")
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if command:
+            self._dispatch_command(str(command), payload)
+
+    def _open_help_overlay(self):
+        if self.ui_state == self.OVERLAY_HELP:
+            return
+        self.overlay_help_return_state = self.ui_state
+        self.ui_state = self.OVERLAY_HELP
+
+    def _close_help_overlay(self):
+        if self.overlay_help_return_state == self.OVERLAY_MENU and self.overlay_menu_stack:
+            self.ui_state = self.OVERLAY_MENU
+            return
+        if self.overlay_help_return_state == self.OVERLAY_CONFIRM:
+            self.ui_state = self.OVERLAY_CONFIRM
+            return
+        self.ui_state = self.BASE_VIEW
+
+    def _open_confirm_overlay(
+        self,
+        title: str,
+        message: str,
+        accept_command: str,
+        accept_payload: Optional[Dict[str, Any]] = None,
+        accept_label: str = "Yes",
+        cancel_label: str = "No",
+        default_cancel: bool = True,
+    ):
+        self.confirm_overlay = {
+            "title": str(title or "Confirm"),
+            "message": str(message or ""),
+            "accept_label": str(accept_label or "Yes"),
+            "cancel_label": str(cancel_label or "No"),
+            "accept_command": str(accept_command or "app.quit"),
+            "accept_payload": accept_payload if isinstance(accept_payload, dict) else {},
+            "selected": 1 if default_cancel else 0,
+        }
+        self.ui_state = self.OVERLAY_CONFIRM
+
+    def _close_confirm_overlay(self):
+        if self.overlay_menu_stack:
+            self.ui_state = self.OVERLAY_MENU
+        else:
+            self.ui_state = self.BASE_VIEW
+
+    def _confirm_set_selection(self, selected: int):
+        self.confirm_overlay["selected"] = 0 if int(selected) <= 0 else 1
 
 
 # ──────────────────────────────────────────────────────────────
@@ -7324,10 +8587,22 @@ class Router:
         self.startup_time = time.time()
         self.ui = EnhancedUI(use_ui, STATE_CONFIG_PATH)
         self.ui.set_action_handler(self.handle_ui_action)
+        self._ui_log_handler: Optional[logging.Handler] = None
+        if self.ui.enabled:
+            for handler in list(LOGGER.handlers):
+                if isinstance(handler, UILogForwardHandler):
+                    LOGGER.removeHandler(handler)
+            self._ui_log_handler = UILogForwardHandler(self.ui.append_runtime_log)
+            LOGGER.addHandler(self._ui_log_handler)
         ensure_bridge()
         self._apply_runtime_config(cfg)
 
-        self.watchdog = ServiceWatchdog(BASE_DIR, watchdog_config=self.cfg.get("watchdog", {}))
+        watchdog_sink = self.ui.append_runtime_log if self.ui.enabled else None
+        self.watchdog = ServiceWatchdog(
+            BASE_DIR,
+            watchdog_config=self.cfg.get("watchdog", {}),
+            log_sink=watchdog_sink,
+        )
         self.watchdog.ensure_sources(service_config=self.ui.service_config)
         for svc, enabled in self.watchdog.desired_state().items():
             self.ui.service_config[svc] = bool(enabled)
@@ -13085,6 +14360,10 @@ class Router:
             return
         self.stop.set()
         LOGGER.info("Shutting down router")
+        if self._ui_log_handler is not None:
+            with contextlib.suppress(Exception):
+                LOGGER.removeHandler(self._ui_log_handler)
+            self._ui_log_handler = None
         self.ui.shutdown()
         self.resolve_sweeper_stop.set()
         if self.resolve_sweeper_thread and self.resolve_sweeper_thread.is_alive():

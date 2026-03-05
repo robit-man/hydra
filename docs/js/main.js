@@ -2441,6 +2441,8 @@ function bindUI() {
   const leftDockRoot = qs('#leftDock');
   const rightDockRoot = qs('#rightDock');
   const dockBackdrop = qs('#dockBackdrop');
+  const leftDockExpandBtn = qs('#leftDockExpandBtn');
+  const rightDockExpandBtn = qs('#rightDockExpandBtn');
   const leftDock = createDockController({
     side: 'left',
     rootEl: leftDockRoot,
@@ -2525,6 +2527,51 @@ function bindUI() {
     return false;
   };
 
+  const dockRootsBySide = {
+    left: leftDockRoot,
+    right: rightDockRoot
+  };
+  const dockControllersBySide = {
+    left: leftDock,
+    right: rightDock
+  };
+  const defaultDockPanelsBySide = {
+    left: 'workspace',
+    right: 'router'
+  };
+  const setDockStage = (side, stage = 'panel') => {
+    const dockRoot = dockRootsBySide[side] || null;
+    if (!dockRoot) return;
+    dockRoot.dataset.mobileStage = stage === 'controls' ? 'controls' : 'panel';
+  };
+  const syncDockMode = () => {
+    const mobile = isMobileDockMode();
+    document.body.classList.toggle('dock-mobile-mode', mobile);
+    ['left', 'right'].forEach((side) => {
+      const dockRoot = dockRootsBySide[side];
+      if (!dockRoot) return;
+      dockRoot.dataset.mobileMode = mobile ? 'true' : 'false';
+      if (!mobile) {
+        setDockStage(side, 'panel');
+        return;
+      }
+      if (!dockControllersBySide[side]?.isOpen?.()) setDockStage(side, 'controls');
+      if (!dockRoot.dataset.mobileStage) setDockStage(side, 'controls');
+    });
+
+    const anyOpen = leftDock.isOpen() || rightDock.isOpen();
+    const leftExpanded = leftDock.isOpen() ? 'true' : 'false';
+    const rightExpanded = rightDock.isOpen() ? 'true' : 'false';
+    if (leftDockExpandBtn) {
+      leftDockExpandBtn.classList.toggle('hidden', !mobile || anyOpen);
+      leftDockExpandBtn.setAttribute('aria-expanded', leftExpanded);
+    }
+    if (rightDockExpandBtn) {
+      rightDockExpandBtn.classList.toggle('hidden', !mobile || anyOpen);
+      rightDockExpandBtn.setAttribute('aria-expanded', rightExpanded);
+    }
+  };
+
   const syncDockBackdrop = () => {
     if (!dockBackdrop) return;
     const anyOpen = leftDock.isOpen() || rightDock.isOpen();
@@ -2532,19 +2579,94 @@ function bindUI() {
     dockBackdrop.setAttribute('aria-hidden', anyOpen ? 'false' : 'true');
   };
 
-  const closeAllDocks = () => {
-    leftDock.close();
-    rightDock.close();
+  const syncDockUI = () => {
+    syncDockMode();
     syncDockBackdrop();
   };
 
+  const closeAllDocks = () => {
+    leftDock.close();
+    rightDock.close();
+    setDockStage('left', 'controls');
+    setDockStage('right', 'controls');
+    syncDockUI();
+  };
+
+  const openDockFromExpander = (side) => {
+    const dock = dockControllersBySide[side];
+    if (!dock) return;
+    const otherSide = side === 'left' ? 'right' : 'left';
+    if (dock.isOpen()) {
+      dock.close();
+      setDockStage(side, 'controls');
+      syncDockUI();
+      return;
+    }
+    if (isMobileDockMode()) {
+      dockControllersBySide[otherSide]?.close?.();
+      setDockStage(side, 'controls');
+      dock.open(dock.getActive() || defaultDockPanelsBySide[side]);
+      syncDockUI();
+      return;
+    }
+    dock.open(dock.getActive() || defaultDockPanelsBySide[side]);
+    syncDockUI();
+  };
+
+  leftDockExpandBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    openDockFromExpander('left');
+  });
+  rightDockExpandBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    openDockFromExpander('right');
+  });
+
+  document.querySelectorAll('[data-dock-back]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      if (!isMobileDockMode()) return;
+      event.preventDefault();
+      const side = String(btn.getAttribute('data-dock-back') || '').trim().toLowerCase() === 'right' ? 'right' : 'left';
+      const dock = dockControllersBySide[side];
+      if (!dock) return;
+      if (!dock.isOpen()) dock.open(defaultDockPanelsBySide[side]);
+      setDockStage(side, 'controls');
+      syncDockUI();
+    });
+  });
+
+  document.querySelectorAll('[data-dock-close-menu]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      const side = String(btn.getAttribute('data-dock-close-menu') || '').trim().toLowerCase() === 'right' ? 'right' : 'left';
+      dockControllersBySide[side]?.close?.();
+      setDockStage(side, 'controls');
+      syncDockUI();
+    });
+  });
+
+  const bindDockPanelEntry = (dockRoot, side) => {
+    if (!dockRoot) return;
+    dockRoot.querySelectorAll('.hydra-dock-controls [data-dock-item]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!isMobileDockMode()) return;
+        setDockStage(side, 'panel');
+        syncDockMode();
+      });
+    });
+  };
+  bindDockPanelEntry(leftDockRoot, 'left');
+  bindDockPanelEntry(rightDockRoot, 'right');
+
   leftDock.subscribe(({ open }) => {
     if (open && isMobileDockMode()) rightDock.close();
-    syncDockBackdrop();
+    if (!open) setDockStage('left', 'controls');
+    syncDockUI();
   });
   rightDock.subscribe(({ open }) => {
     if (open && isMobileDockMode()) leftDock.close();
-    syncDockBackdrop();
+    if (!open) setDockStage('right', 'controls');
+    syncDockUI();
   });
   dockBackdrop?.addEventListener('click', (event) => {
     event.preventDefault();
@@ -2556,7 +2678,9 @@ function bindUI() {
     event.preventDefault();
     closeAllDocks();
   });
-  syncDockBackdrop();
+  window.addEventListener('resize', syncDockUI);
+  window.addEventListener('orientationchange', syncDockUI);
+  syncDockUI();
 
   const parseCountText = (value) => {
     const text = String(value || '').trim();
