@@ -8641,6 +8641,15 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     setTimeout(() => requestRedraw(), 50);
   }
 
+  function getWorkspaceStats() {
+    ensureSelectionSet();
+    return {
+      nodeCount: WS.nodes.size,
+      linkCount: WS.wires.length,
+      selectedCount: WS.selectedNodes.size
+    };
+  }
+
   return {
     init,
     addNode,
@@ -8660,6 +8669,7 @@ const hideLogsIcon = '<img src="img/chevron-down.svg" alt="" class="icon inverte
     openImportDialog: () => openGraphImportDialog(),
     saveAs: () => saveWorkspaceAsInteractive(),
     setFlowSaveHandler,
+    getWorkspaceStats,
     refreshMeshtasticPorts,
     openDocs
   };

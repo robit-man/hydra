@@ -22,7 +22,9 @@ const CFG_PERSIST_ALLOWLIST = new Set([
   'noclipMarketplaceDirectoryLastStatus',
   'noclipMarketplaceDirectoryLastAt',
   'marketplaceGossipEnabled',
-  'marketplaceGossipSubjects'
+  'marketplaceGossipSubjects',
+  'uiDockState',
+  'uiSectionState'
 ]);
 const CFG_PERSIST_DROP_KEYS = new Set([
   'routerResolvedEndpoints',
@@ -103,6 +105,37 @@ const FEATURE_FLAG_DEFAULTS = Object.freeze({
   cloudflaredManager: false
 });
 
+function sanitizeDockState(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const left = source.left && typeof source.left === 'object' ? source.left : {};
+  const right = source.right && typeof source.right === 'object' ? source.right : {};
+  return {
+    left: {
+      open: left.open === true,
+      active: String(left.active || '').trim() || 'workspace'
+    },
+    right: {
+      open: right.open === true,
+      active: String(right.active || '').trim() || 'router'
+    }
+  };
+}
+
+function sanitizeSectionState(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const [panelId, panelState] of Object.entries(source)) {
+    const key = String(panelId || '').trim();
+    if (!key) continue;
+    const state = panelState && typeof panelState === 'object' ? panelState : {};
+    const collapsed = Array.isArray(state.collapsed)
+      ? state.collapsed.map((entry) => String(entry || '').trim()).filter(Boolean).slice(0, 128)
+      : [];
+    out[key] = { collapsed };
+  }
+  return out;
+}
+
 function sanitizeFeatureFlags(rawFlags) {
   const source = rawFlags && typeof rawFlags === 'object' ? rawFlags : {};
   return {
@@ -132,6 +165,8 @@ const CFG_DEFAULTS = {
   noclipMarketplaceDirectoryLastAt: 0,
   marketplaceGossipEnabled: true,
   marketplaceGossipSubjects: ['hydra.market.catalog.v1', 'hydra.market.status.v1'],
+  uiDockState: sanitizeDockState({}),
+  uiSectionState: sanitizeSectionState({}),
   featureFlags: sanitizeFeatureFlags(FEATURE_FLAG_DEFAULTS)
 };
 const CFG = {
@@ -188,6 +223,8 @@ if (!CFG.marketplaceGossipSubjects.length) {
 }
 if (!Array.isArray(CFG.wires)) CFG.wires = [];
 CFG.featureFlags = sanitizeFeatureFlags(CFG.featureFlags);
+CFG.uiDockState = sanitizeDockState(CFG.uiDockState);
+CFG.uiSectionState = sanitizeSectionState(CFG.uiSectionState);
 try {
   LS.set(CFG_STORAGE_KEY, sanitizeCfgForStorage(CFG));
 } catch (err) {

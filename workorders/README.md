@@ -2,6 +2,11 @@
 
 This folder breaks the phased plan into executable, individually completable workorders.
 
+## Session Signal
+
+- `IMPLEMENTATION_SIGNAL_LOG.md`
+  - Compact running change log for cross-session context continuity.
+
 ## Phase Index
 
 - `phase-00`

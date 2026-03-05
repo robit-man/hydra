@@ -31,6 +31,8 @@ import { initSmartObjectInvite } from './smartObjectInvite.js';
 import { createNoClipBridgeSync } from './noclipBridgeSync.js';
 import { createRouterDiscovery } from './routerDiscovery.js';
 import { normalizeResolvedMap } from './endpointResolver.js';
+import { createDockController } from './ui/dockController.js';
+import { bindSectionState } from './ui/sectionState.js';
 
 const updateTransportButton = makeTransportButtonUpdater({ CFG, Net });
 Net.setTransportUpdater(updateTransportButton);
@@ -2391,49 +2393,217 @@ function bindUI() {
   const publishResultEl = qs('#marketplacePublishResult');
   const routerStatus = qs('#routerResolveStatus');
   const routerMessage = qs('#routerResolveMessage');
-  const leftSidebar = qs('#leftSidebar');
-  const rightSidebar = qs('#rightSidebar');
-  const leftSidebarToggle = qs('#leftSidebarToggle');
-  const rightSidebarToggle = qs('#rightSidebarToggle');
-  const leftSidebarClose = qs('#leftSidebarClose');
-  const rightSidebarClose = qs('#rightSidebarClose');
+  const leftDockRoot = qs('#leftDock');
+  const rightDockRoot = qs('#rightDock');
+  const dockBackdrop = qs('#dockBackdrop');
+  const leftDock = createDockController({
+    side: 'left',
+    rootEl: leftDockRoot,
+    controlsEl: leftDockRoot?.querySelector('.hydra-dock-controls'),
+    panelsEl: qs('#leftSidebar'),
+    CFG,
+    saveCFG
+  });
+  const rightDock = createDockController({
+    side: 'right',
+    rootEl: rightDockRoot,
+    controlsEl: rightDockRoot?.querySelector('.hydra-dock-controls'),
+    panelsEl: qs('#rightSidebar'),
+    CFG,
+    saveCFG
+  });
 
-  const applySidebarState = (name, open) => {
-    const key = name === 'left' ? 'leftSidebarOpen' : 'rightSidebarOpen';
-    const sidebar = name === 'left' ? leftSidebar : rightSidebar;
-    const toggleBtn = name === 'left' ? leftSidebarToggle : rightSidebarToggle;
-    const isOpen = !!open;
-    if (sidebar) sidebar.dataset.open = isOpen ? 'true' : 'false';
-    if (toggleBtn) {
-      toggleBtn.classList.toggle('active', isOpen);
-      toggleBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-      toggleBtn.setAttribute('aria-label', isOpen ? `Hide ${name} sidebar` : `Show ${name} sidebar`);
+  const sectionBindings = [
+    bindSectionState({
+      root: leftDockRoot?.querySelector('[data-dock-panel="workspace"]'),
+      panelKey: 'left.workspace',
+      CFG,
+      saveCFG
+    }),
+    bindSectionState({
+      root: leftDockRoot?.querySelector('[data-dock-panel="graphs"]'),
+      panelKey: 'left.graphs',
+      CFG,
+      saveCFG
+    }),
+    bindSectionState({
+      root: leftDockRoot?.querySelector('[data-dock-panel="collab"]'),
+      panelKey: 'left.collab',
+      CFG,
+      saveCFG
+    }),
+    bindSectionState({
+      root: rightDockRoot?.querySelector('[data-dock-panel="market"]'),
+      panelKey: 'right.market',
+      CFG,
+      saveCFG
+    }),
+    bindSectionState({
+      root: rightDockRoot?.querySelector('[data-dock-panel="policy"]'),
+      panelKey: 'right.policy',
+      CFG,
+      saveCFG
+    })
+  ];
+  sectionBindings.forEach((binding) => binding?.refresh?.());
+  const nodeLibrarySearchInput = qs('#nodeLibrarySearchInput');
+  const workspaceNodeCountEl = qs('#workspaceNodeCount');
+  const workspaceLinkCountEl = qs('#workspaceLinkCount');
+  const workspaceSelectedCountEl = qs('#workspaceSelectedCount');
+  const workspaceFlowCountEl = qs('#workspaceFlowCount');
+  const workspaceFlowCountMetaEl = qs('#workspaceFlowCountMeta');
+  const workspaceNodeCatalogCountEl = qs('#workspaceNodeCatalogCount');
+  const collabHydraPeerCountEl = qs('#collabHydraPeerCount');
+  const collabNoClipPeerCountEl = qs('#collabNoClipPeerCount');
+  const rightMarketIndicator = qs('#rightMarketIndicator');
+  const rightPolicyIndicator = qs('#rightPolicyIndicator');
+  const marketHealthBadge = qs('#marketplaceHealthBadge');
+  const ownerAuthStatusEl = qs('#marketOwnerAuthStatus');
+  const nodeMenuListEl = qs('#nodeMenuList');
+  const peerOnlineBadge = qs('#peerOnlineBadge');
+  const noclipPeerBadge = qs('#noclipPeerBadge');
+
+  const isMobileDockMode = () => {
+    try {
+      if (window.matchMedia('(max-width: 980px)').matches) return true;
+      if (window.matchMedia('(pointer: coarse)').matches) return true;
+    } catch (_) {
+      // ignore media query failures
     }
-    if (CFG[key] !== isOpen) {
-      CFG[key] = isOpen;
-      saveCFG();
+    return false;
+  };
+
+  const syncDockBackdrop = () => {
+    if (!dockBackdrop) return;
+    const anyOpen = leftDock.isOpen() || rightDock.isOpen();
+    dockBackdrop.classList.toggle('hidden', !anyOpen);
+    dockBackdrop.setAttribute('aria-hidden', anyOpen ? 'false' : 'true');
+  };
+
+  const closeAllDocks = () => {
+    leftDock.close();
+    rightDock.close();
+    syncDockBackdrop();
+  };
+
+  leftDock.subscribe(({ open }) => {
+    if (open && isMobileDockMode()) rightDock.close();
+    syncDockBackdrop();
+  });
+  rightDock.subscribe(({ open }) => {
+    if (open && isMobileDockMode()) leftDock.close();
+    syncDockBackdrop();
+  });
+  dockBackdrop?.addEventListener('click', (event) => {
+    event.preventDefault();
+    closeAllDocks();
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (!leftDock.isOpen() && !rightDock.isOpen()) return;
+    event.preventDefault();
+    closeAllDocks();
+  });
+  syncDockBackdrop();
+
+  const parseCountText = (value) => {
+    const text = String(value || '').trim();
+    const match = text.match(/\d+/);
+    if (!match) return 0;
+    const parsed = Number(match[0]);
+    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    return Math.max(0, Math.floor(parsed));
+  };
+
+  const refreshWorkspaceStats = () => {
+    const stats = Graph?.getWorkspaceStats?.() || {};
+    const nodeCount = Number(stats.nodeCount || 0);
+    const linkCount = Number(stats.linkCount || 0);
+    const selectedCount = Number(stats.selectedCount || 0);
+    const flowCount = Number(Flows?.list?.().length || 0);
+    if (workspaceNodeCountEl) workspaceNodeCountEl.textContent = String(Math.max(0, Math.floor(nodeCount)));
+    if (workspaceLinkCountEl) workspaceLinkCountEl.textContent = String(Math.max(0, Math.floor(linkCount)));
+    if (workspaceSelectedCountEl) workspaceSelectedCountEl.textContent = String(Math.max(0, Math.floor(selectedCount)));
+    if (workspaceFlowCountEl) workspaceFlowCountEl.textContent = String(Math.max(0, Math.floor(flowCount)));
+    if (workspaceFlowCountMetaEl) workspaceFlowCountMetaEl.textContent = `${Math.max(0, Math.floor(flowCount))} saved`;
+    const hasNodes = nodeCount > 0;
+    leftDock.setButtonTone('workspace', hasNodes ? 'ok' : 'warn');
+  };
+
+  const applyNodeLibraryFilter = () => {
+    if (!nodeMenuListEl) return;
+    const query = String(nodeLibrarySearchInput?.value || '').trim().toLowerCase();
+    const entries = Array.from(nodeMenuListEl.querySelectorAll('button'));
+    let visible = 0;
+    entries.forEach((entry) => {
+      const label = String(entry.textContent || '').trim().toLowerCase();
+      const match = !query || label.includes(query);
+      entry.style.display = match ? '' : 'none';
+      if (match) visible += 1;
+    });
+    if (workspaceNodeCatalogCountEl) {
+      workspaceNodeCatalogCountEl.textContent = `${visible} type${visible === 1 ? '' : 's'}`;
     }
   };
 
-  const initSidebar = (name, fallbackOpen = true) => {
-    const key = name === 'left' ? 'leftSidebarOpen' : 'rightSidebarOpen';
-    const toggleBtn = name === 'left' ? leftSidebarToggle : rightSidebarToggle;
-    const closeBtn = name === 'left' ? leftSidebarClose : rightSidebarClose;
-    const startOpen = typeof CFG[key] === 'boolean' ? CFG[key] : fallbackOpen;
-    applySidebarState(name, startOpen);
-    toggleBtn?.addEventListener('click', (event) => {
-      event.preventDefault();
-      const currentOpen = (name === 'left' ? leftSidebar : rightSidebar)?.dataset?.open !== 'false';
-      applySidebarState(name, !currentOpen);
+  const refreshCollabCounts = () => {
+    const hydraCount = peerOnlineBadge?.classList?.contains('hidden')
+      ? 0
+      : parseCountText(peerOnlineBadge?.textContent || '0');
+    const noclipCount = noclipPeerBadge?.classList?.contains('hidden')
+      ? 0
+      : parseCountText(noclipPeerBadge?.textContent || '0');
+    if (collabHydraPeerCountEl) collabHydraPeerCountEl.textContent = String(hydraCount);
+    if (collabNoClipPeerCountEl) collabNoClipPeerCountEl.textContent = String(noclipCount);
+    leftDock.setButtonTone('collab', hydraCount + noclipCount > 0 ? 'ok' : 'idle');
+  };
+
+  const refreshRightIndicators = () => {
+    const healthClass = marketHealthBadge?.classList || null;
+    const marketTone = healthClass?.contains('state-online')
+      ? 'ok'
+      : (healthClass?.contains('state-degraded') ? 'warn' : 'error');
+    rightDock.setButtonTone('market', marketTone);
+    if (rightMarketIndicator) rightMarketIndicator.dataset.tone = marketTone;
+
+    const policyTone = String(ownerAuthStatusEl?.dataset?.tone || 'warn').trim().toLowerCase();
+    const mappedPolicyTone = policyTone === 'ok' ? 'ok' : (policyTone === 'error' ? 'error' : 'warn');
+    rightDock.setButtonTone('policy', mappedPolicyTone);
+    if (rightPolicyIndicator) rightPolicyIndicator.dataset.tone = mappedPolicyTone;
+  };
+
+  nodeLibrarySearchInput?.addEventListener('input', () => {
+    applyNodeLibraryFilter();
+  });
+  if (nodeMenuListEl) {
+    const observer = new MutationObserver(() => {
+      applyNodeLibraryFilter();
     });
-    closeBtn?.addEventListener('click', (event) => {
-      event.preventDefault();
-      applySidebarState(name, false);
+    observer.observe(nodeMenuListEl, { childList: true, subtree: false });
+  }
+
+  const observeStateMutations = (target, handler) => {
+    if (!target || typeof MutationObserver !== 'function') return;
+    const observer = new MutationObserver(() => {
+      handler();
+    });
+    observer.observe(target, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true
     });
   };
 
-  initSidebar('left', true);
-  initSidebar('right', true);
+  observeStateMutations(peerOnlineBadge, refreshCollabCounts);
+  observeStateMutations(noclipPeerBadge, refreshCollabCounts);
+  observeStateMutations(marketHealthBadge, refreshRightIndicators);
+  observeStateMutations(ownerAuthStatusEl, refreshRightIndicators);
+
+  setInterval(refreshWorkspaceStats, 1250);
+  refreshWorkspaceStats();
+  refreshCollabCounts();
+  refreshRightIndicators();
 
   const formatResolveError = (message) => {
     const text = String(message || '').trim();
@@ -2525,6 +2695,8 @@ function bindUI() {
       routerAutoBtn.classList.toggle('active', !!CFG.routerAutoResolve);
       routerAutoBtn.textContent = CFG.routerAutoResolve ? 'Auto:On' : 'Auto';
     }
+    const toneMap = tone === 'ok' ? 'ok' : (tone === 'warn' ? 'warn' : (tone === 'error' ? 'error' : 'idle'));
+    rightDock.setButtonTone('router', toneMap);
   };
 
   if (routerInput) {
