@@ -52,6 +52,9 @@ class CloudflaredManager:
         self.binary_cache: Optional[str] = None
         self.install_attempted = False
         self.install_error = ""
+        self._launch_gate = threading.Lock()
+        self._last_launch_at: float = 0.0
+        self.stagger_seconds: float = max(0.0, float(self.settings.get("stagger_seconds", 8.0)))
 
         self.auto_install = bool(self.settings.get("auto_install_cloudflared", False))
         self.binary_path = str(self.settings.get("binary_path") or "").strip()
@@ -217,6 +220,18 @@ class CloudflaredManager:
                         state.next_restart_at = time.time() + self.restart_cap
                 stop_ev.wait(self.restart_cap)
                 continue
+
+            # Stagger launches so we don't hit Cloudflare rate limits
+            if self.stagger_seconds > 0:
+                with self._launch_gate:
+                    elapsed = time.time() - self._last_launch_at
+                    wait = self.stagger_seconds - elapsed
+                    if wait > 0:
+                        self._log(f"{service}: staggering launch ({wait:.1f}s)")
+                        stop_ev.wait(wait)
+                        if self.global_stop.is_set() or stop_ev.is_set():
+                            break
+                    self._last_launch_at = time.time()
 
             cmd = [binary, "tunnel", "--protocol", self.protocol, "--url", target]
             try:
