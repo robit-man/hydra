@@ -418,13 +418,13 @@ SERVICE_TARGETS = {
     "whisper_asr": {
         "target": "asr",
         "aliases": ["whisper_asr", "asr", "whisper"],
-        "ports": list(range(8126, 8136)),  # Port range 8126-8135 (allow fallback ports)
+        "ports": list(range(8126, 8130)),  # Port range 8126-8129 (non-overlapping)
         "endpoint": "http://127.0.0.1:8126",
     },
     "piper_tts": {
         "target": "tts",
         "aliases": ["piper_tts", "tts", "piper"],
-        "ports": list(range(8123, 8133)),  # Port range 8123-8132
+        "ports": list(range(8123, 8126)),  # Port range 8123-8125 (non-overlapping)
         "endpoint": "http://127.0.0.1:8123",
     },
     "ollama_farm": {
@@ -442,7 +442,7 @@ SERVICE_TARGETS = {
     "web_scrape": {
         "target": "web_scrape",
         "aliases": ["web_scrape", "browser", "chrome", "scrape"],
-        "ports": list(range(8130, 8140)),  # Port range 8130-8139
+        "ports": list(range(8130, 8140)),  # Port range 8130-8139 (non-overlapping)
         "endpoint": "http://127.0.0.1:8130",
     },
     "depth_any": {
@@ -1800,20 +1800,29 @@ class ServiceWatchdog:
         return True
 
     def _service_ports(self, service_name: str) -> List[int]:
-        info = SERVICE_TARGETS.get(service_name) or {}
-        ports = info.get("ports")
-        if isinstance(ports, list) and ports:
-            out: List[int] = []
-            for raw in ports:
-                with contextlib.suppress(Exception):
-                    port = int(raw)
-                    if 1 <= port <= 65535:
-                        out.append(port)
-            if out:
-                return sorted(set(out))
+        """Return only the primary port(s) the service binds to.
+
+        Previously this returned the full fallback range from SERVICE_TARGETS,
+        which caused overlapping ranges between services (e.g. piper_tts 8123-8132
+        vs web_scrape 8130-8139).  _free_ports would then try to clear ALL ports
+        in the range, killing other services that legitimately owned overlapping
+        ports — producing a rapid start/kill cycle.
+
+        Now we return only the health_port from the ServiceDefinition (the port
+        the service actually listens on).  The broader range in SERVICE_TARGETS is
+        kept for runtime port discovery and marketplace catalog only.
+        """
         definition = next((d for d in self.DEFINITIONS if d.name == service_name), None)
         if definition and definition.health_port > 0:
             return [int(definition.health_port)]
+        # Fallback: use just the first (primary) port from SERVICE_TARGETS
+        info = SERVICE_TARGETS.get(service_name) or {}
+        ports = info.get("ports")
+        if isinstance(ports, list) and ports:
+            with contextlib.suppress(Exception):
+                port = int(ports[0])
+                if 1 <= port <= 65535:
+                    return [port]
         return []
 
     def _terminate_process(self, state: ServiceState, timeout: float = 5.0) -> None:
@@ -4085,6 +4094,27 @@ class EnhancedUI:
             pass
 
     @staticmethod
+    def _copy_to_clipboard(text: str) -> bool:
+        """Copy text to system clipboard. Returns True on success."""
+        if not text:
+            return False
+        for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"], ["pbcopy"]):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc.communicate(input=text.encode("utf-8"), timeout=2.0)
+                if proc.returncode == 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _flash_status(self, message: str) -> None:
+        """Show a brief status message via the runtime log sink."""
+        self.append_runtime_log("ui", "INFO", message)
+
+    @staticmethod
     def _env_flag(name: str, default: bool = False) -> bool:
         raw = os.environ.get(name)
         if raw is None:
@@ -4279,9 +4309,21 @@ class EnhancedUI:
             f"transport: {selected_transport} • src: {source}",
             curses.color_pair(3) | curses.A_DIM,
         )
-        self._render_sync_bus_line(stdscr, info_row + 7, 2, sync_http_state, sync_nats_state, max(0, w - 4))
+        tunnel_active = sum(1 for svc_info in self.services.values() if str(svc_info.get("tunnel_state") or "") == "active")
+        tunnel_total = sum(1 for svc_info in self.services.values() if str(svc_info.get("tunnel_state") or "") not in ("", "inactive"))
+        if tunnel_total > 0:
+            self._safe_addstr(
+                stdscr,
+                info_row + 7,
+                2,
+                f"cf tunnels: {tunnel_active}/{tunnel_total} live",
+                curses.color_pair(7 if tunnel_active > 0 else 3) | (curses.A_BOLD if tunnel_active > 0 else curses.A_DIM),
+            )
+            self._render_sync_bus_line(stdscr, info_row + 8, 2, sync_http_state, sync_nats_state, max(0, w - 4))
+        else:
+            self._render_sync_bus_line(stdscr, info_row + 7, 2, sync_http_state, sync_nats_state, max(0, w - 4))
 
-        metadata_end = info_row + 7
+        metadata_end = info_row + (8 if tunnel_total > 0 else 7)
         art_top = min(max(1, metadata_end + 2), max(1, h - 3))
         base_x = max(4, w // 2)
         base_y = h - 3
@@ -4636,6 +4678,10 @@ class EnhancedUI:
         sync_nats_state = str(market_summary.get("sync_nats_state") or "").strip().lower() or "idle"
         auth_mode = "required" if self.owner_key_required else "disabled"
 
+        # Count active cloudflared tunnels
+        tunnel_active = sum(1 for svc_info in self.services.values() if str(svc_info.get("tunnel_state") or "") == "active")
+        tunnel_total = sum(1 for svc_info in self.services.values() if str(svc_info.get("tunnel_state") or "") not in ("", "inactive"))
+        tunnel_summary = f"tunnels: {tunnel_active}/{tunnel_total} active" if tunnel_total else "tunnels: none"
         preview_lines = [
             f"view: {selected_item}",
             self._truncate_text(descriptions.get(selected_item, "Select a section to inspect."), preview["w"]),
@@ -4645,6 +4691,7 @@ class EnhancedUI:
             f"provider: {self._truncate_text(provider, max(8, preview['w'] - 10))}",
             f"catalog: {published_count}/{service_count} published • healthy {healthy_count}",
             f"resolve: {transport} • {source}",
+            tunnel_summary,
         ]
 
         row = preview["y"]
@@ -4715,6 +4762,8 @@ class EnhancedUI:
         rows: List[Dict[str, Any]] = []
         for svc in services:
             info = self.services.get(svc, {})
+            tunnel_st = str(info.get("tunnel_state") or "").strip()
+            tunnel_display = {"active": "live", "starting": "wait", "stale": "stale", "error": "err", "inactive": "off"}.get(tunnel_st, "—")
             rows.append(
                 {
                     "kind": "service",
@@ -4722,6 +4771,7 @@ class EnhancedUI:
                     "enabled": bool(self.service_config.get(svc, True)),
                     "state": str(info.get("status", "unknown")),
                     "endpoint": self._service_endpoint_for(svc),
+                    "tunnel": tunnel_display,
                 }
             )
         rows.append(
@@ -4731,6 +4781,7 @@ class EnhancedUI:
                 "enabled": bool(self.port_isolation_enabled),
                 "state": "enforced" if self.port_isolation_enabled else "open",
                 "endpoint": "known endpoints only" if self.port_isolation_enabled else "all endpoints",
+                "tunnel": "",
             }
         )
         if not rows:
@@ -4747,14 +4798,16 @@ class EnhancedUI:
 
         marker_w = 3
         state_w = 6
-        svc_w = max(10, min(24, table["w"] // 3))
-        status_w = max(8, min(12, table["w"] // 5))
-        endpoint_w = max(6, table["w"] - marker_w - state_w - svc_w - status_w - 4)
+        svc_w = max(10, min(20, table["w"] // 4))
+        status_w = max(8, min(12, table["w"] // 6))
+        tunnel_w = max(5, min(7, table["w"] // 8))
+        endpoint_w = max(6, table["w"] - marker_w - state_w - svc_w - status_w - tunnel_w - 6)
         header = (
             f"{'':<{marker_w}} "
             f"{'ON':<{state_w}} "
             f"{'SERVICE':<{svc_w}} "
             f"{'STATE':<{status_w}} "
+            f"{'CF':<{tunnel_w}} "
             f"{'ENDPOINT':<{endpoint_w}}"
         )
         self._safe_addstr(stdscr, table["y"], table["x"], self._truncate_text(header, table["w"]), curses.color_pair(5) | curses.A_BOLD)
@@ -4770,12 +4823,14 @@ class EnhancedUI:
             on_state = "[x]" if enabled else "[ ]"
             name = self._truncate_text(str(item.get("name", "")), svc_w)
             state = self._truncate_text(str(item.get("state", "")), status_w)
+            tunnel = self._truncate_text(str(item.get("tunnel", "")), tunnel_w)
             endpoint = self._truncate_middle(item.get("endpoint", ""), endpoint_w)
             line = (
                 f"{marker:<{marker_w}} "
                 f"{on_state:<{state_w}} "
                 f"{name:<{svc_w}} "
                 f"{state:<{status_w}} "
+                f"{tunnel:<{tunnel_w}} "
                 f"{endpoint:<{endpoint_w}}"
             )
             attr = self._row_attr(selected=selected, muted=not enabled and item.get("kind") == "service")
@@ -5001,7 +5056,7 @@ class EnhancedUI:
         self._render_address_detail(stdscr, selected, detail_section[0], detail_section[1], detail_section[2], detail_section[3])
 
     def _render_ingress_view(self, stdscr, h, w):
-        """Render ingress endpoints with list/detail or QR mode."""
+        """Render ingress endpoints with NKN addresses and cloudflared tunnel URLs."""
         root = self._render_section_shell(
             stdscr,
             0,
@@ -5009,8 +5064,8 @@ class EnhancedUI:
             h,
             w,
             "Ingress",
-            subtitle="Service addresses and QR ingress targets",
-            footer="j/k move • enter QR • esc back",
+            subtitle="NKN addresses and Cloudflare tunnel endpoints",
+            footer="j/k move • enter QR • t toggle QR target • esc back",
         )
         if root["h"] <= 2:
             return
@@ -5030,10 +5085,10 @@ class EnhancedUI:
             return
 
         services = sorted(self.services.keys())
-        list_w = max(34, min(root["w"] - 22, int(root["w"] * 0.62)))
-        detail_w = max(18, root["w"] - list_w - 1)
-        lst = self._render_section_shell(stdscr, root["y"], root["x"], root["h"], list_w, "Service Addresses")
-        detail = self._render_section_shell(stdscr, root["y"], root["x"] + list_w + 1, root["h"], detail_w, "Selected Endpoint")
+        list_w = max(34, min(root["w"] - 28, int(root["w"] * 0.55)))
+        detail_w = max(24, root["w"] - list_w - 1)
+        lst = self._render_section_shell(stdscr, root["y"], root["x"], root["h"], list_w, "Service Endpoints")
+        detail = self._render_section_shell(stdscr, root["y"], root["x"] + list_w + 1, root["h"], detail_w, "Endpoint Detail")
 
         if not services:
             self._safe_addstr(stdscr, lst["y"], lst["x"], "(No services available)", curses.color_pair(3) | curses.A_DIM)
@@ -5047,10 +5102,11 @@ class EnhancedUI:
             self.scroll_offset = max(0, self.main_menu_index - visible_rows + 1)
         end_idx = min(len(services), self.scroll_offset + visible_rows)
 
-        svc_w = max(10, min(22, lst["w"] // 3))
-        state_w = 10
-        addr_w = max(8, lst["w"] - svc_w - state_w - 4)
-        header = f"{'':<2} {'SERVICE':<{svc_w}} {'STATE':<{state_w}} {'ADDRESS':<{addr_w}}"
+        svc_w = max(10, min(18, lst["w"] // 4))
+        state_w = 8
+        tunnel_w = max(6, min(10, lst["w"] // 6))
+        addr_w = max(8, lst["w"] - svc_w - state_w - tunnel_w - 6)
+        header = f"{'':<2} {'SERVICE':<{svc_w}} {'STATE':<{state_w}} {'TUNNEL':<{tunnel_w}} {'NKN ADDRESS':<{addr_w}}"
         self._safe_addstr(stdscr, lst["y"], lst["x"], self._truncate_text(header, lst["w"]), curses.color_pair(5) | curses.A_BOLD)
 
         for i in range(self.scroll_offset, end_idx):
@@ -5061,15 +5117,18 @@ class EnhancedUI:
             info = self.services.get(svc, {})
             addr = str(info.get("assigned_addr") or "—")
             state = str(info.get("status") or "unknown")
+            tunnel_state = str(info.get("tunnel_state") or "—")
+            tunnel_display = {"active": "live", "starting": "wait", "stale": "stale", "error": "err", "inactive": "off"}.get(tunnel_state, tunnel_state)
             selected = i == self.main_menu_index
             marker = "▶" if selected else " "
             line = (
                 f"{marker:<2} "
                 f"{self._truncate_text(svc, svc_w):<{svc_w}} "
                 f"{self._truncate_text(state, state_w):<{state_w}} "
+                f"{self._truncate_text(tunnel_display, tunnel_w):<{tunnel_w}} "
                 f"{self._truncate_middle(addr, addr_w):<{addr_w}}"
             )
-            muted = state not in {"ready", "online", "published"}
+            muted = state not in {"ready", "online", "published", "running"}
             self._safe_addstr(stdscr, row, lst["x"], self._truncate_text(line, lst["w"]), self._row_attr(selected=selected, muted=muted))
 
         selected_name = services[self.main_menu_index]
@@ -5077,18 +5136,45 @@ class EnhancedUI:
         selected_addr = str(selected_info.get("assigned_addr") or "—")
         selected_state = str(selected_info.get("status") or "unknown")
         endpoint = self._service_endpoint_for(selected_name)
+        tunnel_url = str(selected_info.get("tunnel_url") or "")
+        tunnel_stale = str(selected_info.get("tunnel_stale_url") or "")
+        tunnel_st = str(selected_info.get("tunnel_state") or "inactive")
+        tunnel_err = str(selected_info.get("tunnel_error") or "")
+
+        dw = max(8, detail["w"])
         detail_lines = [
-            f"service: {self._truncate_text(selected_name, max(8, detail['w'] - 9))}",
-            f"state: {selected_state}",
-            f"route: {self._truncate_text(endpoint, max(8, detail['w'] - 7))}",
-            f"addr: {self._truncate_middle(selected_addr, max(8, detail['w'] - 6))}",
-            "enter: render QR for this address",
+            ("service", self._truncate_text(selected_name, dw - 10)),
+            ("state", selected_state),
+            ("local", self._truncate_text(endpoint, dw - 8)),
+            ("", ""),
+            ("NKN", ""),
+            ("addr", self._truncate_middle(selected_addr, dw - 7)),
+            ("", ""),
+            ("Cloudflare Tunnel", ""),
+            ("status", tunnel_st),
         ]
+        if tunnel_url:
+            detail_lines.append(("url", self._truncate_middle(tunnel_url, dw - 6)))
+        elif tunnel_stale:
+            detail_lines.append(("stale", self._truncate_middle(tunnel_stale, dw - 8)))
+        if tunnel_err:
+            detail_lines.append(("error", self._truncate_text(tunnel_err, dw - 8)))
+        detail_lines.append(("", ""))
+        detail_lines.append(("", "enter: QR for NKN addr"))
+        if tunnel_url:
+            detail_lines.append(("", "t: QR for tunnel URL"))
+
         row = detail["y"]
-        for line in detail_lines:
+        for label, value in detail_lines:
             if row >= detail["y"] + detail["h"]:
                 break
-            self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(line, detail["w"]), curses.color_pair(3) | curses.A_DIM)
+            if label and label[0].isupper() and not value:
+                self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(label, dw), curses.color_pair(5) | curses.A_BOLD)
+            elif label:
+                text = f"{label}: {value}"
+                self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(text, dw), curses.color_pair(3) | curses.A_DIM)
+            elif value:
+                self._safe_addstr(stdscr, row, detail["x"], self._truncate_text(value, dw), curses.color_pair(3) | curses.A_DIM)
             row += 1
 
     def _render_egress_view(self, stdscr, h, w):
@@ -5372,6 +5458,8 @@ class EnhancedUI:
                 ord(' '): "toggle",
                 ord('s'): "save",
                 ord('S'): "save",
+                ord('t'): "tunnel_qr",
+                ord('T'): "tunnel_qr",
             },
             self.OVERLAY_MENU: {
                 ord('q'): "overlay.close",
@@ -5512,6 +5600,10 @@ class EnhancedUI:
         if cmd == "save":
             if self.ui_state == self.BASE_VIEW and self.base_view == "config":
                 self._save_service_config()
+            return
+        if cmd == "tunnel_qr":
+            if self.ui_state == self.BASE_VIEW and self.base_view == "ingress":
+                self._show_tunnel_qr()
             return
         if cmd == "log.line_up":
             self._scroll_runtime_logs(1)
@@ -5689,11 +5781,30 @@ class EnhancedUI:
             if 0 <= self.main_menu_index < len(services):
                 svc = services[self.main_menu_index]
                 info = self.services.get(svc, {})
-                addr = info.get("assigned_addr", "")
+                addr = str(info.get("assigned_addr") or "")
                 if addr and addr != "—":
                     self.qr_data = addr
-                    self.qr_label = f"Service: {svc}"
+                    self.qr_label = f"NKN: {svc}"
                     self.show_qr = True
+                    if self._copy_to_clipboard(addr):
+                        self._flash_status(f"Copied NKN address for {svc} to clipboard")
+
+    def _show_tunnel_qr(self):
+        """Show QR code for the selected service's cloudflared tunnel URL and copy to clipboard."""
+        services = sorted(self.services.keys())
+        if not (0 <= self.main_menu_index < len(services)):
+            return
+        svc = services[self.main_menu_index]
+        info = self.services.get(svc, {})
+        tunnel_url = str(info.get("tunnel_url") or "").strip()
+        if not tunnel_url:
+            tunnel_url = str(info.get("tunnel_stale_url") or "").strip()
+        if tunnel_url:
+            self.qr_data = tunnel_url
+            self.qr_label = f"Tunnel: {svc}"
+            self.show_qr = True
+            if self._copy_to_clipboard(tunnel_url):
+                self._flash_status(f"Copied tunnel URL for {svc} to clipboard")
 
     def _base_toggle(self):
         if self.base_view != "config":
@@ -8879,7 +8990,7 @@ class Router:
         }
         next_marketplace_nats_servers = _normalize_marketplace_nats_servers(
             next_marketplace_nats_cfg.get("broker_urls"),
-            fallback=["nats://127.0.0.1:4222"],
+            fallback=[],
         )
         normalized_broker_csv = ",".join(next_marketplace_nats_servers)
         if normalized_broker_csv != next_marketplace_nats_cfg["broker_urls"]:
@@ -9286,6 +9397,10 @@ class Router:
             status = str(state.get("state") or "inactive").strip().lower() or "inactive"
             active_url = str(state.get("active_url") or "").strip()
             stale_url = str(state.get("stale_url") or "").strip()
+            # Include NKN address for this service
+            with self.assignment_lock:
+                node_id = self.service_assignments.get(service_name)
+            nkn_addr = str(self.node_addresses.get(node_id) or "") if node_id else ""
             services[service_name] = {
                 "service": service_name,
                 "target_url": str(state.get("target_url") or "").strip(),
@@ -9294,6 +9409,8 @@ class Router:
                 "state": status,
                 "tunnel_url": active_url,
                 "stale_tunnel_url": stale_url,
+                "nkn_address": nkn_addr,
+                "nkn_node_id": node_id or "",
                 "error": str(state.get("last_error") or "").strip(),
                 "restarts": int(state.get("restarts") or 0),
                 "restart_failures": int(state.get("restart_failures") or 0),
@@ -12036,10 +12153,23 @@ class Router:
         cfg = cfg_override if isinstance(cfg_override, dict) else (
             self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
         )
-        return bool(
+        has_publish_or_subscribe = bool(
             self._as_bool(cfg.get("enable_publish"), True)
             or self._as_bool(cfg.get("enable_subscribe"), True)
         )
+        if not has_publish_or_subscribe:
+            return False
+        # Require explicitly configured broker URLs.  The auto-populated
+        # fallback default (nats://127.0.0.1:4222) should NOT enable NATS
+        # when no real broker is available — it just causes perpetual
+        # connection errors shown as NATS:ERROR in the UI.
+        raw_brokers = str(cfg.get("broker_urls") or "").strip()
+        broker_list = cfg.get("broker_urls_list")
+        if isinstance(broker_list, list) and broker_list:
+            return True
+        if raw_brokers and raw_brokers != "nats://127.0.0.1:4222":
+            return True
+        return False
 
     def _marketplace_nats_backoff_seconds(self, consecutive_failures: int = 0) -> int:
         cfg = self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
@@ -12056,7 +12186,7 @@ class Router:
         cfg = self.marketplace_nats_cfg if isinstance(self.marketplace_nats_cfg, dict) else {}
         brokers = _normalize_marketplace_nats_servers(
             cfg.get("broker_urls_list"),
-            fallback=_normalize_marketplace_nats_servers(cfg.get("broker_urls"), fallback=["nats://127.0.0.1:4222"]),
+            fallback=_normalize_marketplace_nats_servers(cfg.get("broker_urls"), fallback=[]),
         )
         catalog_subject = _normalize_marketplace_nats_subject(cfg.get("catalog_subject"), "hydra.market.catalog.v1")
         status_subject = _normalize_marketplace_nats_subject(cfg.get("status_subject"), "hydra.market.status.v1")
@@ -14598,6 +14728,20 @@ class Router:
             "assigned_node": node_id,
             "assigned_addr": addr,
         })
+        # Include cloudflared tunnel state so the UI can display tunnel URLs
+        tunnel_state = self._cloudflared_tunnel_state(service)
+        if tunnel_state:
+            info["tunnel_url"] = str(tunnel_state.get("active_url") or "")
+            info["tunnel_stale_url"] = str(tunnel_state.get("stale_url") or "")
+            info["tunnel_state"] = str(tunnel_state.get("state") or "inactive")
+            info["tunnel_running"] = bool(tunnel_state.get("running"))
+            info["tunnel_error"] = str(tunnel_state.get("last_error") or "")
+        else:
+            info.setdefault("tunnel_url", "")
+            info.setdefault("tunnel_stale_url", "")
+            info.setdefault("tunnel_state", "inactive")
+            info.setdefault("tunnel_running", False)
+            info.setdefault("tunnel_error", "")
         self.ui.update_service_info(service, info)
 
     def _status_monitor(self):
@@ -14634,16 +14778,17 @@ class Router:
                     elif sync_last_error:
                         sync_http_state = "error"
                     sync_nats_state = "idle"
-                    with self.marketplace_nats_state_lock:
-                        nats_connected = bool(self.marketplace_nats_state.get("connected"))
-                        nats_last_error = str(self.marketplace_nats_state.get("last_error") or "").strip()
-                        nats_publish_count = int(self.marketplace_nats_state.get("publish_count") or 0)
-                    if nats_connected:
-                        sync_nats_state = "connected"
-                    elif nats_last_error:
-                        sync_nats_state = "error"
-                    elif nats_publish_count > 0:
-                        sync_nats_state = "published"
+                    if self._marketplace_nats_enabled():
+                        with self.marketplace_nats_state_lock:
+                            nats_connected = bool(self.marketplace_nats_state.get("connected"))
+                            nats_last_error = str(self.marketplace_nats_state.get("last_error") or "").strip()
+                            nats_publish_count = int(self.marketplace_nats_state.get("publish_count") or 0)
+                        if nats_connected:
+                            sync_nats_state = "connected"
+                        elif nats_last_error:
+                            sync_nats_state = "error"
+                        elif nats_publish_count > 0:
+                            sync_nats_state = "published"
                     self.ui.set_marketplace_summary(
                         {
                             "service_count": int(ui_summary.get("service_count") or 0),

@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/home/roko/.local/share/ai-writing-guide/agentic/code/frameworks/sdlc-complete/**)",
+      "Read(/home/roko/github_repos/hydra/**)",
+      "Bash(git:*)",
+      "Bash(npm:*)",
+      "Bash(node:*)",
+      "Write(./**)",
+      "Glob",
+      "Grep"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./secrets/**)",
+      "Read(./**/.env)",
+      "Bash(rm:-rf)",
+      "Bash(curl:*)",
+      "WebFetch"
+    ]
+  }
+}
