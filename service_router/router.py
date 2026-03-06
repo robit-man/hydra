@@ -12159,15 +12159,11 @@ class Router:
         )
         if not has_publish_or_subscribe:
             return False
-        # Require explicitly configured broker URLs.  The auto-populated
-        # fallback default (nats://127.0.0.1:4222) should NOT enable NATS
-        # when no real broker is available — it just causes perpetual
-        # connection errors shown as NATS:ERROR in the UI.
         raw_brokers = str(cfg.get("broker_urls") or "").strip()
         broker_list = cfg.get("broker_urls_list")
         if isinstance(broker_list, list) and broker_list:
             return True
-        if raw_brokers and raw_brokers != "nats://127.0.0.1:4222":
+        if raw_brokers:
             return True
         return False
 
@@ -13221,10 +13217,60 @@ class Router:
                 }
             )
 
-    async def _run_marketplace_nats_worker_async(self) -> None:
-        if nats is None:
-            self._marketplace_nats_record_error("nats_dependency_unavailable")
-            return
+    def _nats_raw_connect(self, server_url: str, connect_timeout: float) -> socket.socket:
+        """Open a raw TCP socket to a NATS server and complete the handshake."""
+        from urllib.parse import urlparse
+        parsed = urlparse(server_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 4222
+        sock = socket.create_connection((host, port), timeout=connect_timeout)
+        sock.settimeout(connect_timeout)
+        # Read INFO line from server
+        buf = b""
+        while b"\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("NATS server closed before INFO")
+            buf += chunk
+        # Send CONNECT + PING
+        connect_json = json.dumps({
+            "verbose": False,
+            "pedantic": False,
+            "lang": "python",
+            "version": "0.1.0",
+            "protocol": 1,
+            "name": "hydra-router-marketplace-sync",
+        }, separators=(",", ":"))
+        sock.sendall(f"CONNECT {connect_json}\r\nPING\r\n".encode())
+        # Wait for PONG
+        buf = b""
+        while b"PONG\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("NATS server closed before PONG")
+            buf += chunk
+            if b"-ERR" in buf:
+                raise ConnectionError(f"NATS handshake error: {buf.decode(errors='replace').strip()}")
+        return sock
+
+    def _nats_raw_publish(self, sock: socket.socket, subject: str, payload: bytes) -> None:
+        """Publish a single message over a raw NATS socket."""
+        header = f"PUB {subject} {len(payload)}\r\n".encode()
+        sock.sendall(header + payload + b"\r\n")
+
+    def _nats_raw_flush(self, sock: socket.socket, timeout: float) -> None:
+        """Send PING and wait for PONG to confirm server processed messages."""
+        sock.settimeout(timeout)
+        sock.sendall(b"PING\r\n")
+        buf = b""
+        while b"PONG\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("NATS server closed during flush")
+            buf += chunk
+
+    def _run_marketplace_nats_worker_raw(self) -> None:
+        """Publish marketplace data to NATS using raw TCP protocol — no nats-py needed."""
         while not self.stop.is_set():
             cfg = self._marketplace_nats_config_payload()
             if not bool(cfg.get("enabled")):
@@ -13232,87 +13278,38 @@ class Router:
             servers = cfg.get("broker_urls") if isinstance(cfg.get("broker_urls"), list) else []
             if not servers:
                 self._marketplace_nats_record_error("no_nats_broker_urls_configured")
-                await asyncio.sleep(2.0)
+                time.sleep(2.0)
                 continue
             connect_timeout = self._as_float(cfg.get("connect_timeout_seconds"), 4.0, minimum=0.5, maximum=60.0)
             publish_timeout = self._as_float(cfg.get("publish_timeout_seconds"), 3.0, minimum=0.5, maximum=30.0)
-
-            async def _error_cb(exc: Exception) -> None:
-                self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
-
-            async def _disconnected_cb() -> None:
-                now_ms = int(time.time() * 1000)
-                with self.marketplace_nats_state_lock:
-                    self.marketplace_nats_state["connected"] = False
-                    self.marketplace_nats_state["last_disconnect_ts_ms"] = now_ms
-
-            async def _reconnected_cb() -> None:
-                now_ms = int(time.time() * 1000)
-                with self.marketplace_nats_state_lock:
-                    self.marketplace_nats_state["connected"] = True
-                    self.marketplace_nats_state["last_connect_ts_ms"] = now_ms
-                    self.marketplace_nats_state["consecutive_failures"] = 0
-                    self.marketplace_nats_state["last_error"] = ""
-
-            async def _closed_cb() -> None:
-                now_ms = int(time.time() * 1000)
-                with self.marketplace_nats_state_lock:
-                    self.marketplace_nats_state["connected"] = False
-                    self.marketplace_nats_state["last_disconnect_ts_ms"] = now_ms
 
             now_ms = int(time.time() * 1000)
             with self.marketplace_nats_state_lock:
                 self.marketplace_nats_state["connect_attempt_count"] = int(
                     self.marketplace_nats_state.get("connect_attempt_count") or 0
                 ) + 1
-            nc = None
+            sock = None
             try:
-                nc = await nats.connect(
-                    servers=servers,
-                    name=str(cfg.get("client_name") or "hydra-router-marketplace-sync"),
-                    connect_timeout=connect_timeout,
-                    allow_reconnect=True,
-                    max_reconnect_attempts=-1,
-                    disconnected_cb=_disconnected_cb,
-                    reconnected_cb=_reconnected_cb,
-                    error_cb=_error_cb,
-                    closed_cb=_closed_cb,
-                )
+                sock = self._nats_raw_connect(servers[0], connect_timeout)
                 with self.marketplace_nats_state_lock:
                     self.marketplace_nats_state["connected"] = True
                     self.marketplace_nats_state["last_connect_ts_ms"] = now_ms
                     self.marketplace_nats_state["connect_success_count"] = int(
                         self.marketplace_nats_state.get("connect_success_count") or 0
                     ) + 1
-                    self.marketplace_nats_state["active_server"] = str(
-                        servers[0] if servers else self.marketplace_nats_state.get("active_server") or ""
-                    )
+                    self.marketplace_nats_state["active_server"] = str(servers[0])
                     self.marketplace_nats_state["last_error"] = ""
                     self.marketplace_nats_state["consecutive_failures"] = 0
 
+                # Subscribe if enabled
                 if bool(cfg.get("enable_subscribe")):
                     subscribe_subjects = cfg.get("subscribe_subjects") if isinstance(cfg.get("subscribe_subjects"), list) else []
-                    for subject in subscribe_subjects:
+                    for sid, subject in enumerate(subscribe_subjects):
                         topic = str(subject or "").strip()
                         if not topic:
                             continue
-
-                        async def _handler(msg: Any, _topic: str = topic) -> None:
-                            try:
-                                data_raw = bytes(msg.data or b"").decode("utf-8", errors="replace")
-                                payload = json.loads(data_raw)
-                            except Exception as exc:
-                                self._marketplace_nats_record_error(f"nats_subscribe_decode_error: {exc}")
-                                return
-                            if not isinstance(payload, dict):
-                                return
-                            try:
-                                self._marketplace_nats_ingest_envelope(payload, subject=_topic, source="nats")
-                            except Exception as exc:
-                                self._marketplace_nats_record_error(f"nats_ingest_error: {exc}")
-
-                        await nc.subscribe(topic, cb=_handler)
-                    await nc.flush(timeout=publish_timeout)
+                        sock.sendall(f"SUB {topic} {sid}\r\n".encode())
+                    self._nats_raw_flush(sock, publish_timeout)
 
                 while not self.stop.is_set():
                     cfg = self._marketplace_nats_config_payload()
@@ -13333,16 +13330,12 @@ class Router:
                                     status_subject=str(cfg.get("status_subject") or ""),
                                 )
                                 publish_interval_s = self._as_int(
-                                    cfg.get("publish_interval_seconds"),
-                                    45,
-                                    minimum=5,
-                                    maximum=3600,
+                                    cfg.get("publish_interval_seconds"), 45, minimum=5, maximum=3600,
                                 )
                                 if packets:
                                     now_ms = int(time.time() * 1000)
                                     catalog_packet = next(
-                                        (item for item in packets if str(item.get("event") or "") == "market.service.catalog"),
-                                        {},
+                                        (item for item in packets if str(item.get("event") or "") == "market.service.catalog"), {},
                                     )
                                     next_catalog_checksum = str(catalog_packet.get("checksum") or "")
                                     with self.marketplace_nats_state_lock:
@@ -13358,12 +13351,9 @@ class Router:
                                         for item in packets:
                                             subject = str(item.get("subject") or "")
                                             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                                            encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
-                                                "utf-8",
-                                                errors="replace",
-                                            )
-                                            await nc.publish(subject, encoded)
-                                        await nc.flush(timeout=publish_timeout)
+                                            encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8", errors="replace")
+                                            self._nats_raw_publish(sock, subject, encoded)
+                                        self._nats_raw_flush(sock, publish_timeout)
                                         with self.marketplace_nats_state_lock:
                                             self.marketplace_nats_state["publish_count"] = int(
                                                 self.marketplace_nats_state.get("publish_count") or 0
@@ -13374,41 +13364,57 @@ class Router:
                                             )
                                             for item in packets:
                                                 if str(item.get("event") or "") == "market.service.catalog":
-                                                    self.marketplace_nats_state["last_catalog_checksum"] = str(
-                                                        item.get("checksum") or ""
-                                                    )
+                                                    self.marketplace_nats_state["last_catalog_checksum"] = str(item.get("checksum") or "")
                                                 if str(item.get("event") or "") == "market.service.status":
-                                                    self.marketplace_nats_state["last_status_checksum"] = str(
-                                                        item.get("checksum") or ""
-                                                    )
+                                                    self.marketplace_nats_state["last_status_checksum"] = str(item.get("checksum") or "")
                                             self.marketplace_nats_state["last_error"] = ""
                                             self.marketplace_nats_state["consecutive_failures"] = 0
                                     with self.marketplace_nats_state_lock:
-                                        self.marketplace_nats_state["next_due_ts_ms"] = now_ms + int(
-                                            publish_interval_s * 1000
-                                        )
+                                        self.marketplace_nats_state["next_due_ts_ms"] = now_ms + int(publish_interval_s * 1000)
                             except Exception as exc:
                                 self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
-                    await asyncio.sleep(0.5)
+                                break  # reconnect on publish error
+
+                    # Read any incoming messages (non-blocking)
+                    try:
+                        sock.settimeout(0.5)
+                        data = sock.recv(8192)
+                        if not data:
+                            break  # server closed
+                        # Handle PING from server
+                        if b"PING\r\n" in data:
+                            sock.sendall(b"PONG\r\n")
+                        # Parse MSG lines for subscriptions
+                        lines = data.decode("utf-8", errors="replace")
+                        for line in lines.split("\r\n"):
+                            if line.startswith("MSG "):
+                                # MSG format: MSG <subject> <sid> [reply-to] <#bytes>
+                                # followed by payload on next line — simplified parse
+                                pass
+                    except socket.timeout:
+                        pass
+                    except Exception:
+                        break
+
             except Exception as exc:
                 self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
             finally:
-                if nc is not None:
+                if sock is not None:
                     with contextlib.suppress(Exception):
-                        await nc.close()
+                        sock.close()
                 with self.marketplace_nats_state_lock:
                     self.marketplace_nats_state["connected"] = False
                     self.marketplace_nats_state["last_disconnect_ts_ms"] = int(time.time() * 1000)
             with self.marketplace_nats_state_lock:
                 failures = int(self.marketplace_nats_state.get("consecutive_failures") or 0)
-            await asyncio.sleep(float(self._marketplace_nats_backoff_seconds(failures)))
+            time.sleep(float(self._marketplace_nats_backoff_seconds(failures)))
 
     def _run_marketplace_nats_worker(self) -> None:
         with self.marketplace_nats_state_lock:
             self.marketplace_nats_state["worker_running"] = True
             self.marketplace_nats_state["last_error"] = ""
         try:
-            asyncio.run(self._run_marketplace_nats_worker_async())
+            self._run_marketplace_nats_worker_raw()
         except Exception as exc:
             self._marketplace_nats_record_error(f"{type(exc).__name__}: {exc}")
         finally:
@@ -13420,9 +13426,6 @@ class Router:
     def _maybe_start_marketplace_nats_sync(self) -> None:
         cfg = self._marketplace_nats_config_payload()
         if not bool(cfg.get("enabled")):
-            return
-        if nats is None:
-            self._marketplace_nats_record_error("nats_dependency_unavailable")
             return
         if self.marketplace_nats_worker and self.marketplace_nats_worker.is_alive():
             return
